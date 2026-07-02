@@ -1,0 +1,11 @@
+# Build artifacts
+/fyne-cross/
+/release/
+/expsync
+/expsync.exe
+
+# Go
+*.test
+
+# macOS
+.DS_Store

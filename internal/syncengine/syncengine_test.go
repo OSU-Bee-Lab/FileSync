@@ -1,0 +1,324 @@
+package syncengine
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sort"
+	"testing"
+	"time"
+
+	_ "github.com/rclone/rclone/backend/local"
+)
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedExperiment builds one schema-shaped experiment directory under
+// <root>/<name>/, with an mp3 (should be synced) and a wav (should be
+// filtered out) nested under a deployment-date/recorder tree.
+func seedExperiment(t *testing.T, root, name string) {
+	t.Helper()
+	base := filepath.Join(root, name)
+	writeFile(t, filepath.Join(base, "metadata.csv"), "recorder,site\nRecorderA,WARS\n")
+	writeFile(t, filepath.Join(base, "README.txt"), "test experiment\n")
+	writeFile(t, filepath.Join(base, "2026-06-23", "RecorderA", "260623_0900.mp3"), "audio-bytes-1")
+	writeFile(t, filepath.Join(base, "2026-06-23", "RecorderA", "260623_0905.mp3"), "audio-bytes-2")
+	writeFile(t, filepath.Join(base, "2026-06-23", "RecorderA", "260623_0905.wav"), "not-mp3-should-be-filtered")
+}
+
+func localLoc(root string) Location {
+	return Location{ID: root, Name: root, Kind: LocationLocal, RootPath: root}
+}
+
+func names(entries []ExperimentEntry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Name
+	}
+	sort.Strings(out)
+	return out
+}
+
+func childNames(entries []Entry) []string {
+	out := make([]string, len(entries))
+	for i, e := range entries {
+		out[i] = e.Name
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestListExperiments(t *testing.T) {
+	root := t.TempDir()
+	seedExperiment(t, root, "Luke Hearon - Golden Forage")
+	seedExperiment(t, root, "Luke Hearon - Mustard Cover Crop")
+
+	got, err := ListExperiments(context.Background(), localLoc(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"Luke Hearon - Golden Forage", "Luke Hearon - Mustard Cover Crop"}
+	if got := names(got); !equalStrings(got, want) {
+		t.Fatalf("ListExperiments = %v, want %v", got, want)
+	}
+}
+
+func TestListChildren_AtEachDepth(t *testing.T) {
+	root := t.TempDir()
+	seedExperiment(t, root, "Luke - Zucchini")
+	loc := localLoc(root)
+	ctx := context.Background()
+
+	top, err := ListChildren(ctx, loc, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := childNames(top), []string{"Luke - Zucchini"}; !equalStrings(got, want) {
+		t.Fatalf("depth 0 = %v, want %v", got, want)
+	}
+
+	inExperiment, err := ListChildren(ctx, loc, "Luke - Zucchini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"2026-06-23", "README.txt", "metadata.csv"}
+	if got := childNames(inExperiment); !equalStrings(got, want) {
+		t.Fatalf("depth 1 = %v, want %v", got, want)
+	}
+
+	inDate, err := ListChildren(ctx, loc, "Luke - Zucchini/2026-06-23")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := childNames(inDate), []string{"RecorderA"}; !equalStrings(got, want) {
+		t.Fatalf("depth 2 = %v, want %v", got, want)
+	}
+
+	inRecorder, err := ListChildren(ctx, loc, "Luke - Zucchini/2026-06-23/RecorderA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"260623_0900.mp3", "260623_0905.mp3", "260623_0905.wav"}
+	if got := childNames(inRecorder); !equalStrings(got, want) {
+		t.Fatalf("depth 3 = %v, want %v", got, want)
+	}
+}
+
+func TestPreviewAndStartBackup_WholeExperiment(t *testing.T) {
+	srcRoot, dstRoot := t.TempDir(), t.TempDir()
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src, dst := localLoc(srcRoot), localLoc(dstRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+
+	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.CopyCount != 2 {
+		t.Fatalf("preview.CopyCount = %d, want 2 (mp3s only, wav filtered)", preview.CopyCount)
+	}
+
+	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	final := drain(t, progress)
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+	_ = job
+
+	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0900.mp3"))
+	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.mp3"))
+	assertFileMissing(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.wav"))
+}
+
+// TestDownloadPreservesSubPath reproduces the exact scenario from the
+// feature request: downloading a sub-path deeper than one experiment (a
+// single deployment date) into an arbitrary local folder must preserve
+// that sub-path's structure under the destination, not flatten the files
+// into the destination root.
+func TestDownloadPreservesSubPath(t *testing.T) {
+	srcRoot := t.TempDir()
+	destFolder := filepath.Join(t.TempDir(), "foo") // e.g. "/Downloads/foo"
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src := localLoc(srcRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+	relPath := "Luke - Zucchini/2026-06-23"
+
+	preview, err := PreviewDownload(ctx, src, relPath, destFolder, fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.CopyCount != 2 {
+		t.Fatalf("preview.CopyCount = %d, want 2", preview.CopyCount)
+	}
+
+	_, progress := StartDownload(ctx, src, relPath, destFolder, fset, true, preview)
+	final := drain(t, progress)
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+
+	// Must land at <destFolder>/Luke - Zucchini/2026-06-23/..., not
+	// <destFolder>/260623_0900.mp3.
+	assertFileExists(t, filepath.Join(destFolder, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0900.mp3"))
+	assertFileExists(t, filepath.Join(destFolder, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.mp3"))
+}
+
+// TestCopyPreserving_NeverDeletesDestinationOnlyFiles is the single most
+// important regression test in this codebase: a future refactor that
+// accidentally swaps sync.CopyDir for sync.Sync would silently start
+// deleting destination-only files, which is exactly the catastrophe the
+// lab's existing "never use rclone sync" rule exists to prevent.
+func TestCopyPreserving_NeverDeletesDestinationOnlyFiles(t *testing.T) {
+	srcRoot, dstRoot := t.TempDir(), t.TempDir()
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src, dst := localLoc(srcRoot), localLoc(dstRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+
+	extraFile := filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "extra_not_in_source.mp3")
+	writeFile(t, extraFile, "must survive the copy")
+
+	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	final := drain(t, progress)
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+
+	assertFileExists(t, extraFile)
+}
+
+func TestExperimentNameWithSpecialCharacters(t *testing.T) {
+	srcRoot, dstRoot := t.TempDir(), t.TempDir()
+	name := "O'Brien - Test #1 (draft)"
+	seedExperiment(t, srcRoot, name)
+	src, dst := localLoc(srcRoot), localLoc(dstRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+
+	exps, err := ListExperiments(ctx, src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exps) != 1 || exps[0].Name != name {
+		t.Fatalf("ListExperiments = %v, want [%q]", exps, name)
+	}
+
+	preview, err := PreviewBackup(ctx, src, dst, name, fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.CopyCount != 2 {
+		t.Fatalf("preview.CopyCount = %d, want 2", preview.CopyCount)
+	}
+	_, progress := StartBackup(ctx, src, dst, name, fset, true, preview)
+	final := drain(t, progress)
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+	assertFileExists(t, filepath.Join(dstRoot, name, "2026-06-23", "RecorderA", "260623_0900.mp3"))
+}
+
+func TestProgressReachesCompletion(t *testing.T) {
+	srcRoot, dstRoot := t.TempDir(), t.TempDir()
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src, dst := localLoc(srcRoot), localLoc(dstRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+
+	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	final := drain(t, progress)
+
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+	if final.BytesDone != final.BytesTotal {
+		t.Fatalf("BytesDone = %d, BytesTotal = %d, want equal", final.BytesDone, final.BytesTotal)
+	}
+	if final.FilesDone != final.FilesTotal {
+		t.Fatalf("FilesDone = %d, FilesTotal = %d, want equal", final.FilesDone, final.FilesTotal)
+	}
+}
+
+func TestCancelDoesNotHang(t *testing.T) {
+	srcRoot, dstRoot := t.TempDir(), t.TempDir()
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src, dst := localLoc(srcRoot), localLoc(dstRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+
+	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	job.Cancel()
+
+	final := drain(t, progress)
+	if final.Status != JobDone && final.Status != JobCanceled && final.Status != JobError {
+		t.Fatalf("final status = %v, want a terminal status", final.Status)
+	}
+}
+
+// drain reads a progress channel to closure and returns the last snapshot,
+// failing the test if it doesn't complete within a generous timeout
+// (guards against the channel never closing, i.e. a hang).
+func drain(t *testing.T, progress <-chan ProgressSnapshot) ProgressSnapshot {
+	t.Helper()
+	var last ProgressSnapshot
+	timeout := time.After(10 * time.Second)
+	for {
+		select {
+		case snap, ok := <-progress:
+			if !ok {
+				return last
+			}
+			last = snap
+		case <-timeout:
+			t.Fatal("progress channel did not close within timeout")
+		}
+	}
+}
+
+func assertFileExists(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected file to exist: %s (%v)", path, err)
+	}
+}
+
+func assertFileMissing(t *testing.T, path string) {
+	t.Helper()
+	if _, err := os.Stat(path); err == nil {
+		t.Fatalf("expected file to be filtered out, but it exists: %s", path)
+	}
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
