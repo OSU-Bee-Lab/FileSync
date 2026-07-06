@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -71,6 +72,21 @@ func showAddLocation(s *state) {
 	remotePathEntry := widget.NewEntry()
 	remotePathEntry.SetPlaceHolder("Path within the remote, e.g. \"Bee Lab Docs\" (leave blank for root)")
 
+	// remoteReady tracks whether the rclone remote backing this new location
+	// has already been created and authorized this session, so "Browse" and
+	// "Save" don't each trigger a separate sign-in.
+	var remoteReady bool
+	var createdRemoteName string
+	// capturedDrives holds the drives an OAuth remote offered at config time
+	// (empty for single-drive or non-drive backends). driveConfirmed records
+	// whether the user has settled on one (which SetRemoteDrive persists onto
+	// the remote) before the location is saved.
+	var capturedDrives []syncengine.DriveInfo
+	var driveConfirmed bool
+	// Assigned once ensureRemote exists (below); referenced by rebuild, which
+	// only runs it at click time, so the nil gap during setup is harmless.
+	var browseRemoteBtn *widget.Button
+
 	siteURLEntry := widget.NewEntry()
 	siteURLEntry.SetPlaceHolder("e.g. https://contoso.sharepoint.com/sites/mysite (leave blank for personal/business OneDrive)")
 
@@ -93,11 +109,20 @@ func showAddLocation(s *state) {
 		if kind == kindLabels[0] {
 			dynamicArea.Add(container.NewHBox(chooseFolderBtn, localPathLabel))
 			saveBtn.SetText("Save")
-		} else {
-			if kind == "SharePoint / OneDrive" {
-				dynamicArea.Add(widget.NewForm(&widget.FormItem{Text: "SharePoint site URL", Widget: siteURLEntry}))
+		} else if kind == "SharePoint / OneDrive" {
+			// OneDrive/SharePoint: the user gives only the site URL (a folder
+			// baked into a copied library URL is parsed out automatically).
+			// "Next" authorizes then opens the browser to pick the exact
+			// document library and folder - there's no path to type here.
+			dynamicArea.Add(widget.NewForm(&widget.FormItem{Text: "SharePoint site URL", Widget: siteURLEntry}))
+			dynamicArea.Add(remoteFieldsBox)
+			rebuildFields(kindBackends[kind])
+			if len(advancedFieldsBox.Objects) > 0 {
+				dynamicArea.Add(advancedAccordion)
 			}
-			dynamicArea.Add(widget.NewForm(&widget.FormItem{Text: "Path within remote", Widget: remotePathEntry}))
+			saveBtn.SetText("Next")
+		} else {
+			dynamicArea.Add(widget.NewForm(&widget.FormItem{Text: "Path within remote", Widget: container.NewBorder(nil, nil, nil, browseRemoteBtn, remotePathEntry)}))
 			dynamicArea.Add(remoteFieldsBox)
 			rebuildFields(kindBackends[kind])
 			if len(advancedFieldsBox.Objects) > 0 {
@@ -113,6 +138,99 @@ func showAddLocation(s *state) {
 	}
 	kindSelect.OnChanged = func(string) { rebuild() }
 	rebuild()
+
+	// ensureRemote makes sure the rclone remote backing this new location
+	// exists and is authorized, running the browser sign-in the first time it
+	// is needed. Both "Browse" (to list the remote's folders) and "Save" need
+	// a live remote, so they share this rather than each authorizing - and
+	// once created, later calls reuse it instead of re-signing-in. onReady
+	// runs on the UI goroutine once the remote is ready.
+	ensureRemote := func(onReady func()) {
+		if strings.TrimSpace(nameEntry.Text) == "" {
+			dialog.ShowInformation("Name required", "Give this location a name first.", s.win)
+			return
+		}
+		if remoteReady {
+			onReady()
+			return
+		}
+		bt := kindBackends[kindSelect.Selected]
+		fields := map[string]string{}
+		for k, w := range fieldWidgets {
+			fields[k] = fieldText(w)
+		}
+		if bt == syncengine.BackendOneDrive {
+			// A pasted library URL may carry a folder; only the clean site URL
+			// steers rclone. The folder is handled separately (see Next).
+			siteURL, _ := syncengine.ParseSharePointURL(siteURLEntry.Text)
+			fields[syncengine.SharePointSiteURLKey] = siteURL
+		}
+		remoteName := remoteNameSanitizer.ReplaceAllString(strings.TrimSpace(nameEntry.Text), "-")
+
+		// The drive picker doesn't prompt here: it just records the drives on
+		// offer and picks the first so config can finish and yield a token.
+		// The real choice is made afterwards in the browser (openBrowser),
+		// which can list a drive's contents so the user picks by sight.
+		capturedDrives = nil
+		chooseDrive := func(drives []syncengine.DriveInfo) (syncengine.DriveInfo, error) {
+			capturedDrives = drives
+			return drives[0], nil
+		}
+
+		saveBtn.Disable()
+		runRemoteOAuth(s, "Connecting...", "Setting up "+kindSelect.Selected+"...",
+			func(ctx context.Context, onAuthURL func(url string)) error {
+				return syncengine.CreateRemote(ctx, remoteName, bt, fields, onAuthURL, chooseDrive)
+			},
+			func(err error) {
+				saveBtn.Enable()
+				if err != nil {
+					if errors.Is(err, context.Canceled) {
+						return
+					}
+					dialog.ShowError(fmt.Errorf("couldn't set up remote: %w", err), s.win)
+					return
+				}
+				remoteReady = true
+				createdRemoteName = remoteName
+				// A single-drive (or driveless) remote needs no picking: its
+				// one drive is already what config committed to.
+				if len(capturedDrives) == 1 {
+					driveConfirmed = true
+				}
+				onReady()
+			})
+	}
+
+	// openBrowser drills into the remote (drive list first when several were
+	// offered, then folders) so the user confirms an exact location. On
+	// confirm it persists the chosen drive and fills in the path, then runs
+	// then() - letting Save chain straight into saving the location.
+	openBrowser := func(start string, then func()) {
+		drives := capturedDrives
+		if driveConfirmed {
+			// Drive already settled - browse folders within it, no drive list.
+			drives = nil
+		}
+		browseRemoteSetup(s, createdRemoteName, start, drives,
+			func(d syncengine.DriveInfo, relPath string) {
+				if d.ID != "" {
+					if err := syncengine.SetRemoteDrive(createdRemoteName, d); err != nil {
+						dialog.ShowError(fmt.Errorf("couldn't set drive: %w", err), s.win)
+						return
+					}
+					driveConfirmed = true
+				}
+				remotePathEntry.SetText(relPath)
+				if then != nil {
+					then()
+				}
+			})
+	}
+
+	browseRemoteBtn = widget.NewButton("Browse...", func() {
+		ensureRemote(func() { openBrowser(strings.TrimSpace(remotePathEntry.Text), nil) })
+	})
 
 	saveBtn.OnTapped = func() {
 		name := strings.TrimSpace(nameEntry.Text)
@@ -136,47 +254,35 @@ func showAddLocation(s *state) {
 			return
 		}
 
-		bt := kindBackends[kindSelect.Selected]
-		fields := map[string]string{}
-		for k, w := range fieldWidgets {
-			fields[k] = fieldText(w)
-		}
-		if bt == syncengine.BackendOneDrive {
-			fields[syncengine.SharePointSiteURLKey] = strings.TrimSpace(siteURLEntry.Text)
-		}
-		remoteName := remoteNameSanitizer.ReplaceAllString(name, "-")
-
-		saveBtn.Disable()
-		progressLabel := widget.NewLabel("Setting up " + kindSelect.Selected + "...")
-		progressDialog := dialog.NewCustom("Connecting...", "Please wait", progressLabel, s.win)
-		progressDialog.Show()
-
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-			defer cancel()
-			err := syncengine.CreateRemote(ctx, remoteName, bt, fields, func(url string) {
-				fyne.Do(func() {
-					progressLabel.SetText("Opening your browser to sign in...\nIf it doesn't open, visit:\n" + url)
-				})
-			})
-			fyne.Do(func() {
-				progressDialog.Hide()
-				saveBtn.Enable()
-				if err != nil {
-					dialog.ShowError(fmt.Errorf("couldn't set up remote: %w", err), s.win)
-					return
-				}
+		isOneDrive := kindBackends[kindSelect.Selected] == syncengine.BackendOneDrive
+		ensureRemote(func() {
+			finalize := func() {
 				s.cfg.Locations = append(s.cfg.Locations, syncengine.Location{
 					ID:         newLocationID(),
-					Name:       name,
+					Name:       strings.TrimSpace(nameEntry.Text),
 					Kind:       syncengine.LocationRemote,
-					RemoteName: remoteName,
+					RemoteName: createdRemoteName,
 					RootPath:   strings.TrimSpace(remotePathEntry.Text),
 				})
 				s.saveConfig()
 				showLocations(s)
-			})
-		}()
+			}
+			// OneDrive/SharePoint: "Next" always opens the browser to choose
+			// the document library and folder (pre-positioned at any folder
+			// parsed out of the pasted URL), then saves on confirm.
+			if isOneDrive {
+				_, bakedPath := syncengine.ParseSharePointURL(siteURLEntry.Text)
+				openBrowser(bakedPath, finalize)
+				return
+			}
+			// Other remotes: if several drives were offered and none picked,
+			// browse to one first; otherwise save straight away.
+			if !driveConfirmed && len(capturedDrives) > 1 {
+				openBrowser(strings.TrimSpace(remotePathEntry.Text), finalize)
+				return
+			}
+			finalize()
+		})
 	}
 	saveBtn.Importance = widget.HighImportance
 

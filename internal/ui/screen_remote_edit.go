@@ -25,10 +25,11 @@ func showEditLocation(s *state, id int) {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(loc.Name)
 
-	saveBtn := widget.NewButton("Save Changes", nil)
+	saveBtn := widget.NewButton("Save", nil)
 	backBtn := widget.NewButton("Cancel", func() { showLocations(s) })
 
 	var body *fyne.Container
+	showReauth := false
 
 	if loc.Kind == syncengine.LocationLocal {
 		localPath := loc.RootPath
@@ -80,8 +81,13 @@ func showEditLocation(s *state, id int) {
 		}
 
 		remotePathEntry := widget.NewEntry()
-		remotePathEntry.SetPlaceHolder("Path within the remote, e.g. \"Bee Lab Docs\" (leave blank for root)")
+		remotePathEntry.SetPlaceHolder("Path within remote (blank = root)")
 		remotePathEntry.SetText(loc.RootPath)
+		browseRemoteBtn := widget.NewButton("Browse...", func() {
+			browseRemoteSetup(s, loc.RemoteName, strings.TrimSpace(remotePathEntry.Text), nil, func(_ syncengine.DriveInfo, relPath string) {
+				remotePathEntry.SetText(relPath)
+			})
+		})
 
 		fieldWidgets := map[string]fyne.CanvasObject{}
 		remoteFieldsBox := container.NewVBox()
@@ -90,7 +96,7 @@ func showEditLocation(s *state, id int) {
 		populateRemoteFields(s, bt, currentFields, remoteFieldsBox, advancedFieldsBox, fieldWidgets)
 
 		if oauthBackends[bt] {
-			saveBtn.SetText("Save & Re-authorize")
+			showReauth = true
 		}
 
 		saveBtn.OnTapped = func() {
@@ -156,7 +162,7 @@ func showEditLocation(s *state, id int) {
 		}
 
 		fieldsArea := container.NewVBox(
-			widget.NewForm(&widget.FormItem{Text: "Path within remote", Widget: remotePathEntry}),
+			widget.NewForm(&widget.FormItem{Text: "Path within remote", Widget: container.NewBorder(nil, nil, nil, browseRemoteBtn, remotePathEntry)}),
 			remoteFieldsBox,
 		)
 		if len(advancedFieldsBox.Objects) > 0 {
@@ -169,16 +175,29 @@ func showEditLocation(s *state, id int) {
 	}
 
 	saveBtn.Importance = widget.HighImportance
+
+	buttons := container.NewHBox(saveBtn, backBtn)
+	// OAuth remotes can have their browser sign-in expire independently of any
+	// field change, so offer a dedicated re-authorize action (same path as the
+	// Reconnect prompt) rather than making the user tweak a field to trigger
+	// "Save & Re-authorize".
+	if showReauth {
+		reauthBtn := widget.NewButton("Re-authorize", func() {
+			reconnectRemote(s, loc.RemoteName, loc.Name)
+		})
+		buttons.Add(reauthBtn)
+	}
+
 	content := container.NewBorder(
 		widget.NewLabelWithStyle("Edit Location", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(saveBtn, backBtn),
+		buttons,
 		nil, nil,
-		// NewScroll (bidirectional), not NewVScroll: a vertical-only scroll
-		// reports the content's full min width to the window, which on
-		// multi-monitor setups lets a wide child (long path, hint text) stretch
-		// the window across displays. A bidirectional scroll reports a tiny min
-		// size, so the fixed windowSize always holds.
-		container.NewScroll(body),
+		// NewVScroll forces content to the window width (entries fill, no
+		// horizontal scrollbar). It reports content min width to the window, so
+		// keep every child narrow - long path labels are truncated and the
+		// path-entry placeholder is short - to avoid stretching the window
+		// across multiple monitors.
+		container.NewVScroll(body),
 	)
 	s.setContent(container.NewPadded(content))
 }
