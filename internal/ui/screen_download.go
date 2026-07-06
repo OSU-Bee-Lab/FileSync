@@ -128,13 +128,17 @@ func showDownload(s *state) {
 	}
 
 	chooseDestBtn := widget.NewButton("Choose destination folder...", func() {
-		dialog.ShowFolderOpen(func(uri fyne.ListableURI, err error) {
-			if err != nil || uri == nil {
+		chooseFolder(s.win, func(path string, err error) {
+			if err != nil {
+				dialog.ShowError(err, s.win)
 				return
 			}
-			destFolder = uri.Path()
+			if path == "" {
+				return
+			}
+			destFolder = path
 			destLabel.SetText(destFolder)
-		}, s.win)
+		})
 	})
 
 	previewBtn := widget.NewButton("Preview", func() {

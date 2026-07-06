@@ -20,6 +20,10 @@ type previewJob struct {
 	Label  string
 	Result syncengine.PreviewResult
 	Start  func(ctx context.Context) (*syncengine.Job, <-chan syncengine.ProgressSnapshot)
+	// Locs holds the Location(s) involved in Start's copy (source and, for
+	// Backup, destination) so a failed job can offer to reconnect the right
+	// remote instead of just printing rclone's raw error text.
+	Locs []syncengine.Location
 }
 
 func showPreview(s *state, jobs []previewJob, onBack func()) {

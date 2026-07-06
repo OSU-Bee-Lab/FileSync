@@ -81,55 +81,8 @@ func showAddLocation(s *state) {
 	advancedFieldsBox := container.NewVBox()
 	advancedAccordion := widget.NewAccordion(widget.NewAccordionItem("Advanced options", advancedFieldsBox))
 
-	fieldText := func(w fyne.CanvasObject) string {
-		switch e := w.(type) {
-		case *widget.Entry:
-			return e.Text
-		case *widget.Select:
-			return e.Selected
-		}
-		return ""
-	}
-
 	rebuildFields := func(bt syncengine.BackendType) {
-		remoteFieldsBox.Objects = nil
-		advancedFieldsBox.Objects = nil
-		fieldWidgets = map[string]fyne.CanvasObject{}
-		specs, err := syncengine.FieldsFor(bt)
-		if err != nil {
-			dialog.ShowError(err, s.win)
-			return
-		}
-		for _, f := range specs {
-			var w fyne.CanvasObject
-			label := f.Label
-			if f.Required {
-				label += " *"
-			}
-			if len(f.Choices) > 0 {
-				sel := widget.NewSelect(f.Choices, nil)
-				if f.Default != "" {
-					sel.SetSelected(f.Default)
-				}
-				w = sel
-			} else {
-				e := widget.NewEntry()
-				if f.IsSecret {
-					e = widget.NewPasswordEntry()
-				}
-				e.SetText(f.Default)
-				w = e
-			}
-			fieldWidgets[f.Key] = w
-			item := widget.NewForm(&widget.FormItem{Text: label, Widget: w, HintText: f.HelpText})
-			if f.Advanced {
-				advancedFieldsBox.Add(item)
-			} else {
-				remoteFieldsBox.Add(item)
-			}
-		}
-		remoteFieldsBox.Refresh()
-		advancedFieldsBox.Refresh()
+		populateRemoteFields(s, bt, nil, remoteFieldsBox, advancedFieldsBox, fieldWidgets)
 	}
 
 	saveBtn := widget.NewButton("Save", nil)
@@ -241,6 +194,75 @@ func showAddLocation(s *state) {
 		container.NewVScroll(form),
 	)
 	s.win.SetContent(container.NewPadded(content))
+}
+
+// fieldText reads back whichever widget type populateRemoteFields chose to
+// render for a given FieldSpec.
+func fieldText(w fyne.CanvasObject) string {
+	switch e := w.(type) {
+	case *widget.Entry:
+		return e.Text
+	case *widget.Select:
+		return e.Selected
+	}
+	return ""
+}
+
+// populateRemoteFields renders the FieldSpecs for bt into remoteFieldsBox /
+// advancedFieldsBox and records the widget for each field's key in
+// fieldWidgets (cleared first), so callers can read values back later via
+// fieldText. prefill overrides a field's rclone-reported default when
+// present - used by the edit screen to show a remote's current values;
+// showAddLocation passes nil so every field starts at its backend default.
+// Shared between showAddLocation and showEditLocation so the two forms
+// never drift apart in how they build backend-specific fields.
+func populateRemoteFields(s *state, bt syncengine.BackendType, prefill map[string]string, remoteFieldsBox, advancedFieldsBox *fyne.Container, fieldWidgets map[string]fyne.CanvasObject) {
+	remoteFieldsBox.Objects = nil
+	advancedFieldsBox.Objects = nil
+	for k := range fieldWidgets {
+		delete(fieldWidgets, k)
+	}
+	specs, err := syncengine.FieldsFor(bt)
+	if err != nil {
+		dialog.ShowError(err, s.win)
+		return
+	}
+	for _, f := range specs {
+		var w fyne.CanvasObject
+		label := f.Label
+		if f.Required {
+			label += " *"
+		}
+		value := f.Default
+		if v, ok := prefill[f.Key]; ok {
+			value = v
+		}
+		if len(f.Choices) > 0 {
+			sel := widget.NewSelect(f.Choices, nil)
+			if value != "" {
+				sel.SetSelected(value)
+			}
+			w = sel
+		} else {
+			e := widget.NewEntry()
+			if f.IsSecret {
+				e = widget.NewPasswordEntry()
+				e.SetPlaceHolder("leave blank to keep existing value")
+			} else {
+				e.SetText(value)
+			}
+			w = e
+		}
+		fieldWidgets[f.Key] = w
+		item := widget.NewForm(&widget.FormItem{Text: label, Widget: w, HintText: f.HelpText})
+		if f.Advanced {
+			advancedFieldsBox.Add(item)
+		} else {
+			remoteFieldsBox.Add(item)
+		}
+	}
+	remoteFieldsBox.Refresh()
+	advancedFieldsBox.Refresh()
 }
 
 var locationIDCounter int

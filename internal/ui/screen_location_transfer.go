@@ -4,11 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
@@ -32,23 +32,26 @@ func exportLocation(s *state, loc syncengine.Location) {
 		dialog.ShowError(err, s.win)
 		return
 	}
-	saveDialog := dialog.NewFileSave(func(uc fyne.URIWriteCloser, err error) {
+	chooseFileSave(s.win, loc.Name+".expsync-location.json", func(path string, err error) {
 		if err != nil {
 			dialog.ShowError(err, s.win)
 			return
 		}
-		if uc == nil {
+		if path == "" {
 			return
 		}
-		defer uc.Close()
-		enc := json.NewEncoder(uc)
+		f, err := os.Create(path)
+		if err != nil {
+			dialog.ShowError(err, s.win)
+			return
+		}
+		defer f.Close()
+		enc := json.NewEncoder(f)
 		enc.SetIndent("", "  ")
 		if err := enc.Encode(exported); err != nil {
 			dialog.ShowError(err, s.win)
 		}
-	}, s.win)
-	saveDialog.SetFileName(loc.Name + ".expsync-location.json")
-	saveDialog.Show()
+	})
 }
 
 // importLocation reads a location exported by exportLocation and recreates
@@ -58,24 +61,27 @@ func exportLocation(s *state, loc syncengine.Location) {
 // progress step below both exist to make that unavoidable step obvious
 // rather than a surprise.
 func importLocation(s *state) {
-	openDialog := dialog.NewFileOpen(func(uc fyne.URIReadCloser, err error) {
+	chooseFileOpen(s.win, []string{"json"}, func(path string, err error) {
 		if err != nil {
 			dialog.ShowError(err, s.win)
 			return
 		}
-		if uc == nil {
+		if path == "" {
 			return
 		}
-		defer uc.Close()
+		f, err := os.Open(path)
+		if err != nil {
+			dialog.ShowError(err, s.win)
+			return
+		}
+		defer f.Close()
 		var imported syncengine.ExportedLocation
-		if err := json.NewDecoder(uc).Decode(&imported); err != nil {
+		if err := json.NewDecoder(f).Decode(&imported); err != nil {
 			dialog.ShowError(fmt.Errorf("couldn't read location file: %w", err), s.win)
 			return
 		}
 		confirmImportLocation(s, imported)
-	}, s.win)
-	openDialog.SetFilter(storage.NewExtensionFileFilter([]string{".json"}))
-	openDialog.Show()
+	})
 }
 
 func confirmImportLocation(s *state, imported syncengine.ExportedLocation) {

@@ -3,6 +3,7 @@ package syncengine
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -106,7 +107,7 @@ var oauthHookMu sync.Mutex
 func CreateRemote(ctx context.Context, name string, bt BackendType, fields map[string]string, onAuthURL func(url string)) error {
 	oauthHookMu.Lock()
 	defer oauthHookMu.Unlock()
-	restore := hookOAuthOpenURL(onAuthURL)
+	restore := hookOAuthOpenURL(forceAccountChooser(bt), onAuthURL)
 	defer restore()
 
 	// The SharePoint site URL isn't a real rclone Option - it steers the
@@ -143,7 +144,8 @@ func CreateRemote(ctx context.Context, name string, bt BackendType, fields map[s
 func UpdateRemote(ctx context.Context, name string, fields map[string]string, onAuthURL func(url string)) error {
 	oauthHookMu.Lock()
 	defer oauthHookMu.Unlock()
-	restore := hookOAuthOpenURL(onAuthURL)
+	typ, _ := config.FileGetValue(name, "type")
+	restore := hookOAuthOpenURL(forceAccountChooser(BackendType(typ)), onAuthURL)
 	defer restore()
 
 	params := rc.Params{}
@@ -196,14 +198,43 @@ func ExportLocation(loc Location) (ExportedLocation, error) {
 	if loc.Kind != LocationRemote {
 		return ExportedLocation{}, fmt.Errorf("only remote locations can be exported")
 	}
-	typ, ok := config.FileGetValue(loc.RemoteName, "type")
+	bt, fields, err := nonSecretRemoteFields(loc.RemoteName)
+	if err != nil {
+		return ExportedLocation{}, err
+	}
+	return ExportedLocation{
+		Name:        loc.Name,
+		RootPath:    loc.RootPath,
+		BackendType: bt,
+		Fields:      fields,
+	}, nil
+}
+
+// RemoteConfig describes an existing remote's editable state: its backend
+// type (so the wizard knows which FieldSpecs to render) and its current
+// non-secret field values (so the edit form can be prefilled). Secret
+// fields (passwords, keys, OAuth tokens) are deliberately omitted - rclone
+// only stores them obscured/encrypted, not in a form worth showing back to
+// the user, so the edit form leaves them blank and only overwrites them if
+// the user types a new value.
+func RemoteConfig(remoteName string) (BackendType, map[string]string, error) {
+	return nonSecretRemoteFields(remoteName)
+}
+
+// nonSecretRemoteFields looks up remoteName's backend type and every
+// non-secret config value rclone has stored for it, filtering out anything
+// FieldsFor flags as IsSecret plus the OAuth token blob (see
+// secretRcloneKeys). Shared by ExportLocation and RemoteConfig so both stay
+// consistent about what counts as safe to surface.
+func nonSecretRemoteFields(remoteName string) (BackendType, map[string]string, error) {
+	typ, ok := config.FileGetValue(remoteName, "type")
 	if !ok {
-		return ExportedLocation{}, fmt.Errorf("remote %q not found in rclone config", loc.RemoteName)
+		return "", nil, fmt.Errorf("remote %q not found in rclone config", remoteName)
 	}
 	bt := BackendType(typ)
 	specs, err := FieldsFor(bt)
 	if err != nil {
-		return ExportedLocation{}, err
+		return "", nil, err
 	}
 	secretKeys := map[string]bool{}
 	for _, f := range specs {
@@ -212,20 +243,15 @@ func ExportLocation(loc Location) (ExportedLocation, error) {
 		}
 	}
 	fields := map[string]string{}
-	for _, key := range config.Data().GetKeyList(loc.RemoteName) {
+	for _, key := range config.Data().GetKeyList(remoteName) {
 		if key == "type" || secretKeys[key] || secretRcloneKeys[key] {
 			continue
 		}
-		if v, ok := config.FileGetValue(loc.RemoteName, key); ok {
+		if v, ok := config.FileGetValue(remoteName, key); ok {
 			fields[key] = v
 		}
 	}
-	return ExportedLocation{
-		Name:        loc.Name,
-		RootPath:    loc.RootPath,
-		BackendType: bt,
-		Fields:      fields,
-	}, nil
+	return bt, fields, nil
 }
 
 // RemoteInfo is one remote already present in rclone's config file,
@@ -289,13 +315,45 @@ func driveConfigSteps(ctx context.Context, name string, out *fs.ConfigOut, state
 // "waiting for sign-in..." screen) before falling back to the original
 // (which actually opens the OS browser). This is the exact URL rclone's
 // own `rclone authorize` prints/opens; nothing here re-implements OAuth.
-func hookOAuthOpenURL(onAuthURL func(url string)) (restore func()) {
+func hookOAuthOpenURL(forceChooser bool, onAuthURL func(url string)) (restore func()) {
 	original := oauthutil.OpenURL
-	oauthutil.OpenURL = func(url string) error {
-		if onAuthURL != nil {
-			onAuthURL(url)
+	oauthutil.OpenURL = func(rawURL string) error {
+		if forceChooser {
+			rawURL = withSelectAccountPrompt(rawURL)
 		}
-		return original(url)
+		if onAuthURL != nil {
+			onAuthURL(rawURL)
+		}
+		return original(rawURL)
 	}
 	return func() { oauthutil.OpenURL = original }
+}
+
+// forceAccountChooser reports whether bt's OAuth provider supports the
+// standard "prompt=select_account" authorization parameter. Both Microsoft
+// (OneDrive/SharePoint) and Google (Drive) honor it, and without it the
+// provider silently re-authenticates whichever account already has an
+// active browser session - not necessarily the one the user wants to
+// (re)connect this remote as. Dropbox doesn't recognize this parameter, so
+// it's left alone rather than risk breaking its auth URL.
+func forceAccountChooser(bt BackendType) bool {
+	return bt == BackendOneDrive || bt == BackendDrive
+}
+
+// withSelectAccountPrompt adds prompt=select_account to rawURL so the OAuth
+// provider always shows its account picker instead of silently reusing
+// whatever account is already logged into the user's browser. Falls back to
+// rawURL unchanged if it doesn't parse as a URL or already specifies prompt.
+func withSelectAccountPrompt(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	if q.Get("prompt") != "" {
+		return rawURL
+	}
+	q.Set("prompt", "select_account")
+	u.RawQuery = q.Encode()
+	return u.String()
 }

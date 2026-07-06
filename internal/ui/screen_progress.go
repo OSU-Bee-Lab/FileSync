@@ -63,6 +63,10 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 			switch final.Status {
 			case syncengine.JobError:
 				statusText = "ERROR: " + errString(final.Err)
+				if isAuthError(final.Err) {
+					j := j
+					fyne.Do(func() { showLocationError(s, final.Err, j.Locs...) })
+				}
 			case syncengine.JobCanceled:
 				statusText = "canceled"
 			}
