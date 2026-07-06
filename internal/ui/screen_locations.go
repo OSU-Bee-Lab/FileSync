@@ -61,7 +61,7 @@ func showLocations(s *state) {
 		nil, nil,
 		list,
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }
 
 // isAuthError reports whether err looks like rclone's expired-OAuth-token

@@ -35,7 +35,7 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 		nil, nil,
 		container.NewVBox(statusLabel, bar, fileLabel, widget.NewSeparator(), container.NewVScroll(logBox)),
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 
 	go func() {
 		var summary strings.Builder

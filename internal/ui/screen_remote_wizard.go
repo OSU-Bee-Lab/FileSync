@@ -193,7 +193,7 @@ func showAddLocation(s *state) {
 		nil, nil,
 		container.NewVScroll(form),
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }
 
 // fieldText reads back whichever widget type populateRemoteFields chose to

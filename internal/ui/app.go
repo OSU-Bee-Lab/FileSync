@@ -13,11 +13,30 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/appconfig"
 )
 
+// windowSize is the one fixed size ExpSync's single window should ever have.
+// Fyne's glfw driver (at least on macOS with multiple displays attached) can
+// recompute the window to span the whole virtual desktop instead of the
+// requested size - this has been observed both on first show and after
+// later content swaps (screen changes, dialogs). Rather than guard against
+// that in each spot it can happen, every screen must route content changes
+// through state.setContent, which re-asserts this size every time. Any
+// future additional windows should follow the same pattern (set content,
+// then Resize to a fixed size) instead of relying on Fyne's auto-fit.
+var windowSize = fyne.NewSize(920, 640)
+
 // state is threaded through every screen: the window to draw into and the
 // currently loaded/persisted app config (locations, defaults).
 type state struct {
 	win fyne.Window
 	cfg appconfig.Config
+}
+
+// setContent replaces the window's content and re-asserts windowSize
+// immediately after. Screens must call this instead of s.win.SetContent
+// directly - see the comment on windowSize for why.
+func (s *state) setContent(content fyne.CanvasObject) {
+	s.win.SetContent(content)
+	s.win.Resize(windowSize)
 }
 
 func (s *state) saveConfig() {
@@ -45,7 +64,7 @@ func Run() {
 	// requested size.
 	showHome(s)
 	w.SetFixedSize(false)
-	w.Resize(fyne.NewSize(920, 640))
+	w.Resize(windowSize)
 	w.CenterOnScreen()
 	w.ShowAndRun()
 }
@@ -74,5 +93,5 @@ func showHome(s *state) {
 		downloadBtn,
 		locationsBtn,
 	)
-	s.win.SetContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))
+	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))
 }
