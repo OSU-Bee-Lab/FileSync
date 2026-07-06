@@ -23,28 +23,31 @@ func showLocations(s *state) {
 			pathLabel := widget.NewLabel("")
 			removeBtn := widget.NewButton("Remove", nil)
 			removeBtn.Importance = widget.DangerImportance
-			return container.NewBorder(nil, nil, nil,
-				container.NewHBox(widget.NewButton("Edit...", nil), widget.NewButton("Export...", nil), removeBtn),
-				container.NewVBox(nameLabel, pathLabel))
+			btnBox := container.NewHBox(widget.NewButton("Show Experiments", nil), widget.NewButton("Edit", nil), widget.NewButton("Export", nil), removeBtn)
+			nameRow := container.NewBorder(nil, nil, nil, btnBox, nameLabel)
+			return container.NewVBox(nameRow, pathLabel)
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			loc := s.cfg.Locations[id]
-			border := obj.(*fyne.Container)
-			labelBox := border.Objects[0].(*fyne.Container)
-			nameLabel := labelBox.Objects[0].(*widget.Label)
-			pathLabel := labelBox.Objects[1].(*widget.Label)
+			vbox := obj.(*fyne.Container)
+			nameRow := vbox.Objects[0].(*fyne.Container)
+			pathLabel := vbox.Objects[1].(*widget.Label)
+			nameLabel := nameRow.Objects[0].(*widget.Label)
 			nameLabel.SetText(loc.Name)
 			pathLabel.SetText(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
 
-			btnBox := border.Objects[1].(*fyne.Container)
-			editBtn := btnBox.Objects[0].(*widget.Button)
+			btnBox := nameRow.Objects[1].(*fyne.Container)
+			showExpBtn := btnBox.Objects[0].(*widget.Button)
+			showExpBtn.OnTapped = func() { showLocationExperiments(s, loc) }
+
+			editBtn := btnBox.Objects[1].(*widget.Button)
 			editBtn.OnTapped = func() { showEditLocation(s, id) }
 
-			exportBtn := btnBox.Objects[1].(*widget.Button)
+			exportBtn := btnBox.Objects[2].(*widget.Button)
 			exportBtn.Hidden = loc.Kind != syncengine.LocationRemote
 			exportBtn.OnTapped = func() { exportLocation(s, loc) }
 
-			removeBtn := btnBox.Objects[2].(*widget.Button)
+			removeBtn := btnBox.Objects[3].(*widget.Button)
 			removeBtn.OnTapped = func() {
 				dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from ExpSync?", func(ok bool) {
 					if !ok {
@@ -169,6 +172,38 @@ func runRemoteOAuthUpdate(s *state, dialogTitle, progressText, remoteName string
 				err = ctx.Err()
 			}
 			onDone(err)
+		})
+	}()
+}
+
+// showLocationExperiments lists the experiment directories found at the
+// root of loc, so users can check what's there without starting a Sync or
+// Download flow.
+func showLocationExperiments(s *state, loc syncengine.Location) {
+	progressDialog := dialog.NewCustom("Loading...", "Please wait", widget.NewLabel("Listing experiments in "+loc.Name+"..."), s.win)
+	progressDialog.Show()
+
+	go func() {
+		exps, err := syncengine.ListExperiments(context.Background(), loc)
+		fyne.Do(func() {
+			progressDialog.Hide()
+			if err != nil {
+				showLocationError(s, err, loc)
+				return
+			}
+			names := make([]string, len(exps))
+			for i, e := range exps {
+				names[i] = e.Name
+			}
+			body := "No experiments found."
+			if len(names) > 0 {
+				body = strings.Join(names, "\n")
+			}
+			list := widget.NewLabel(body)
+			list.Wrapping = fyne.TextWrapWord
+			scroll := container.NewVScroll(list)
+			scroll.SetMinSize(fyne.NewSize(360, 300))
+			dialog.ShowCustom(fmt.Sprintf("Experiments in %s (%d)", loc.Name, len(names)), "Close", scroll, s.win)
 		})
 	}()
 }
