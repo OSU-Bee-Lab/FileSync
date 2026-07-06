@@ -24,6 +24,14 @@ func showBackup(s *state) {
 	checkGroup := widget.NewCheckGroup(nil, nil)
 
 	var srcLoc, dstLoc *syncengine.Location
+	if loc := findLocation(s.cfg.Locations, s.backupSrcName); loc != nil {
+		srcLoc = loc
+		srcSelect.Selected = loc.Name
+	}
+	if loc := findLocation(s.cfg.Locations, s.backupDstName); loc != nil {
+		dstLoc = loc
+		dstSelect.Selected = loc.Name
+	}
 
 	refresh := func() {
 		if srcLoc == nil {
@@ -84,10 +92,32 @@ func showBackup(s *state) {
 		}()
 	}
 
-	srcSelect.OnChanged = func(name string) { srcLoc = findLocation(s.cfg.Locations, name); refresh() }
-	dstSelect.OnChanged = func(name string) { dstLoc = findLocation(s.cfg.Locations, name); refresh() }
+	srcSelect.OnChanged = func(name string) {
+		srcLoc = findLocation(s.cfg.Locations, name)
+		s.backupSrcName = name
+		if dstLoc != nil && srcLoc != nil && dstLoc.ID == srcLoc.ID {
+			dstLoc = nil
+			s.backupDstName = ""
+			dstSelect.ClearSelected()
+		}
+		refresh()
+	}
+	dstSelect.OnChanged = func(name string) {
+		dstLoc = findLocation(s.cfg.Locations, name)
+		s.backupDstName = name
+		if srcLoc != nil && dstLoc != nil && srcLoc.ID == dstLoc.ID {
+			srcLoc = nil
+			s.backupSrcName = ""
+			srcSelect.ClearSelected()
+		}
+		refresh()
+	}
 
-	previewBtn := widget.NewButton("Preview", func() {
+	if srcLoc != nil {
+		refresh()
+	}
+
+	scanBtn := widget.NewButton("Scan", func() {
 		if srcLoc == nil || dstLoc == nil {
 			dialog.ShowInformation("Pick locations", "Choose a from and to location first.", s.win)
 			return

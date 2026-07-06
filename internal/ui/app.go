@@ -29,6 +29,12 @@ var windowSize = fyne.NewSize(920, 640)
 type state struct {
 	win fyne.Window
 	cfg appconfig.Config
+
+	// backupSrcName and backupDstName cache the last-selected From/To
+	// locations on the Sync screen so they're still populated if the user
+	// navigates away and back.
+	backupSrcName string
+	backupDstName string
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to
