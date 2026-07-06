@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -49,16 +50,7 @@ func showLocations(s *state) {
 			exportBtn.OnTapped = func() { exportLocation(s, loc) }
 
 			removeBtn := btnBox.Objects[3].(*widget.Button)
-			removeBtn.OnTapped = func() {
-				dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from ExpSync?", func(ok bool) {
-					if !ok {
-						return
-					}
-					s.cfg.Locations = append(append([]syncengine.Location{}, s.cfg.Locations[:id]...), s.cfg.Locations[id+1:]...)
-					s.saveConfig()
-					showLocations(s)
-				}, s.win)
-			}
+			removeBtn.OnTapped = func() { removeLocation(s, id, loc) }
 		},
 	)
 
@@ -73,6 +65,55 @@ func showLocations(s *state) {
 		list,
 	)
 	s.setContent(container.NewPadded(content))
+}
+
+// unlistLocation drops loc at index id from ExpSync's config, leaving any
+// underlying rclone remote untouched. Shared by both removal paths so the
+// list-editing logic lives in one place.
+func unlistLocation(s *state, id int) {
+	s.cfg.Locations = append(append([]syncengine.Location{}, s.cfg.Locations[:id]...), s.cfg.Locations[id+1:]...)
+	s.saveConfig()
+	showLocations(s)
+}
+
+// removeLocation asks how far to remove loc. For a local location there's
+// nothing but the list entry to drop, so it's a plain confirm. For a remote
+// location it offers two outcomes: "Unlist" (forget it here but keep the
+// rclone remote and its saved sign-in) or "Delete config" (also delete the
+// rclone remote's credentials via syncengine.DeleteRemote). Deleting the
+// remote only removes the stored credentials - it never touches files on the
+// remote itself.
+func removeLocation(s *state, id int, loc syncengine.Location) {
+	if loc.Kind != syncengine.LocationRemote {
+		dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from ExpSync?", func(ok bool) {
+			if ok {
+				unlistLocation(s, id)
+			}
+		}, s.win)
+		return
+	}
+
+	msg := widget.NewLabel("Remove \"" + loc.Name + "\" from ExpSync?\n\n" +
+		"• Unlist: forget it here, but keep the rclone remote \"" + loc.RemoteName + "\" and its sign-in.\n" +
+		"• Delete config: also delete the rclone remote's saved credentials.\n\n" +
+		"Neither option deletes any files on the remote itself.")
+	msg.Wrapping = fyne.TextWrapWord
+
+	var d dialog.Dialog
+	unlistBtn := widget.NewButton("Unlist", func() {
+		d.Hide()
+		unlistLocation(s, id)
+	})
+	deleteBtn := widget.NewButton("Delete config", func() {
+		d.Hide()
+		syncengine.DeleteRemote(loc.RemoteName)
+		unlistLocation(s, id)
+	})
+	deleteBtn.Importance = widget.DangerImportance
+
+	d = dialog.NewCustom("Remove location", "Cancel",
+		container.NewVBox(msg, container.NewHBox(unlistBtn, deleteBtn)), s.win)
+	d.Show()
 }
 
 // reconnectHintRe extracts the remote name from rclone's
@@ -158,40 +199,67 @@ func reconnectRemote(s *state, remoteName, displayName string) {
 }
 
 // runRemoteOAuthUpdate drives syncengine.UpdateRemote for remoteName,
-// showing a progress dialog shared by the Reconnect action above and the
-// "Save & Re-authorize" edit flow (screen_remote_edit.go) - both need the
-// same "browser is open, here's the link, and Cancel really cancels" UI, so
-// it lives in one place rather than two copies drifting apart. The dialog's
-// "Cancel" button is wired to actually cancel ctx (not just hide the
-// dialog), and a "Copy Link" button appears once the sign-in URL is known so
-// the user isn't stuck if the browser didn't open. onDone runs on the Fyne
-// UI goroutine; a user-initiated cancel reports context.Canceled so callers
-// can tell it apart from a real failure.
+// showing the shared sign-in dialog (see runRemoteOAuth), reused by the
+// Reconnect action above and the "Save & Re-authorize" edit flow
+// (screen_remote_edit.go) so the three flows don't drift apart.
 func runRemoteOAuthUpdate(s *state, dialogTitle, progressText, remoteName string, fields map[string]string, onDone func(err error)) {
+	runRemoteOAuth(s, dialogTitle, progressText, func(ctx context.Context, onAuthURL func(url string)) error {
+		return syncengine.UpdateRemote(ctx, remoteName, fields, onAuthURL)
+	}, onDone)
+}
+
+// runRemoteOAuth is the shared engine behind every browser-sign-in flow -
+// adding a remote (CreateRemote), editing/re-authorizing one (UpdateRemote),
+// and reconnecting an expired one. run performs the actual syncengine call and
+// is handed an onAuthURL callback to surface the sign-in URL. All three flows
+// therefore get the same dialog. The browser is never opened automatically:
+// once the sign-in URL is known, "Open in Browser" and "Copy Link" buttons
+// appear (Copy Link lets the user open it in the browser profile / incognito
+// window holding the account they want, rather than being stuck on whichever
+// account their default browser is signed into). Cancel really cancels ctx.
+// onDone runs on the Fyne UI goroutine; a user-initiated cancel reports
+// context.Canceled so callers can tell it apart from a real failure.
+func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx context.Context, onAuthURL func(url string)) error, onDone func(err error)) {
 	progressLabel := widget.NewLabel(progressText)
 	progressLabel.Wrapping = fyne.TextWrapWord
 
 	var authURL string
+	openBtn := widget.NewButton("Open in Browser", func() {
+		if u, err := url.Parse(authURL); err == nil {
+			fyne.CurrentApp().OpenURL(u)
+		}
+	})
+	openBtn.Importance = widget.HighImportance
 	copyBtn := widget.NewButton("Copy Link", func() {
 		if authURL != "" {
 			s.win.Clipboard().SetContent(authURL)
 		}
 	})
-	copyBtn.Hide()
+	// The sign-in URL isn't known until run() reaches the OAuth step, so the
+	// browser buttons start hidden and appear once onAuthURL fires.
+	buttonRow := container.NewHBox(openBtn, copyBtn)
+	buttonRow.Hide()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 
-	progressDialog := dialog.NewCustom(dialogTitle, "Cancel", container.NewVBox(progressLabel, copyBtn), s.win)
+	progressDialog := dialog.NewCustom(dialogTitle, "Cancel", container.NewVBox(progressLabel, buttonRow), s.win)
 	progressDialog.SetOnClosed(cancel)
 	progressDialog.Show()
+	// NewCustom sizes to content min width, which is narrow for a short label -
+	// widen it so the sign-in instructions and buttons aren't cramped.
+	progressDialog.Resize(fyne.NewSize(460, 200))
 
 	go func() {
 		defer cancel()
-		err := syncengine.UpdateRemote(ctx, remoteName, fields, func(url string) {
+		err := run(ctx, func(rawURL string) {
 			fyne.Do(func() {
-				authURL = url
-				copyBtn.Show()
-				progressLabel.SetText("Opening your browser to sign in...\nIf it doesn't open, visit:\n" + url)
+				authURL = rawURL
+				buttonRow.Show()
+				progressDialog.Resize(fyne.NewSize(460, 200))
+				progressLabel.SetText("Click Open in Browser to sign in.\n\n" +
+					"To sign in as a different account than the one your browser " +
+					"is already logged into, use Copy Link and open it in a " +
+					"private/incognito window.")
 			})
 		})
 		fyne.Do(func() {

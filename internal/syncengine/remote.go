@@ -85,6 +85,94 @@ func FieldsFor(bt BackendType) ([]FieldSpec, error) {
 // (see stateAnswers below) rather than passed through as a config value.
 const SharePointSiteURLKey = "sharepoint_site_url"
 
+// ParseSharePointURL splits whatever SharePoint URL the user pasted into the
+// clean site URL rclone needs (scheme://host/sites/Name) and, when the URL
+// carried a folder (as it does when copied straight from a document-library
+// view in the browser), the path to that folder relative to its library
+// root.
+//
+// It accepts both a bare site URL and a full library view URL like
+//
+//	https://x.sharepoint.com/sites/OSUBeeLab/Shared%20Documents/Forms/AllItems.aspx?id=%2Fsites%2FOSUBeeLab%2FShared%20Documents%2Faudio_bee_detection%2Fexperiments&...
+//
+// where the "id" query param is the server-relative path. folderPath is that
+// path with the "/sites/Name" prefix and the leading document-library segment
+// (e.g. "Shared Documents") stripped, since that segment is the library/drive
+// itself rather than a folder within it. folderPath is forward-slash
+// separated and may be empty. If raw doesn't look like a SharePoint site URL
+// it's returned unchanged with an empty folderPath.
+func ParseSharePointURL(raw string) (siteURL, folderPath string) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw, ""
+	}
+	segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+	sitePrefix := ""
+	for i, seg := range segs {
+		if (seg == "sites" || seg == "teams") && i+1 < len(segs) {
+			sitePrefix = "/" + seg + "/" + segs[i+1]
+			break
+		}
+	}
+	if sitePrefix == "" {
+		// Not a recognizable site URL - hand back a query-stripped URL and
+		// let rclone/the user sort it out.
+		return u.Scheme + "://" + u.Host + u.Path, ""
+	}
+	siteURL = u.Scheme + "://" + u.Host + sitePrefix
+	if id := u.Query().Get("id"); id != "" {
+		// id is the decoded server-relative path, e.g.
+		// /sites/OSUBeeLab/Shared Documents/audio_bee_detection/experiments
+		p := strings.Trim(strings.TrimPrefix(id, sitePrefix), "/")
+		if idx := strings.Index(p, "/"); idx >= 0 {
+			folderPath = p[idx+1:] // drop the library segment
+		}
+	}
+	return siteURL, folderPath
+}
+
+// DriveInfo identifies one drive/document-library available to an OAuth
+// remote - a SharePoint site's libraries (e.g. "Documents") or a personal
+// account's OneDrive plus its cache libraries. Type is rclone's drive_type
+// ("business", "personal", "documentLibrary"); together ID and Type are all
+// that's needed to point a remote (or a one-off connection string) at it.
+type DriveInfo struct {
+	ID   string
+	Name string
+	Type string
+}
+
+// ChooseDriveFunc is invoked when rclone's config reaches the "which drive?"
+// question (option "config_driveid"). It receives every drive the account
+// exposes and returns the one to use, or an error to abort (e.g. the user
+// cancelled). Only used when creating a remote; see driveConfigSteps.
+type ChooseDriveFunc func(drives []DriveInfo) (DriveInfo, error)
+
+// SetRemoteDrive persists a chosen drive onto an existing remote, writing
+// only drive_id and drive_type and leaving the token and all other config
+// untouched. Used after the user browses to and confirms the right library.
+func SetRemoteDrive(remoteName string, d DriveInfo) error {
+	if err := config.SetValueAndSave(remoteName, "drive_id", d.ID); err != nil {
+		return err
+	}
+	return config.SetValueAndSave(remoteName, "drive_type", d.Type)
+}
+
+// splitDriveLabel pulls the drive name and type out of the label rclone's
+// onedrive config builds for each drive, which is always
+// fmt.Sprintf("%s (%s)", DriveName, DriveType) - e.g. "Documents
+// (documentLibrary)". Falls back to the whole string as the name if the
+// parenthesized type isn't there.
+func splitDriveLabel(label string) (name, driveType string) {
+	i := strings.LastIndex(label, "(")
+	j := strings.LastIndex(label, ")")
+	if i >= 0 && j > i {
+		return strings.TrimSpace(label[:i]), label[i+1 : j]
+	}
+	return label, ""
+}
+
 // flattenHelp joins rclone's (often multi-paragraph) option help text into a
 // single line - the wizard renders HelpText as a Fyne form hint, which
 // doesn't handle embedded newlines and shows missing-glyph boxes instead.
@@ -104,10 +192,10 @@ var oauthHookMu sync.Mutex
 // OAuth (Drive, Dropbox, OneDrive/SharePoint), driveConfigSteps takes over
 // from there and onAuthURL is invoked with the sign-in URL as the flow
 // reaches it (see hookOAuthOpenURL for how that URL is captured).
-func CreateRemote(ctx context.Context, name string, bt BackendType, fields map[string]string, onAuthURL func(url string)) error {
+func CreateRemote(ctx context.Context, name string, bt BackendType, fields map[string]string, onAuthURL func(url string), chooseDrive ChooseDriveFunc) error {
 	oauthHookMu.Lock()
 	defer oauthHookMu.Unlock()
-	restore := hookOAuthOpenURL(forceAccountChooser(bt), onAuthURL)
+	restore := hookOAuthOpenURL(onAuthURL)
 	defer restore()
 
 	// The SharePoint site URL isn't a real rclone Option - it steers the
@@ -128,15 +216,19 @@ func CreateRemote(ctx context.Context, name string, bt BackendType, fields map[s
 	if err != nil {
 		return err
 	}
-	stateAnswers := map[string]string{}
+	// answers are keyed by rclone option name (out.Option.Name), not by state:
+	// the onedrive state machine asks "which connection type?" (config_type)
+	// and "site URL?" (config_site_url) at states named differently from the
+	// answers, so keying by state silently missed them and fell through to the
+	// default "onedrive" (personal) flow. Steering config_type to "url" and
+	// feeding config_site_url makes it list the SharePoint site's document
+	// libraries instead of the signed-in user's personal OneDrive.
+	answers := map[string]string{}
 	if bt == BackendOneDrive && siteURL != "" {
-		// Without this, driveConfigSteps' default-picking would silently
-		// choose "onedrive" (personal/business) and skip the SharePoint
-		// site-URL question entirely.
-		stateAnswers["choose_type"] = "url"
-		stateAnswers["url"] = siteURL
+		answers["config_type"] = "url"
+		answers["config_site_url"] = siteURL
 	}
-	return driveConfigSteps(ctx, name, out, stateAnswers)
+	return driveConfigSteps(ctx, name, out, answers, chooseDrive)
 }
 
 // UpdateRemote changes fields on an existing remote in place, e.g. to
@@ -144,8 +236,7 @@ func CreateRemote(ctx context.Context, name string, bt BackendType, fields map[s
 func UpdateRemote(ctx context.Context, name string, fields map[string]string, onAuthURL func(url string)) error {
 	oauthHookMu.Lock()
 	defer oauthHookMu.Unlock()
-	typ, _ := config.FileGetValue(name, "type")
-	restore := hookOAuthOpenURL(forceAccountChooser(BackendType(typ)), onAuthURL)
+	restore := hookOAuthOpenURL(onAuthURL)
 	defer restore()
 
 	params := rc.Params{}
@@ -160,7 +251,7 @@ func UpdateRemote(ctx context.Context, name string, fields map[string]string, on
 	if err != nil {
 		return err
 	}
-	return driveConfigSteps(ctx, name, out, nil)
+	return driveConfigSteps(ctx, name, out, nil, nil)
 }
 
 // DeleteRemote removes a remote's credentials from rclone's config file.
@@ -274,16 +365,18 @@ func ListExistingRemotes() []RemoteInfo {
 }
 
 // driveConfigSteps advances rclone's non-interactive backend config state
-// machine to completion. At each question (out.Option != nil) it picks
-// stateAnswers[out.State] if the caller supplied one for that state (e.g.
-// steering OneDrive's "choose_type" question to "url" for SharePoint),
-// otherwise it falls back to the option's own recommended default
-// (Option.Default) - for the OAuth confirms this generically means "yes,
-// use a local browser" and "yes, refresh the token" (both ship with
-// Default: true in oauthutil), which is the right call for a desktop GUI
-// and stays correct even if rclone renames its internal states in a future
-// version.
-func driveConfigSteps(ctx context.Context, name string, out *fs.ConfigOut, stateAnswers map[string]string) error {
+// machine to completion. At each question (out.Option != nil) it uses
+// answers[out.Option.Name] if the caller supplied one for that option (e.g.
+// steering OneDrive's config_type to "url" and feeding config_site_url for
+// SharePoint), otherwise it falls back to the option's own recommended
+// default (Option.Default) - for the OAuth confirms this generically means
+// "yes, use a local browser" and "yes, refresh the token" (both ship with
+// Default: true in oauthutil), which is the right call for a desktop GUI.
+// Answers are keyed by option name rather than state name because the state
+// a question is reached at (choose_type_done, url_end, ...) differs from the
+// intuitive name and is easy to get wrong; the option name (config_type,
+// config_site_url) is what the question actually carries.
+func driveConfigSteps(ctx context.Context, name string, out *fs.ConfigOut, answers map[string]string, chooseDrive ChooseDriveFunc) error {
 	for out != nil && out.State != "" {
 		if out.Error != "" {
 			return fmt.Errorf("remote config: %s", out.Error)
@@ -291,9 +384,33 @@ func driveConfigSteps(ctx context.Context, name string, out *fs.ConfigOut, state
 		result := ""
 		if out.Option != nil {
 			result = fmt.Sprint(out.Option.GetValue())
+			if answer, ok := answers[out.Option.Name]; ok {
+				result = answer
+			}
 		}
-		if answer, ok := stateAnswers[out.State]; ok {
-			result = answer
+		// The SharePoint drive/document-library picker (rclone option
+		// "config_driveid") is the one question whose default is meaningless:
+		// a site can expose several drives and rclone offers the first as its
+		// default, which is often a system library rather than "Documents".
+		// So don't auto-default it. On a fresh setup let the user pick from
+		// the offered drives (chooseDrive); on a reconnect/edit of an
+		// already-configured remote, keep the drive_id already stored rather
+		// than silently re-picking the wrong first one.
+		if out.Option != nil && out.Option.Name == "config_driveid" {
+			if chooseDrive != nil {
+				drives := make([]DriveInfo, len(out.Option.Examples))
+				for i, ex := range out.Option.Examples {
+					dName, dType := splitDriveLabel(ex.Help)
+					drives[i] = DriveInfo{ID: ex.Value, Name: dName, Type: dType}
+				}
+				chosen, err := chooseDrive(drives)
+				if err != nil {
+					return err
+				}
+				result = chosen.ID
+			} else if existing, ok := config.FileGetValue(name, "drive_id"); ok && existing != "" {
+				result = existing
+			}
 		}
 		var err error
 		out, err = config.UpdateRemote(ctx, name, rc.Params{}, config.UpdateRemoteOpt{
@@ -310,50 +427,29 @@ func driveConfigSteps(ctx context.Context, name string, out *fs.ConfigOut, state
 }
 
 // hookOAuthOpenURL temporarily overrides oauthutil.OpenURL - rclone's own
-// extension point for launching a browser during the OAuth loopback flow -
-// so the wizard can surface the sign-in URL to onAuthURL (e.g. to show a
-// "waiting for sign-in..." screen) before falling back to the original
-// (which actually opens the OS browser). This is the exact URL rclone's
-// own `rclone authorize` prints/opens; nothing here re-implements OAuth.
-func hookOAuthOpenURL(forceChooser bool, onAuthURL func(url string)) (restore func()) {
+// extension point for launching a browser during the OAuth loopback flow - so
+// the wizard can surface the sign-in URL to onAuthURL instead of a browser
+// popping open on its own. It deliberately does NOT call the original (which
+// would auto-open the OS browser): the UI shows Open in Browser / Copy Link
+// buttons so the user controls when and where sign-in happens. This is the
+// exact URL rclone's own `rclone authorize` prints; nothing here
+// re-implements OAuth.
+//
+// Note the URL handed to onAuthURL is rclone's local loopback address
+// (http://127.0.0.1:PORT/auth), not the provider's consent URL - rclone's
+// local server builds the real Google/Microsoft URL only once the browser
+// hits that loopback. That's why we can't inject prompt=select_account to
+// force an account picker here: the account shown is whatever the browser is
+// already signed into. The UI works around this by offering Copy Link so the
+// user can open the loopback URL in a private/incognito window, where the
+// provider has no session and shows its login/account chooser.
+func hookOAuthOpenURL(onAuthURL func(url string)) (restore func()) {
 	original := oauthutil.OpenURL
 	oauthutil.OpenURL = func(rawURL string) error {
-		if forceChooser {
-			rawURL = withSelectAccountPrompt(rawURL)
-		}
 		if onAuthURL != nil {
 			onAuthURL(rawURL)
 		}
-		return original(rawURL)
+		return nil
 	}
 	return func() { oauthutil.OpenURL = original }
-}
-
-// forceAccountChooser reports whether bt's OAuth provider supports the
-// standard "prompt=select_account" authorization parameter. Both Microsoft
-// (OneDrive/SharePoint) and Google (Drive) honor it, and without it the
-// provider silently re-authenticates whichever account already has an
-// active browser session - not necessarily the one the user wants to
-// (re)connect this remote as. Dropbox doesn't recognize this parameter, so
-// it's left alone rather than risk breaking its auth URL.
-func forceAccountChooser(bt BackendType) bool {
-	return bt == BackendOneDrive || bt == BackendDrive
-}
-
-// withSelectAccountPrompt adds prompt=select_account to rawURL so the OAuth
-// provider always shows its account picker instead of silently reusing
-// whatever account is already logged into the user's browser. Falls back to
-// rawURL unchanged if it doesn't parse as a URL or already specifies prompt.
-func withSelectAccountPrompt(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	if q.Get("prompt") != "" {
-		return rawURL
-	}
-	q.Set("prompt", "select_account")
-	u.RawQuery = q.Encode()
-	return u.String()
 }

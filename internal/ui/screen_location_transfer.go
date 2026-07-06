@@ -108,11 +108,14 @@ func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+		// Pass a nil drive chooser: an exported location already carries its
+		// drive_id in Fields, so driveConfigSteps preserves that rather than
+		// re-prompting for a library the importer may not recognize.
 		err := syncengine.CreateRemote(ctx, remoteName, imported.BackendType, imported.Fields, func(url string) {
 			fyne.Do(func() {
 				progressLabel.SetText("Opening your browser to sign in...\nIf it doesn't open, visit:\n" + url)
 			})
-		})
+		}, nil)
 		fyne.Do(func() {
 			progressDialog.Hide()
 			if err != nil {
