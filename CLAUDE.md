@@ -28,5 +28,11 @@ option to preview experiments).
 - Never duplicate logic. If an existing pathway needs to be used in another
   place, extract it into a shared abstraction and call it from both, rather
   than copying it.
+- Window-stretches-across-monitors bug: Fyne sets a window's min size from its
+  content's min size, so a wide child forces the window wider than windowSize.
+  This is fixed universally in `state.setContent`, which wraps content in
+  `boundedWidthLayout` (caps min width to windowSize). So: always swap content
+  via `setContent`, never `win.SetContent`. Set `Truncation` on labels holding
+  long paths for looks, but the window itself can no longer be stretched.
 - Do not commit changes until the user has tested and verified them working.
 - Worktrees go in ./.claude/worktrees

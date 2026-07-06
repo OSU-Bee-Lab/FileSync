@@ -31,11 +31,56 @@ type state struct {
 	cfg appconfig.Config
 }
 
+// boundedWidthLayout caps the reported minimum width of its content to
+// maxWidth. Fyne sets a window's minimum size from its content's minimum size,
+// so any single wide child (a long path label, a wide entry, long form hint
+// text) would otherwise force the window wider than windowSize - which on
+// multi-monitor setups stretches it across displays. Capping the min width
+// here fixes that once for every screen instead of per-widget. The child is
+// always laid out at the container's full width, so fillable widgets (entries,
+// forms) simply fill it; text that overflows is the child's concern (set
+// Truncation on labels that hold long paths).
+type boundedWidthLayout struct{ maxWidth float32 }
+
+func (l *boundedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var min fyne.Size
+	for _, o := range objects {
+		if !o.Visible() {
+			continue
+		}
+		min = min.Max(o.MinSize())
+	}
+	if min.Width > l.maxWidth {
+		min.Width = l.maxWidth
+	}
+	return min
+}
+
+func (l *boundedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	// Cap the content's actual width at maxWidth and center it. Fyne's glfw
+	// driver can hand us a size far wider than windowSize (the multi-monitor
+	// stretch described on windowSize); without this cap, fillable widgets
+	// like text entries would expand to that full width and look absurdly
+	// wide. Clamping here keeps every screen's content at most windowSize wide
+	// regardless of the window the driver actually gives us.
+	w := size.Width
+	if w > l.maxWidth {
+		w = l.maxWidth
+	}
+	x := (size.Width - w) / 2
+	for _, o := range objects {
+		o.Resize(fyne.NewSize(w, size.Height))
+		o.Move(fyne.NewPos(x, 0))
+	}
+}
+
 // setContent replaces the window's content and re-asserts windowSize
 // immediately after. Screens must call this instead of s.win.SetContent
-// directly - see the comment on windowSize for why.
+// directly - see the comment on windowSize for why. Content is wrapped in a
+// boundedWidthLayout so no screen can stretch the window past windowSize.
 func (s *state) setContent(content fyne.CanvasObject) {
-	s.win.SetContent(content)
+	bounded := container.New(&boundedWidthLayout{maxWidth: windowSize.Width}, content)
+	s.win.SetContent(bounded)
 	s.win.Resize(windowSize)
 }
 
