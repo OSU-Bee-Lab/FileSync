@@ -2,6 +2,7 @@ package syncengine
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"sort"
 
@@ -67,6 +68,45 @@ func ListChildren(ctx context.Context, loc Location, relPath string) ([]Entry, e
 		}
 		return out[i].Name < out[j].Name
 	})
+	return out, nil
+}
+
+// ListRemoteDirs lists only the sub-directories (not files) directly under
+// <remoteName>:<relPath>, one shallow level. It backs the wizard/edit
+// "browse the remote" folder picker, which drills deeper by calling again
+// with the chosen child appended. relPath == "" lists the remote's root.
+func ListRemoteDirs(ctx context.Context, remoteName, relPath string) ([]string, error) {
+	return listDirNames(ctx, remoteName+":"+relPath)
+}
+
+// ListRemoteDirsOnDrive is like ListRemoteDirs but browses a specific drive
+// of the remote, overriding its saved drive_id/drive_type for this listing
+// only via an rclone connection string (remote,drive_id=..,drive_type=..:path).
+// This lets the setup browser show a document library's contents before that
+// drive has been committed to the remote's config. A zero DriveInfo (empty
+// ID) falls back to the remote's own configured drive.
+func ListRemoteDirsOnDrive(ctx context.Context, remoteName string, d DriveInfo, relPath string) ([]string, error) {
+	spec := remoteName
+	if d.ID != "" {
+		spec += fmt.Sprintf(",drive_id=%s,drive_type=%s", d.ID, d.Type)
+	}
+	return listDirNames(ctx, spec+":"+relPath)
+}
+
+// listDirNames lists just the sub-directory names one shallow level under an
+// rclone spec, sorted. Shared by the remote folder-browser entry points.
+func listDirNames(ctx context.Context, spec string) ([]string, error) {
+	entries, err := listDir(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if _, isDir := e.(fs.Directory); isDir {
+			out = append(out, dirName(e))
+		}
+	}
+	sort.Strings(out)
 	return out, nil
 }
 
