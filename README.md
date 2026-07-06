@@ -11,7 +11,7 @@ colleagues who aren't comfortable with the CLI can:
 - download a sub-path of one experiment (a single deployment date, a single
   recorder) into a working folder, e.g. for analysis in R,
 
-with a mandatory dry-run preview before anything is copied, and never a
+with a mandatory scan before anything is copied, and never a
 `sync`/delete operation - only additive `copy`.
 
 Nothing about a storage location (path, remote type, `experiments/` folder
@@ -26,10 +26,10 @@ storage setups too, as long as they follow the same
    Dropbox, or S3). For a remote, the wizard drives rclone's own OAuth
    sign-in flow and opens your browser automatically.
 2. **Backup / Sync** - pick a source and destination Location, select one
-   or more experiments, preview, confirm, copy.
+   or more experiments, scan, confirm, copy.
 3. **Download** - pick a source Location, drill into its `experiments/`
    tree to whatever depth you want (a whole experiment, one date, one
-   recorder), choose any local folder as the destination, preview, confirm.
+   recorder), choose any local folder as the destination, scan, confirm.
    Files land at `<destination>/<the folder you picked>/...`, preserving
    that structure rather than dumping everything flat into the destination
    root.
@@ -109,7 +109,7 @@ rclone's `sync` semantics instead of `copy`.
 - Every copy operation uses rclone's `sync.CopyDir`, never `sync.Sync` -
   destination-only files are never deleted, matching the lab's existing
   "never use `rclone sync`" rule.
-- Every real copy is preceded by a dry-run preview the user must explicitly
+- Every real copy is preceded by a scan the user must explicitly
   confirm.
 - The app expects the lab's schema (experiment directories directly under
   `experiments/`, each containing `metadata.csv`/`README.txt`) for browsing

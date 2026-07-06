@@ -56,11 +56,11 @@ func (j *Job) Cancel() {
 
 // StartBackup copies one whole experiment from src to dst (Location <->
 // Location, mirrored under each side's own experiments/ root). expected
-// should be the PreviewResult the user already confirmed, used to seed the
+// should be the ScanResult the user already confirmed, used to seed the
 // progress bar's totals — the same relPath/filter that produced it is what
 // actually runs here, so the set of files acted on can't drift from what
 // was shown.
-func StartBackup(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, preserveModTime bool, expected PreviewResult) (*Job, <-chan ProgressSnapshot) {
+func StartBackup(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	return startCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, fset, preserveModTime, expected)
 }
 
@@ -69,17 +69,17 @@ func StartBackup(ctx context.Context, src, dst Location, experimentName string, 
 // "Luke - Zucchini/2026-06-23" into "/Downloads/foo" lands at
 // "/Downloads/foo/Luke - Zucchini/2026-06-23/..."). destFolder is a raw
 // local path, never a saved Location.
-func StartDownload(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, preserveModTime bool, expected PreviewResult) (*Job, <-chan ProgressSnapshot) {
+func StartDownload(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, fset, preserveModTime, expected)
 }
 
 // filesFromFilter builds an rclone filter that restricts the copy to
-// exactly the files the preview identified as needing transfer. This
+// exactly the files the scan identified as needing transfer. This
 // avoids the redundant source+destination traversal that would otherwise
-// repeat the work the preview already did. Returns nil when no files
+// repeat the work the scan already did. Returns nil when no files
 // need copying (the caller should still proceed — CopyDir is a no-op
 // when nothing matches).
-func filesFromFilter(expected PreviewResult) *filter.Filter {
+func filesFromFilter(expected ScanResult) *filter.Filter {
 	if expected.CopyCount == 0 {
 		return nil
 	}
@@ -96,11 +96,11 @@ func filesFromFilter(expected PreviewResult) *filter.Filter {
 // codebase. It must never be swapped for sync.Sync, which deletes
 // destination-only files - see TestCopyPreserving_NeverDeletesDestinationOnlyFiles.
 //
-// When expected contains files to copy (CopyCount > 0), the preview's
+// When expected contains files to copy (CopyCount > 0), the scan's
 // file list is used to build a files-from filter so rclone copies only
 // those files without re-scanning source or destination. This turns the
-// preview→copy round-trip from O(2×listing) into O(listing + copies).
-func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, preserveModTime bool, expected PreviewResult) (*Job, <-chan ProgressSnapshot) {
+// scan→copy round-trip from O(2×listing) into O(listing + copies).
+func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	ctx, cancel := context.WithCancel(parent)
 	progress := make(chan ProgressSnapshot, 1)
 
@@ -108,10 +108,10 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 	ci.NoUpdateModTime = preserveModTime
 	ci.DryRun = false
 
-	// When we have cached preview results, skip the full traversal and
-	// copy only the files the preview identified. This replaces any
+	// When we have cached scan results, skip the full traversal and
+	// copy only the files the scan identified. This replaces any
 	// FilterSettings-based filter (which was already applied during the
-	// preview) with a precise files-from list and disables destination
+	// scan) with a precise files-from list and disables destination
 	// listing.
 	cachedFilter := filesFromFilter(expected)
 	if cachedFilter != nil {
@@ -128,7 +128,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 		defer close(progress)
 
 		// Only apply the user's FilterSettings when we aren't using
-		// cached preview results (i.e. the preview found nothing to
+		// cached scan results (i.e. the scan found nothing to
 		// copy, so CopyDir will confirm the no-op via a full scan).
 		if cachedFilter == nil {
 			var err error

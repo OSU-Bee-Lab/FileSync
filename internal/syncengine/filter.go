@@ -16,7 +16,7 @@ type FilterSettings struct {
 
 // DefaultFilterSettings does not restrict files. ExpSync used to default to
 // mp3-only, but the lab schema includes other recorder outputs that should be
-// previewed and copied unless a future UI explicitly opts into filtering.
+// scanned and copied unless a future UI explicitly opts into filtering.
 func DefaultFilterSettings() FilterSettings {
 	return FilterSettings{}
 }

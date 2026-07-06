@@ -13,31 +13,31 @@ import (
 	"github.com/rclone/rclone/fs/walk"
 )
 
-// PreviewAction describes what a copy would do to one file.
-type PreviewAction int
+// ScanAction describes what a copy would do to one file.
+type ScanAction int
 
 const (
-	ActionCopy PreviewAction = iota
+	ActionCopy ScanAction = iota
 	ActionSkipIdentical
 )
 
-// PreviewEntry is one file a dry-run inspected.
-type PreviewEntry struct {
+// ScanEntry is one file a scan inspected.
+type ScanEntry struct {
 	RelPath string
 	Size    int64
-	Action  PreviewAction
+	Action  ScanAction
 }
 
-// PreviewResult summarizes a dry-run: what a real copy would transfer.
-type PreviewResult struct {
-	Entries    []PreviewEntry
+// ScanResult summarizes a scan: what a real copy would transfer.
+type ScanResult struct {
+	Entries    []ScanEntry
 	TotalBytes int64
 	CopyCount  int
 	SkipCount  int
 }
 
-// PreviewDirProgress summarizes one directory seen during a dry-run preview.
-type PreviewDirProgress struct {
+// ScanDirProgress summarizes one directory seen during a scan.
+type ScanDirProgress struct {
 	Path       string
 	Files      int
 	CopyCount  int
@@ -46,9 +46,9 @@ type PreviewDirProgress struct {
 	UpdatedSeq int
 }
 
-// PreviewProgress is a lightweight live snapshot emitted while a preview is
+// ScanProgress is a lightweight live snapshot emitted while a scan is
 // walking and comparing files.
-type PreviewProgress struct {
+type ScanProgress struct {
 	Label        string
 	CurrentDir   string
 	CurrentPath  string
@@ -57,87 +57,85 @@ type PreviewProgress struct {
 	CopyCount    int
 	SkipCount    int
 	TotalBytes   int64
-	Recent       []PreviewEntry
-	Dirs         []PreviewDirProgress
-	Done         bool
+	// Recent is every entry inspected so far this scan (not just the
+	// last few), so the UI can render the full per-folder file list live.
+	Recent []ScanEntry
+	Dirs   []ScanDirProgress
+	Done   bool
 }
 
-// PreviewProgressFunc receives live preview progress. Implementations should
+// ScanProgressFunc receives live scan progress. Implementations should
 // return quickly; slow UI work should be handed off to the UI thread.
-type PreviewProgressFunc func(PreviewProgress)
+type ScanProgressFunc func(ScanProgress)
 
-// PreviewBackup dry-runs syncing one whole experiment from src to dst
+// ScanBackup scans one whole experiment from src to dst
 // (Location <-> Location, mirrored under each side's own experiments/
 // root). Read-only, safe to call anytime.
-func PreviewBackup(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings) (PreviewResult, error) {
-	return PreviewBackupWithProgress(ctx, src, dst, experimentName, fset, nil)
+func ScanBackup(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings) (ScanResult, error) {
+	return ScanBackupWithProgress(ctx, src, dst, experimentName, fset, nil)
 }
 
-// PreviewBackupWithProgress is PreviewBackup with live progress updates.
-func PreviewBackupWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress PreviewProgressFunc) (PreviewResult, error) {
-	return previewCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, fset, experimentName, progress)
+// ScanBackupWithProgress is ScanBackup with live progress updates.
+func ScanBackupWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+	return scanCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, fset, experimentName, progress)
 }
 
-// PreviewDownload dry-runs copying an arbitrary sub-path (any depth: a
+// ScanDownload scans an arbitrary sub-path (any depth: a
 // whole experiment, one deployment date, one recorder directory, even a
 // single file) from src into destFolder, preserving srcRelPath's structure
 // under destFolder rather than flattening. destFolder is a raw local path
 // (from an OS folder picker), never a saved Location.
-func PreviewDownload(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings) (PreviewResult, error) {
-	return PreviewDownloadWithProgress(ctx, src, srcRelPath, destFolder, fset, nil)
+func ScanDownload(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings) (ScanResult, error) {
+	return ScanDownloadWithProgress(ctx, src, srcRelPath, destFolder, fset, nil)
 }
 
-// PreviewDownloadWithProgress is PreviewDownload with live progress updates.
-func PreviewDownloadWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, progress PreviewProgressFunc) (PreviewResult, error) {
+// ScanDownloadWithProgress is ScanDownload with live progress updates.
+func ScanDownloadWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	label := srcRelPath
 	if label == "" {
 		label = "experiments/"
 	}
-	return previewCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, fset, label, progress)
+	return scanCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, fset, label, progress)
 }
 
-// previewCopyPreserving is the shared dry-run implementation behind both
-// PreviewBackup and PreviewDownload: it walks <srcRoot>/<relPath> (through
+// scanCopyPreserving is the shared scan implementation behind both
+// ScanBackup and ScanDownload: it walks <srcRoot>/<relPath> (through
 // fset's filter) and diffs each file against <dstRoot>/<relPath>, without
 // transferring anything.
-func previewCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, label string, progress PreviewProgressFunc) (PreviewResult, error) {
+func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, label string, progress ScanProgressFunc) (ScanResult, error) {
 	ctx, err := withFilter(ctx, fset)
 	if err != nil {
-		return PreviewResult{}, err
+		return ScanResult{}, err
 	}
 
 	fsrc, err := cache.Get(ctx, joinSpec(srcRoot, relPath))
 	if err != nil {
-		return PreviewResult{}, err
+		return ScanResult{}, err
 	}
 	fdst, err := cache.Get(ctx, joinSpec(dstRoot, relPath))
 	if err != nil {
-		return PreviewResult{}, err
+		return ScanResult{}, err
 	}
 
-	var result PreviewResult
-	var recent []PreviewEntry
-	dirStats := map[string]*PreviewDirProgress{}
+	var result ScanResult
+	var recent []ScanEntry
+	dirStats := map[string]*ScanDirProgress{}
 	dirsSeen := 1
 	updateSeq := 0
 	lastEmit := time.Time{}
 
-	dirStats["."] = &PreviewDirProgress{Path: "."}
+	dirStats["."] = &ScanDirProgress{Path: "."}
 
-	snapshotDirs := func() []PreviewDirProgress {
-		dirs := make([]PreviewDirProgress, 0, len(dirStats))
+	snapshotDirs := func() []ScanDirProgress {
+		dirs := make([]ScanDirProgress, 0, len(dirStats))
 		for _, d := range dirStats {
 			dirs = append(dirs, *d)
 		}
+		// Stable path ordering so the folder list doesn't reshuffle as the
+		// scan progresses (the user needs to click folders mid-scan).
 		sort.Slice(dirs, func(i, j int) bool {
-			if dirs[i].UpdatedSeq == dirs[j].UpdatedSeq {
-				return dirs[i].Path < dirs[j].Path
-			}
-			return dirs[i].UpdatedSeq > dirs[j].UpdatedSeq
+			return dirs[i].Path < dirs[j].Path
 		})
-		if len(dirs) > 12 {
-			dirs = dirs[:12]
-		}
 		return dirs
 	}
 
@@ -150,8 +148,8 @@ func previewCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string
 			return
 		}
 		lastEmit = now
-		recentCopy := append([]PreviewEntry(nil), recent...)
-		progress(PreviewProgress{
+		recentCopy := append([]ScanEntry(nil), recent...)
+		progress(ScanProgress{
 			Label:        label,
 			CurrentDir:   displayDir(currentDir),
 			CurrentPath:  currentPath,
@@ -165,13 +163,13 @@ func previewCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string
 		})
 	}
 
-	ensureDir := func(dir string) *PreviewDirProgress {
+	ensureDir := func(dir string) *ScanDirProgress {
 		dir = displayDir(dir)
 		if stat, ok := dirStats[dir]; ok {
 			return stat
 		}
 		dirsSeen++
-		stat := &PreviewDirProgress{Path: dir}
+		stat := &ScanDirProgress{Path: dir}
 		dirStats[dir] = stat
 		return stat
 	}
@@ -184,7 +182,7 @@ func previewCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string
 				ensureDir(x.Remote()).UpdatedSeq = updateSeq
 				emit(x.Remote(), x.Remote(), false)
 			case fs.Object:
-				if err := previewOneObject(ctx, fdst, x, &result, &recent, ensureDir, &updateSeq); err != nil {
+				if err := scanOneObject(ctx, fdst, x, &result, &recent, ensureDir, &updateSeq); err != nil {
 					return err
 				}
 				emit(parentDir(x.Remote()), x.Remote(), false)
@@ -193,17 +191,17 @@ func previewCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string
 		return nil
 	})
 	if err != nil {
-		return PreviewResult{}, err
+		return ScanResult{}, err
 	}
 	if progress != nil {
-		progress(PreviewProgress{
+		progress(ScanProgress{
 			Label:        label,
 			FilesScanned: result.CopyCount + result.SkipCount,
 			DirsSeen:     dirsSeen,
 			CopyCount:    result.CopyCount,
 			SkipCount:    result.SkipCount,
 			TotalBytes:   result.TotalBytes,
-			Recent:       append([]PreviewEntry(nil), recent...),
+			Recent:       append([]ScanEntry(nil), recent...),
 			Dirs:         snapshotDirs(),
 			Done:         true,
 		})
@@ -211,7 +209,7 @@ func previewCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string
 	return result, nil
 }
 
-func previewOneObject(ctx context.Context, fdst fs.Fs, srcObj fs.Object, result *PreviewResult, recent *[]PreviewEntry, ensureDir func(string) *PreviewDirProgress, updateSeq *int) error {
+func scanOneObject(ctx context.Context, fdst fs.Fs, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) error {
 	relFile := srcObj.Remote()
 	action := ActionCopy
 
@@ -227,16 +225,13 @@ func previewOneObject(ctx context.Context, fdst fs.Fs, srcObj fs.Object, result 
 		return err
 	}
 
-	entry := PreviewEntry{
+	entry := ScanEntry{
 		RelPath: relFile,
 		Size:    srcObj.Size(),
 		Action:  action,
 	}
 	result.Entries = append(result.Entries, entry)
 	*recent = append(*recent, entry)
-	if len(*recent) > 10 {
-		*recent = (*recent)[len(*recent)-10:]
-	}
 
 	*updateSeq++
 	dir := ensureDir(parentDir(relFile))

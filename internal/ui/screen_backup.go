@@ -104,23 +104,23 @@ func showBackup(s *state) {
 		src, dst := *srcLoc, *dstLoc
 		fset, preserveModTime := s.cfg.DefaultFilter, s.cfg.PreserveModTime
 
-		tasks := make([]previewTask, 0, len(selected))
+		tasks := make([]scanTask, 0, len(selected))
 		for _, name := range selected {
 			name := name
-			tasks = append(tasks, previewTask{
+			tasks = append(tasks, scanTask{
 				Label: name,
 				Locs:  []syncengine.Location{src, dst},
-				Preview: func(ctx context.Context, progress syncengine.PreviewProgressFunc) (syncengine.PreviewResult, error) {
-					return syncengine.PreviewBackupWithProgress(ctx, src, dst, name, fset, progress)
+				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
+					return syncengine.ScanBackupWithProgress(ctx, src, dst, name, fset, progress)
 				},
-				Start: func(ctx context.Context, result syncengine.PreviewResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+				Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
 					return syncengine.StartBackup(ctx, src, dst, name, fset, preserveModTime, result)
 				},
 			})
 		}
-		showPreviewRunning(s, tasks, func() { showBackup(s) })
+		showScanRunning(s, tasks, func() { showBackup(s) })
 	})
-	previewBtn.Importance = widget.HighImportance
+	scanBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
@@ -133,7 +133,7 @@ func showBackup(s *state) {
 			statusLabel,
 			widget.NewSeparator(),
 		),
-		container.NewHBox(previewBtn, backBtn),
+		container.NewHBox(scanBtn, backBtn),
 		nil, nil,
 		container.NewVScroll(checkGroup),
 	)

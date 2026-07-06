@@ -112,22 +112,22 @@ func TestListChildren_AtEachDepth(t *testing.T) {
 	}
 }
 
-func TestPreviewAndStartBackup_WholeExperiment(t *testing.T) {
+func TestScanAndStartBackup_WholeExperiment(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
 	seedExperiment(t, srcRoot, "Luke - Zucchini")
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	scan, err := ScanBackup(ctx, src, dst, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.CopyCount != 5 {
-		t.Fatalf("preview.CopyCount = %d, want 5", preview.CopyCount)
+	if scan.CopyCount != 5 {
+		t.Fatalf("scan.CopyCount = %d, want 5", scan.CopyCount)
 	}
 
-	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -155,15 +155,15 @@ func TestDownloadPreservesSubPath(t *testing.T) {
 	fset := DefaultFilterSettings()
 	relPath := "Luke - Zucchini/2026-06-23"
 
-	preview, err := PreviewDownload(ctx, src, relPath, destFolder, fset)
+	scan, err := ScanDownload(ctx, src, relPath, destFolder, fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.CopyCount != 3 {
-		t.Fatalf("preview.CopyCount = %d, want 3", preview.CopyCount)
+	if scan.CopyCount != 3 {
+		t.Fatalf("scan.CopyCount = %d, want 3", scan.CopyCount)
 	}
 
-	_, progress := StartDownload(ctx, src, relPath, destFolder, fset, true, preview)
+	_, progress := StartDownload(ctx, src, relPath, destFolder, fset, true, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -190,11 +190,11 @@ func TestCopyPreserving_NeverDeletesDestinationOnlyFiles(t *testing.T) {
 	extraFile := filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "extra_not_in_source.mp3")
 	writeFile(t, extraFile, "must survive the copy")
 
-	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	scan, err := ScanBackup(ctx, src, dst, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	_, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -219,14 +219,14 @@ func TestExperimentNameWithSpecialCharacters(t *testing.T) {
 		t.Fatalf("ListExperiments = %v, want [%q]", exps, name)
 	}
 
-	preview, err := PreviewBackup(ctx, src, dst, name, fset)
+	scan, err := ScanBackup(ctx, src, dst, name, fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.CopyCount != 5 {
-		t.Fatalf("preview.CopyCount = %d, want 5", preview.CopyCount)
+	if scan.CopyCount != 5 {
+		t.Fatalf("scan.CopyCount = %d, want 5", scan.CopyCount)
 	}
-	_, progress := StartBackup(ctx, src, dst, name, fset, true, preview)
+	_, progress := StartBackup(ctx, src, dst, name, fset, true, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -241,11 +241,11 @@ func TestProgressReachesCompletion(t *testing.T) {
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	scan, err := ScanBackup(ctx, src, dst, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	_, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
 	final := drain(t, progress)
 
 	if final.Status != JobDone {
@@ -266,11 +266,11 @@ func TestCancelDoesNotHang(t *testing.T) {
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	preview, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	scan, err := ScanBackup(ctx, src, dst, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
+	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
 	job.Cancel()
 
 	final := drain(t, progress)
@@ -314,17 +314,17 @@ func assertFileMissing(t *testing.T, path string) {
 }
 
 func TestFilesFromFilter_MatchesCopyEntries(t *testing.T) {
-	preview := PreviewResult{
+	scan := ScanResult{
 		CopyCount: 2,
 		SkipCount: 1,
-		Entries: []PreviewEntry{
+		Entries: []ScanEntry{
 			{RelPath: "2026-06-23/RecorderA/260623_0900.mp3", Action: ActionCopy},
 			{RelPath: "2026-06-23/RecorderA/260623_0905.mp3", Action: ActionCopy},
 			{RelPath: "metadata.csv", Action: ActionSkipIdentical},
 		},
 	}
 
-	f := filesFromFilter(preview)
+	f := filesFromFilter(scan)
 	if f == nil {
 		t.Fatal("expected non-nil filter for CopyCount > 0")
 	}
@@ -348,23 +348,23 @@ func TestFilesFromFilter_MatchesCopyEntries(t *testing.T) {
 }
 
 func TestFilesFromFilter_NilWhenNoCopies(t *testing.T) {
-	preview := PreviewResult{
+	scan := ScanResult{
 		CopyCount: 0,
 		SkipCount: 3,
-		Entries: []PreviewEntry{
+		Entries: []ScanEntry{
 			{RelPath: "a.mp3", Action: ActionSkipIdentical},
 			{RelPath: "b.mp3", Action: ActionSkipIdentical},
 			{RelPath: "c.mp3", Action: ActionSkipIdentical},
 		},
 	}
-	if f := filesFromFilter(preview); f != nil {
+	if f := filesFromFilter(scan); f != nil {
 		t.Fatal("expected nil filter when CopyCount == 0")
 	}
 }
 
 // TestBackupAfterFullSync_NoCopyOptimization verifies that the CopyCount=0
 // fallback path (no cached filter, full scan) still works: after syncing
-// everything, a re-preview shows all skips, and a second backup is a no-op
+// everything, a re-scan shows all skips, and a second backup is a no-op
 // that completes successfully.
 func TestBackupAfterFullSync_NoCopyOptimization(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
@@ -374,29 +374,29 @@ func TestBackupAfterFullSync_NoCopyOptimization(t *testing.T) {
 	fset := DefaultFilterSettings()
 
 	// First sync: everything should copy.
-	preview1, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	scan1, err := ScanBackup(ctx, src, dst, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview1.CopyCount != 5 {
-		t.Fatalf("first preview.CopyCount = %d, want 5", preview1.CopyCount)
+	if scan1.CopyCount != 5 {
+		t.Fatalf("first scan.CopyCount = %d, want 5", scan1.CopyCount)
 	}
-	_, progress1 := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview1)
+	_, progress1 := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, scan1)
 	if final := drain(t, progress1); final.Status != JobDone {
 		t.Fatalf("first backup status = %v, want JobDone (err=%v)", final.Status, final.Err)
 	}
 
-	// Second preview: everything should be identical.
-	preview2, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	// Second scan: everything should be identical.
+	scan2, err := ScanBackup(ctx, src, dst, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview2.CopyCount != 0 {
-		t.Fatalf("second preview.CopyCount = %d, want 0", preview2.CopyCount)
+	if scan2.CopyCount != 0 {
+		t.Fatalf("second scan.CopyCount = %d, want 0", scan2.CopyCount)
 	}
 
-	// Second backup with CopyCount=0 preview (no-cache fallback path).
-	_, progress2 := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview2)
+	// Second backup with CopyCount=0 scan (no-cache fallback path).
+	_, progress2 := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, scan2)
 	final := drain(t, progress2)
 	if final.Status != JobDone {
 		t.Fatalf("second backup status = %v, want JobDone (err=%v)", final.Status, final.Err)

@@ -20,7 +20,7 @@ import (
 // deployment date, or one recorder directory. Scope selection is
 // deliberately folder-only, not single-file: rclone's fs.NewFs returns
 // ErrorIsFile (rooted at the parent, not the file) when pointed at a bare
-// file path, which syncengine's copy/preview helpers don't special-case -
+// file path, which syncengine's copy/scan helpers don't special-case -
 // so a single file isn't a safe scope choice here.
 func showDownload(s *state) {
 	names := locationNames(s.cfg.Locations)
@@ -166,7 +166,7 @@ func showDownload(s *state) {
 		})
 	})
 
-	previewBtn := widget.NewButton("Preview", func() {
+	scanBtn := widget.NewButton("Scan", func() {
 		if srcLoc == nil {
 			dialog.ShowInformation("Pick a source", "Choose a source location first.", s.win)
 			return
@@ -184,19 +184,19 @@ func showDownload(s *state) {
 		if chosenRelPath == "" {
 			label = "experiments/ (entire root)"
 		}
-		tasks := []previewTask{{
+		tasks := []scanTask{{
 			Label: label,
 			Locs:  []syncengine.Location{src},
-			Preview: func(ctx context.Context, progress syncengine.PreviewProgressFunc) (syncengine.PreviewResult, error) {
-				return syncengine.PreviewDownloadWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
+			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
+				return syncengine.ScanDownloadWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
 			},
-			Start: func(ctx context.Context, result syncengine.PreviewResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+			Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
 				return syncengine.StartDownload(ctx, src, chosenRelPath, dest, fset, preserveModTime, result)
 			},
 		}}
-		showPreviewRunning(s, tasks, func() { showDownload(s) })
+		showScanRunning(s, tasks, func() { showDownload(s) })
 	})
-	previewBtn.Importance = widget.HighImportance
+	scanBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
@@ -210,7 +210,7 @@ func showDownload(s *state) {
 			scopeLabel,
 			useCurrentFolderBtn,
 			container.NewHBox(chooseDestBtn, destLabel),
-			container.NewHBox(previewBtn, backBtn),
+			container.NewHBox(scanBtn, backBtn),
 		),
 		nil, nil,
 		list,

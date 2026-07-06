@@ -6,13 +6,13 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
-// previewJob is one dry-run result the user is being asked to confirm,
+// scanJob is one scan result the user is being asked to confirm,
 // paired with the closure that actually runs the real copy for it. It's
-// deliberately generic over Backup vs Download - screen_preview.go and
+// deliberately generic over Backup vs Download - screen_scan.go and
 // screen_progress.go never need to know which flow produced a job.
-type previewJob struct {
+type scanJob struct {
 	Label  string
-	Result syncengine.PreviewResult
+	Result syncengine.ScanResult
 	Start  func(ctx context.Context) (*syncengine.Job, <-chan syncengine.ProgressSnapshot)
 	// Locs holds the Location(s) involved in Start's copy (source and, for
 	// Backup, destination) so a failed job can offer to reconnect the right
@@ -20,9 +20,9 @@ type previewJob struct {
 	Locs []syncengine.Location
 }
 
-type previewTask struct {
-	Label   string
-	Locs    []syncengine.Location
-	Preview func(ctx context.Context, progress syncengine.PreviewProgressFunc) (syncengine.PreviewResult, error)
-	Start   func(ctx context.Context, result syncengine.PreviewResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot)
+type scanTask struct {
+	Label string
+	Locs  []syncengine.Location
+	Scan  func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error)
+	Start func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot)
 }
