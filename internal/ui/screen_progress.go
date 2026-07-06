@@ -22,9 +22,9 @@ import (
 type syncPhase int
 
 const (
-	phaseDryRunRunning syncPhase = iota
-	phaseDryRunComplete
-	phaseDryRunCancelled
+	phaseScanRunning syncPhase = iota
+	phaseScanComplete
+	phaseScanCancelled
 	phaseSyncing
 	phaseSyncComplete
 	phaseSyncCancelled
@@ -48,7 +48,7 @@ type fileUIState struct {
 	done      bool
 	err       error
 	hasError  bool
-	action    syncengine.PreviewAction
+	action    syncengine.ScanAction
 }
 
 type folderUIState struct {
@@ -70,8 +70,36 @@ type expUIState struct {
 	hasError    bool
 	folders     []*folderUIState
 	fileMap     map[string]*fileUIState
-	tempFolders []syncengine.PreviewDirProgress
-	tempRecent  []syncengine.PreviewEntry
+	tempFolders []syncengine.ScanDirProgress
+	tempRecent  []syncengine.ScanEntry
+}
+
+// barRow is one rendered row in a split sub-panel (Files or Folders): a real
+// item or a divider banner (used for the "N files not shown" notice when a
+// list is capped).
+type barRow struct {
+	divider  bool
+	label    string
+	summary  string
+	progress float64
+	err      error
+	hasError bool
+	isFolder bool
+	gray     bool    // render with a permanent grey wash (already-synced items)
+	refIdx   int     // index this row maps back to (folder rows only)
+	fade     float64 // 0 fully visible … 1 invisible (trailing rows of a capped list)
+}
+
+// isFullySkipped reports whether every file in the folder was already present
+// and identical at the destination (nothing to copy). Such folders are shown
+// in the "Already synced" section and stay grey.
+func (f *folderUIState) isFullySkipped() bool {
+	for _, file := range f.files {
+		if file.action != syncengine.ActionSkipIdentical {
+			return false
+		}
+	}
+	return len(f.files) > 0
 }
 
 type progressItemLayout struct {
@@ -108,6 +136,12 @@ func (l *progressItemLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 
 	content.Resize(size)
 	content.Move(fyne.NewPos(0, 0))
+
+	// Optional fade overlay (objects[3]) covers the whole row.
+	if len(objects) >= 4 {
+		objects[3].Resize(size)
+		objects[3].Move(fyne.NewPos(0, 0))
+	}
 }
 
 func createBackingBarItem() fyne.CanvasObject {
@@ -130,8 +164,11 @@ func createBackingBarItem() fyne.CanvasObject {
 	content := container.NewBorder(nil, nil, nil, trailing, nameLabel)
 	paddedContent := container.NewPadded(content)
 
+	// fade sits on top of everything; setItemFade tints it to fade a row out.
+	fade := canvas.NewRectangle(color.Transparent)
+
 	itemLayout := &progressItemLayout{percent: 0.0}
-	item := container.New(itemLayout, bg, fill, paddedContent)
+	item := container.New(itemLayout, bg, fill, paddedContent, fade)
 	return item
 }
 
@@ -189,12 +226,76 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 		bg.StrokeWidth = 0
 	}
 
+	setItemFade(obj, 0)
+
 	bg.Refresh()
 	fill.Refresh()
 	containerObj.Refresh()
 }
 
-func buildExpUIState(label string, result syncengine.PreviewResult) *expUIState {
+// updateDividerItem restyles a backing-bar item as a section divider (a muted
+// grey banner with centered text and no progress fill or summary).
+func updateDividerItem(obj fyne.CanvasObject, text string) {
+	containerObj := obj.(*fyne.Container)
+	bg := containerObj.Objects[0].(*canvas.Rectangle)
+	fill := containerObj.Objects[1].(*canvas.Rectangle)
+
+	paddedContent := containerObj.Objects[2].(*fyne.Container)
+	borderContainer := paddedContent.Objects[0].(*fyne.Container)
+	nameLabel := borderContainer.Objects[0].(*widget.Label)
+	trailing := borderContainer.Objects[1].(*fyne.Container)
+	errBtn := trailing.Objects[0].(*widget.Button)
+	summaryLabel := trailing.Objects[1].(*widget.Label)
+
+	nameLabel.SetText(text)
+	summaryLabel.SetText("")
+	errBtn.OnTapped = nil
+	errBtn.Hide()
+
+	layout := containerObj.Layout.(*progressItemLayout)
+	layout.percent = 0
+
+	bg.FillColor = color.NRGBA{R: 229, G: 231, B: 235, A: 255}
+	bg.StrokeWidth = 0
+	fill.FillColor = color.Transparent
+
+	setItemFade(obj, 0)
+
+	bg.Refresh()
+	fill.Refresh()
+	containerObj.Refresh()
+}
+
+// setItemFade tints a backing-bar item's top overlay (objects[3]) toward the
+// pane background. fade is 0 (fully visible) to 1 (invisible).
+func setItemFade(obj fyne.CanvasObject, fade float64) {
+	containerObj := obj.(*fyne.Container)
+	if len(containerObj.Objects) < 4 {
+		return
+	}
+	overlay := containerObj.Objects[3].(*canvas.Rectangle)
+	if fade <= 0 {
+		overlay.FillColor = color.Transparent
+	} else {
+		if fade > 1 {
+			fade = 1
+		}
+		overlay.FillColor = color.NRGBA{R: 240, G: 242, B: 245, A: uint8(fade * 255)}
+	}
+	overlay.Refresh()
+}
+
+// tintItemBg overrides a backing-bar item's background colour. Used to give
+// already-synced file rows a light grey wash so they read as distinct from
+// to-sync rows. Call after updateBackingBarItem (which sets the base colour).
+func tintItemBg(obj fyne.CanvasObject, c color.Color) {
+	containerObj := obj.(*fyne.Container)
+	bg := containerObj.Objects[0].(*canvas.Rectangle)
+	bg.FillColor = c
+	bg.Refresh()
+}
+
+func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 	exp := &expUIState{
 		label:      label,
 		status:     statusWaiting,
@@ -261,25 +362,36 @@ func buildExpUIState(label string, result syncengine.PreviewResult) *expUIState 
 	return exp
 }
 
-func createColumn(title string, list *widget.List) fyne.CanvasObject {
+func createColumn(title string, content fyne.CanvasObject) fyne.CanvasObject {
 	bg := canvas.NewRectangle(color.NRGBA{R: 240, G: 242, B: 245, A: 255})
 	bg.StrokeWidth = 1
 	bg.StrokeColor = color.NRGBA{R: 218, G: 220, B: 224, A: 255}
 	bg.CornerRadius = 8
 
 	titleLabel := widget.NewLabelWithStyle(title, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	headerBg := canvas.NewRectangle(color.NRGBA{R: 209, G: 213, B: 219, A: 255})
+	header := container.NewStack(headerBg, container.NewPadded(titleLabel))
 
 	colContent := container.NewBorder(
-		container.NewVBox(container.NewPadded(titleLabel), widget.NewSeparator()),
+		container.NewVBox(header, widget.NewSeparator()),
 		nil, nil, nil,
-		list,
+		content,
 	)
 
 	return container.NewStack(bg, colContent)
 }
 
-func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
-	phase := phaseDryRunRunning
+// sectionHeader is a heavy-weight banner that labels a Files sub-panel
+// ("Unsynced" / "Already synced"). It sits above its panel's list, so it
+// stays fixed while the list scrolls.
+func sectionHeader(title string) fyne.CanvasObject {
+	bg := canvas.NewRectangle(color.NRGBA{R: 240, G: 242, B: 245, A: 255})
+	label := widget.NewLabelWithStyle(title, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	return container.NewStack(bg, container.NewPadded(label))
+}
+
+func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
+	phase := phaseScanRunning
 	selectedExpIdx := -1
 	selectedFoldIdx := -1
 
@@ -294,7 +406,7 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 	var activeCancel context.CancelFunc
 	var currentJob atomic.Pointer[syncengine.Job]
 
-	titleLabel := widget.NewLabelWithStyle("Dry Run (Previewing...)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	titleLabel := widget.NewLabelWithStyle("Scanning...", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	speedLabel := widget.NewLabel("")
 	speedLabel.Hide()
 
@@ -315,7 +427,14 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 	errorLabel.Wrapping = fyne.TextWrapWord
 	errorLabel.Hide()
 
-	var expList, foldList, fileList *widget.List
+	// isSyncing reports whether a real copy has run (or is running). Progress
+	// bars only fill during/after an actual sync; a scan leaves them white
+	// because nothing has been transferred yet.
+	isSyncing := func() bool {
+		return phase == phaseSyncing || phase == phaseSyncComplete || phase == phaseSyncCancelled
+	}
+
+	var expList *widget.List
 
 	expList = widget.NewList(
 		func() int { return len(expStates) },
@@ -332,98 +451,241 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 		},
 	)
 
-	foldList = widget.NewList(
-		func() int {
-			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
-				return 0
+	// tempEntriesForFolder returns the subset of exp.tempRecent whose
+	// directory matches the currently selected tempFolder.
+	tempEntriesForFolder := func(exp *expUIState) []syncengine.ScanEntry {
+		if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.tempFolders) {
+			return nil
+		}
+		folderPath := exp.tempFolders[selectedFoldIdx].Path
+		var filtered []syncengine.ScanEntry
+		for _, e := range exp.tempRecent {
+			if path.Dir(e.RelPath) == folderPath {
+				filtered = append(filtered, e)
 			}
-			exp := expStates[selectedExpIdx]
-			if len(exp.folders) > 0 {
-				return len(exp.folders)
+		}
+		return filtered
+	}
+
+	// capAndFade limits a group to maxFileRows rows: a folder can hold
+	// thousands of files the user won't scroll, so we show the first rows,
+	// fade the trailing ones out, and append a "N files not shown" banner.
+	capAndFade := func(rows []barRow) []barRow {
+		const maxFileRows = 100
+		const fadeCount = 15
+		if len(rows) <= maxFileRows {
+			return rows
+		}
+		hidden := len(rows) - maxFileRows
+		rows = rows[:maxFileRows:maxFileRows]
+		for i := range rows {
+			remaining := len(rows) - 1 - i
+			if remaining < fadeCount {
+				rows[i].fade = 0.85 * float64(fadeCount-remaining) / float64(fadeCount)
 			}
-			return len(exp.tempFolders)
-		},
-		func() fyne.CanvasObject { return createBackingBarItem() },
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
-				return
+		}
+		return append(rows, barRow{divider: true, label: fmt.Sprintf("%d files not shown", hidden)})
+	}
+
+	// computeFileRows splits the selected folder's files into to-sync and
+	// already-synced groups. Works from live scan data (tempRecent) before
+	// completion and from exp.folders afterwards. Already-synced rows carry
+	// gray=true and no fill so they never turn blue.
+	computeFileRows := func() (unsynced, synced []barRow) {
+		if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+			return nil, nil
+		}
+		exp := expStates[selectedExpIdx]
+		if len(exp.folders) > 0 {
+			if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.folders) {
+				return nil, nil
 			}
-			exp := expStates[selectedExpIdx]
-			isSelected := selectedFoldIdx == int(id)
-			if len(exp.folders) > 0 {
-				fold := exp.folders[id]
+			for _, f := range exp.folders[selectedFoldIdx].files {
+				if f.action == syncengine.ActionSkipIdentical {
+					synced = append(synced, barRow{
+						label:   f.name,
+						summary: humanBytes(f.size),
+						gray:    true,
+					})
+					continue
+				}
 				prog := 0.0
-				if fold.totalBytes > 0 {
+				if isSyncing() && f.size > 0 {
+					prog = float64(f.bytesDone) / float64(f.size)
+				}
+				unsynced = append(unsynced, barRow{
+					label:    f.name,
+					summary:  fmt.Sprintf("%s / %s", humanBytes(f.bytesDone), humanBytes(f.size)),
+					progress: prog,
+					err:      f.err,
+					hasError: f.hasError,
+				})
+			}
+		} else {
+			for _, e := range tempEntriesForFolder(exp) {
+				if e.Action == syncengine.ActionSkipIdentical {
+					synced = append(synced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size), gray: true})
+				} else {
+					unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size)})
+				}
+			}
+		}
+		return capAndFade(unsynced), capAndFade(synced)
+	}
+
+	// computeFolderRows splits the selected experiment's folders into unsynced
+	// (has files to copy) and already-synced (all files identical) groups. The
+	// split is only known once exp.folders is populated (scan complete); while
+	// the scan is still running, tempFolders all show in the unsynced group.
+	// refIdx maps each row back to its folder index so selection works.
+	computeFolderRows := func() (unsynced, synced []barRow) {
+		if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+			return nil, nil
+		}
+		exp := expStates[selectedExpIdx]
+		if len(exp.folders) > 0 {
+			for i, fold := range exp.folders {
+				if fold.isFullySkipped() {
+					synced = append(synced, barRow{
+						label:    fold.path,
+						summary:  fmt.Sprintf("%d / %d files", fold.filesDone, fold.totalFiles),
+						isFolder: true,
+						gray:     true,
+						refIdx:   i,
+					})
+					continue
+				}
+				prog := 0.0
+				if isSyncing() && fold.totalBytes > 0 {
 					prog = float64(fold.bytesDone) / float64(fold.totalBytes)
 				}
-				summary := fmt.Sprintf("%d / %d files", fold.filesDone, fold.totalFiles)
-				updateBackingBarItem(obj, fold.path, summary, prog, nil, fold.hasError, true, isSelected, s.win)
-			} else {
-				row := exp.tempFolders[id]
+				unsynced = append(unsynced, barRow{
+					label:    fold.path,
+					summary:  fmt.Sprintf("%d / %d files", fold.filesDone, fold.totalFiles),
+					progress: prog,
+					hasError: fold.hasError,
+					isFolder: true,
+					refIdx:   i,
+				})
+			}
+		} else {
+			for i, row := range exp.tempFolders {
 				total := row.CopyCount + row.SkipCount
-				prog := 0.0
-				if total > 0 {
-					prog = float64(row.SkipCount) / float64(total)
-				}
-				summary := fmt.Sprintf("%d / %d files", row.SkipCount, total)
-				updateBackingBarItem(obj, row.Path, summary, prog, nil, false, true, isSelected, s.win)
+				unsynced = append(unsynced, barRow{
+					label:    row.Path,
+					summary:  fmt.Sprintf("%d / %d files", row.SkipCount, total),
+					isFolder: true,
+					refIdx:   i,
+				})
 			}
-		},
-	)
+		}
+		return unsynced, synced
+	}
 
-	fileList = widget.NewList(
-		func() int {
-			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
-				return 0
-			}
-			exp := expStates[selectedExpIdx]
-			if len(exp.folders) > 0 {
-				if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.folders) {
-					return 0
+	// makeBarList builds a list backed by a *[]barRow. isSelected (may be nil)
+	// decides which rows get the selection stroke; gray rows get a permanent
+	// grey wash.
+	makeBarList := func(rows *[]barRow, isSelected func(barRow) bool) *widget.List {
+		return widget.NewList(
+			func() int { return len(*rows) },
+			func() fyne.CanvasObject { return createBackingBarItem() },
+			func(id widget.ListItemID, obj fyne.CanvasObject) {
+				if int(id) < 0 || int(id) >= len(*rows) {
+					return
 				}
-				return len(exp.folders[selectedFoldIdx].files)
+				row := (*rows)[id]
+				if row.divider {
+					updateDividerItem(obj, row.label)
+					return
+				}
+				sel := false
+				if isSelected != nil {
+					sel = isSelected(row)
+				}
+				updateBackingBarItem(obj, row.label, row.summary, row.progress, row.err, row.hasError, row.isFolder, sel, s.win)
+				setItemFade(obj, row.fade)
+				if row.gray {
+					tintItemBg(obj, color.NRGBA{R: 243, G: 244, B: 246, A: 255})
+				}
+			},
+		)
+	}
+
+	// buildSplit wires two section lists into a VSplit and returns a function
+	// that shows one or both panels depending on which groups have rows.
+	buildSplit := func(unsyncedList, syncedList *widget.List) (fyne.CanvasObject, func(hasUnsynced, hasSynced bool)) {
+		unsyncedPanel := container.NewBorder(sectionHeader("Unsynced"), nil, nil, nil, unsyncedList)
+		syncedPanel := container.NewBorder(sectionHeader("Already synced"), nil, nil, nil, syncedList)
+		split := container.NewVSplit(unsyncedPanel, syncedPanel)
+		split.SetOffset(0.5)
+		applyMode := func(hasUnsynced, hasSynced bool) {
+			switch {
+			case hasUnsynced && hasSynced:
+				unsyncedPanel.Show()
+				syncedPanel.Show()
+				split.SetOffset(0.5)
+			case hasSynced:
+				unsyncedPanel.Hide()
+				syncedPanel.Show()
+				split.SetOffset(0.0)
+			default:
+				unsyncedPanel.Show()
+				syncedPanel.Hide()
+				split.SetOffset(1.0)
 			}
-			return len(exp.tempRecent)
-		},
-		func() fyne.CanvasObject { return createBackingBarItem() },
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+		}
+		return split, applyMode
+	}
+
+	// Files column.
+	var fileUnsyncedRows, fileSyncedRows []barRow
+	fileUnsyncedList := makeBarList(&fileUnsyncedRows, nil)
+	fileSyncedList := makeBarList(&fileSyncedRows, nil)
+	filesSplit, applyFilesMode := buildSplit(fileUnsyncedList, fileSyncedList)
+
+	refreshFiles := func() {
+		fileUnsyncedRows, fileSyncedRows = computeFileRows()
+		applyFilesMode(len(fileUnsyncedRows) > 0, len(fileSyncedRows) > 0)
+		fileUnsyncedList.Refresh()
+		fileSyncedList.Refresh()
+	}
+
+	// Folders column.
+	var foldUnsyncedRows, foldSyncedRows []barRow
+	foldSelected := func(r barRow) bool { return r.refIdx == selectedFoldIdx }
+	foldUnsyncedList := makeBarList(&foldUnsyncedRows, foldSelected)
+	foldSyncedList := makeBarList(&foldSyncedRows, foldSelected)
+	foldSplit, applyFoldMode := buildSplit(foldUnsyncedList, foldSyncedList)
+
+	refreshFolders := func() {
+		foldUnsyncedRows, foldSyncedRows = computeFolderRows()
+		applyFoldMode(len(foldUnsyncedRows) > 0, len(foldSyncedRows) > 0)
+		foldUnsyncedList.Refresh()
+		foldSyncedList.Refresh()
+	}
+
+	foldSelect := func(rows *[]barRow, other *widget.List) func(widget.ListItemID) {
+		return func(id widget.ListItemID) {
+			if int(id) < 0 || int(id) >= len(*rows) {
 				return
 			}
-			exp := expStates[selectedExpIdx]
-			if len(exp.folders) > 0 {
-				if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.folders) {
-					return
-				}
-				fold := exp.folders[selectedFoldIdx]
-				file := fold.files[id]
-				prog := 0.0
-				if file.size > 0 {
-					prog = float64(file.bytesDone) / float64(file.size)
-				}
-				summary := fmt.Sprintf("%s / %s", humanBytes(file.bytesDone), humanBytes(file.size))
-				updateBackingBarItem(obj, file.name, summary, prog, file.err, file.hasError, false, false, s.win)
-			} else {
-				idx := len(exp.tempRecent) - 1 - int(id)
-				if idx < 0 || idx >= len(exp.tempRecent) {
-					return
-				}
-				file := exp.tempRecent[idx]
-				prog := 0.0
-				if file.Action == syncengine.ActionSkipIdentical {
-					prog = 1.0
-				}
-				updateBackingBarItem(obj, path.Base(file.RelPath), humanBytes(file.Size), prog, nil, false, false, false, s.win)
-			}
-		},
-	)
+			other.UnselectAll()
+			selectedFoldIdx = (*rows)[id].refIdx
+			refreshFolders()
+			refreshFiles()
+		}
+	}
+	foldUnsyncedList.OnSelected = foldSelect(&foldUnsyncedRows, foldSyncedList)
+	foldSyncedList.OnSelected = foldSelect(&foldSyncedRows, foldUnsyncedList)
 
 	expList.OnSelected = func(id widget.ListItemID) {
 		selectedExpIdx = int(id)
 		selectedFoldIdx = 0
+		foldUnsyncedList.UnselectAll()
+		foldSyncedList.UnselectAll()
 		expList.Refresh()
-		foldList.Refresh()
-		fileList.Refresh()
+		refreshFolders()
+		refreshFiles()
 		if selectedExpIdx >= 0 && selectedExpIdx < len(expStates) {
 			exp := expStates[selectedExpIdx]
 			if exp.err != nil {
@@ -437,38 +699,32 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 		}
 	}
 
-	foldList.OnSelected = func(id widget.ListItemID) {
-		selectedFoldIdx = int(id)
-		foldList.Refresh()
-		fileList.Refresh()
-	}
-
 	columns := container.NewGridWithColumns(3,
 		createColumn("Experiments", expList),
-		createColumn("Folders", foldList),
-		createColumn("Files", fileList),
+		createColumn("Folders", foldSplit),
+		createColumn("Files", filesSplit),
 	)
 
-	var cancelBtn, backBtn, syncBtn, previewBtn *widget.Button
+	var cancelBtn, backBtn, syncBtn, scanBtn *widget.Button
 
 	refreshUI := func() {
 		switch phase {
-		case phaseDryRunRunning:
-			titleLabel.SetText("Dry Run (Previewing...)")
+		case phaseScanRunning:
+			titleLabel.SetText("Scanning...")
 			overallBar.Hide()
 			overallBarInf.Show()
 			overallBarInf.Start()
 			syncBtn.Hide()
-			previewBtn.Hide()
+			scanBtn.Hide()
 			cancelBtn.Show()
 			cancelBtn.Enable()
 			backBtn.Disable()
-		case phaseDryRunComplete:
-			titleLabel.SetText("Dry Run Complete")
+		case phaseScanComplete:
+			titleLabel.SetText("Ready to Sync")
 			overallBarInf.Stop()
 			overallBarInf.Hide()
 			overallBar.Hide()
-			previewBtn.Hide()
+			scanBtn.Hide()
 			syncBtn.Show()
 			var totalCopyToSync int
 			for _, e := range expStates {
@@ -487,21 +743,21 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 			}
 			cancelBtn.Hide()
 			backBtn.Enable()
-		case phaseDryRunCancelled:
-			titleLabel.SetText("Dry Run Cancelled")
+		case phaseScanCancelled:
+			titleLabel.SetText("Scan Cancelled")
 			overallBarInf.Stop()
 			overallBarInf.Hide()
 			overallBar.Hide()
 			syncBtn.Hide()
-			previewBtn.Show()
-			previewBtn.Enable()
+			scanBtn.Show()
+			scanBtn.Enable()
 			cancelBtn.Hide()
 			backBtn.Enable()
 		case phaseSyncing:
 			titleLabel.SetText("Syncing")
 			overallBarInf.Hide()
 			overallBar.Show()
-			previewBtn.Hide()
+			scanBtn.Hide()
 			syncBtn.Hide()
 			cancelBtn.Show()
 			cancelBtn.Enable()
@@ -522,7 +778,7 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 			overallBarInf.Hide()
 			overallBar.Show()
 			overallBar.SetValue(1.0)
-			previewBtn.Hide()
+			scanBtn.Hide()
 			syncBtn.Hide()
 			cancelBtn.Hide()
 			backBtn.SetText("Done")
@@ -531,7 +787,7 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 			titleLabel.SetText("Sync Cancelled")
 			overallBarInf.Hide()
 			overallBar.Show()
-			previewBtn.Hide()
+			scanBtn.Hide()
 			syncBtn.Show()
 			syncBtn.Enable()
 			cancelBtn.Hide()
@@ -563,26 +819,29 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 			}
 		}
 
-		if phase == phaseDryRunRunning {
+		if phase == phaseScanRunning {
 			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
 			filesValue.SetText(fmt.Sprintf("%d", totalFiles))
 			bytesValue.SetText(humanBytes(totalBytes))
-		} else if phase == phaseDryRunComplete || phase == phaseDryRunCancelled {
+		} else if phase == phaseScanComplete || phase == phaseScanCancelled {
 			expValue.SetText(fmt.Sprintf("%d", totalExps))
 			var copyFiles, skipFiles int
+			var copyBytes, skipBytes int64
 			for _, e := range expStates {
 				for _, f := range e.folders {
 					for _, file := range f.files {
 						if file.action == syncengine.ActionCopy {
 							copyFiles++
+							copyBytes += file.size
 						} else {
 							skipFiles++
+							skipBytes += file.size
 						}
 					}
 				}
 			}
-			filesValue.SetText(fmt.Sprintf("%d to sync / %d same", copyFiles, skipFiles))
-			bytesValue.SetText(humanBytes(totalBytes))
+			filesValue.SetText(fmt.Sprintf("%d unsynced / %d synced", copyFiles, skipFiles))
+			bytesValue.SetText(fmt.Sprintf("%s unsynced / %s synced", humanBytes(copyBytes), humanBytes(skipBytes)))
 		} else {
 			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
 			filesValue.SetText(fmt.Sprintf("%d / %d", totalFilesDone, totalFiles))
@@ -608,21 +867,21 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 
 		expList.Refresh()
 		// Only refresh foldList & fileList if the selected exp is static or changed.
-		// If we are in dry-run running and it's active, refresh.
+		// If we are in scan running and it's active, refresh.
 		if selectedExpIdx >= 0 && selectedExpIdx < len(expStates) {
 			exp := expStates[selectedExpIdx]
 			if len(exp.folders) == 0 {
-				foldList.Refresh()
-				fileList.Refresh()
+				refreshFolders()
+				refreshFiles()
 			}
 		} else {
-			foldList.Refresh()
-			fileList.Refresh()
+			refreshFolders()
+			refreshFiles()
 		}
 	}
 
 	cancelBtn = widget.NewButton("Cancel", func() {
-		if phase == phaseDryRunRunning {
+		if phase == phaseScanRunning {
 			if activeCancel != nil {
 				activeCancel()
 			}
@@ -638,23 +897,23 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 
 	backBtn = widget.NewButton("Back", onBack)
 
-	var previewResults []syncengine.PreviewResult = make([]syncengine.PreviewResult, len(tasks))
+	var scanResults []syncengine.ScanResult = make([]syncengine.ScanResult, len(tasks))
 
 	runSync := func() {
-		// Rebuild expStates from previewResults so progress is reset when
+		// Rebuild expStates from scanResults so progress is reset when
 		// re-running after a cancellation.
 		for i, t := range tasks {
-			expStates[i] = buildExpUIState(t.Label, previewResults[i])
+			expStates[i] = buildExpUIState(t.Label, scanResults[i])
 		}
 		selectedFoldIdx = 0
 		phase = phaseSyncing
 		refreshUI()
 
-		jobs := make([]previewJob, len(tasks))
+		jobs := make([]scanJob, len(tasks))
 		for i, t := range tasks {
 			taskCopy := t
-			resCopy := previewResults[i]
-			jobs[i] = previewJob{
+			resCopy := scanResults[i]
+			jobs[i] = scanJob{
 				Label:  t.Label,
 				Result: resCopy,
 				Locs:   t.Locs,
@@ -751,8 +1010,8 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 
 						// Force refreshing the active folders/files list during sync
 						if selectedExpIdx == i {
-							foldList.Refresh()
-							fileList.Refresh()
+							refreshFolders()
+							refreshFiles()
 						}
 						refreshUI()
 					})
@@ -789,8 +1048,8 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 					}
 
 					if selectedExpIdx == i {
-						foldList.Refresh()
-						fileList.Refresh()
+						refreshFolders()
+						refreshFiles()
 					}
 					refreshUI()
 				})
@@ -817,9 +1076,9 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 	syncBtn.Importance = widget.HighImportance
 	syncBtn.Hide()
 
-	previewBtn = widget.NewButton("Preview", nil) // OnTapped set after runPreview is defined
-	previewBtn.Importance = widget.MediumImportance
-	previewBtn.Hide()
+	scanBtn = widget.NewButton("Scan", nil) // OnTapped set after runScan is defined
+	scanBtn.Importance = widget.MediumImportance
+	scanBtn.Hide()
 
 	progressContainer := container.NewStack(overallBar, overallBarInf)
 
@@ -833,7 +1092,7 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 
 	content := container.NewBorder(
 		header,
-		container.NewHBox(cancelBtn, previewBtn, syncBtn, backBtn),
+		container.NewHBox(cancelBtn, scanBtn, syncBtn, backBtn),
 		nil, nil,
 		columns,
 	)
@@ -846,21 +1105,21 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 
 	refreshUI()
 
-	// runPreview resets state and (re-)runs the dry-run preview goroutine.
-	// It is called once at startup and again if the user clicks Preview after
+	// runScan resets state and (re-)runs the scan goroutine.
+	// It is called once at startup and again if the user clicks Scan after
 	// a cancellation.
-	var runPreview func()
-	runPreview = func() {
+	var runScan func()
+	runScan = func() {
 		// Reset experiment states so the lists are clean on re-run.
 		for i, t := range tasks {
 			expStates[i] = &expUIState{
 				label:  t.Label,
 				status: statusWaiting,
 			}
-			previewResults[i] = syncengine.PreviewResult{}
+			scanResults[i] = syncengine.ScanResult{}
 		}
 		selectedFoldIdx = 0
-		phase = phaseDryRunRunning
+		phase = phaseScanRunning
 		refreshUI()
 		if len(tasks) > 0 {
 			expList.Select(0)
@@ -869,7 +1128,7 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 		go func() {
 			cancelled := false
 			for i, task := range tasks {
-				if phase != phaseDryRunRunning {
+				if phase != phaseScanRunning {
 					cancelled = true
 					break
 				}
@@ -881,7 +1140,7 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 				ctx, cancel := context.WithCancel(context.Background())
 				activeCancel = cancel
 
-				result, err := task.Preview(ctx, func(p syncengine.PreviewProgress) {
+				result, err := task.Scan(ctx, func(p syncengine.ScanProgress) {
 					fyne.Do(func() {
 						expStates[i].tempFolders = p.Dirs
 						expStates[i].tempRecent = p.Recent
@@ -915,14 +1174,14 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 					break
 				}
 
-				previewResults[i] = result
+				scanResults[i] = result
 				fyne.Do(func() {
 					expStates[i] = buildExpUIState(task.Label, result)
 					expStates[i].status = statusDone
 					if selectedExpIdx == i {
 						selectedFoldIdx = 0
-						foldList.Refresh()
-						fileList.Refresh()
+						refreshFolders()
+						refreshFiles()
 						expList.Select(widget.ListItemID(i))
 					}
 					refreshUI()
@@ -931,18 +1190,18 @@ func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
 
 			fyne.Do(func() {
 				if cancelled {
-					phase = phaseDryRunCancelled
+					phase = phaseScanCancelled
 				} else {
-					phase = phaseDryRunComplete
+					phase = phaseScanComplete
 				}
 				refreshUI()
 			})
 		}()
 	}
 
-	previewBtn.OnTapped = runPreview
+	scanBtn.OnTapped = runScan
 
-	runPreview()
+	runScan()
 }
 
 // showErrorModal opens a scrollable dialog containing the full error text and
