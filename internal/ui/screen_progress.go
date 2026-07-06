@@ -2,17 +2,32 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image/color"
+	"path"
 	"sort"
 	"sync/atomic"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+)
+
+type syncPhase int
+
+const (
+	phaseDryRunRunning syncPhase = iota
+	phaseDryRunComplete
+	phaseDryRunCancelled
+	phaseSyncing
+	phaseSyncComplete
+	phaseSyncCancelled
 )
 
 type uiJobStatus int
@@ -25,400 +40,951 @@ const (
 	statusCanceled
 )
 
-type jobRunState struct {
-	job         previewJob
+type fileUIState struct {
+	relPath   string
+	name      string
+	size      int64
+	bytesDone int64
+	done      bool
+	err       error
+	hasError  bool
+	action    syncengine.PreviewAction
+}
+
+type folderUIState struct {
+	path       string
+	totalBytes int64
+	bytesDone  int64
+	totalFiles int
+	filesDone  int
+	hasError   bool
+	files      []*fileUIState
+}
+
+type expUIState struct {
+	label       string
 	status      uiJobStatus
 	err         error
-	filesDone   int
-	filesTotal  int
+	totalBytes  int64
 	bytesDone   int64
-	bytesTotal  int64
-	currentFile string
+	hasError    bool
+	folders     []*folderUIState
+	fileMap     map[string]*fileUIState
+	tempFolders []syncengine.PreviewDirProgress
+	tempRecent  []syncengine.PreviewEntry
 }
 
-func uiJobColor(status uiJobStatus) color.Color {
-	switch status {
-	case statusRunning:
-		return color.NRGBA{R: 52, G: 152, B: 219, A: 255} // Blue
-	case statusDone:
-		return color.NRGBA{R: 46, G: 160, B: 67, A: 255} // Green
-	case statusError:
-		return color.NRGBA{R: 209, G: 73, B: 73, A: 255} // Red
-	case statusCanceled:
-		return color.NRGBA{R: 230, G: 126, B: 34, A: 255} // Orange
-	default:
-		return color.NRGBA{R: 150, G: 154, B: 160, A: 255} // Grey (Waiting)
+type progressItemLayout struct {
+	percent float64
+}
+
+func (l *progressItemLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	if len(objects) >= 3 {
+		return objects[2].MinSize()
 	}
+	return fyne.NewSize(100, 32)
 }
 
-func showProgress(s *state, jobs []previewJob, onDone func()) {
-	runStates := make([]*jobRunState, len(jobs))
-	for i, j := range jobs {
-		runStates[i] = &jobRunState{
-			job:        j,
-			status:     statusWaiting,
-			filesTotal: j.Result.CopyCount,
-			bytesTotal: j.Result.TotalBytes,
+func (l *progressItemLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) < 3 {
+		return
+	}
+	bg := objects[0]
+	fill := objects[1]
+	content := objects[2]
+
+	bg.Resize(size)
+	bg.Move(fyne.NewPos(0, 0))
+
+	fillWidth := float32(float64(size.Width) * l.percent)
+	if fillWidth < 0 {
+		fillWidth = 0
+	}
+	if fillWidth > size.Width {
+		fillWidth = size.Width
+	}
+	fill.Resize(fyne.NewSize(fillWidth, size.Height))
+	fill.Move(fyne.NewPos(0, 0))
+
+	content.Resize(size)
+	content.Move(fyne.NewPos(0, 0))
+}
+
+func createBackingBarItem() fyne.CanvasObject {
+	bg := canvas.NewRectangle(color.White)
+	fill := canvas.NewRectangle(color.Transparent)
+
+	nameLabel := widget.NewLabel("")
+	nameLabel.Truncation = fyne.TextTruncateEllipsis
+
+	summaryLabel := widget.NewLabel("")
+	summaryLabel.Alignment = fyne.TextAlignTrailing
+
+	// errBtn is hidden by default; updateBackingBarItem shows it when there
+	// is an error and wires OnTapped to open the error detail modal.
+	errBtn := widget.NewButtonWithIcon("", theme.ErrorIcon(), nil)
+	errBtn.Importance = widget.DangerImportance
+	errBtn.Hide()
+
+	trailing := container.NewHBox(errBtn, summaryLabel)
+	content := container.NewBorder(nil, nil, nil, trailing, nameLabel)
+	paddedContent := container.NewPadded(content)
+
+	itemLayout := &progressItemLayout{percent: 0.0}
+	item := container.New(itemLayout, bg, fill, paddedContent)
+	return item
+}
+
+func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, progress float64, itemErr error, hasError bool, isFolder bool, isSelected bool, win fyne.Window) {
+	containerObj := obj.(*fyne.Container)
+	bg := containerObj.Objects[0].(*canvas.Rectangle)
+	fill := containerObj.Objects[1].(*canvas.Rectangle)
+
+	paddedContent := containerObj.Objects[2].(*fyne.Container)
+	borderContainer := paddedContent.Objects[0].(*fyne.Container)
+	nameLabel := borderContainer.Objects[0].(*widget.Label)
+	trailing := borderContainer.Objects[1].(*fyne.Container)
+	errBtn := trailing.Objects[0].(*widget.Button)
+	summaryLabel := trailing.Objects[1].(*widget.Label)
+
+	nameLabel.SetText(labelText)
+	summaryLabel.SetText(summaryText)
+	if itemErr != nil {
+		errText := itemErr.Error()
+		errBtn.OnTapped = func() { showErrorModal(win, errText) }
+		errBtn.Show()
+	} else {
+		errBtn.OnTapped = nil
+		errBtn.Hide()
+	}
+
+	layout := containerObj.Layout.(*progressItemLayout)
+	layout.percent = progress
+
+	var bgColor, fillColor color.Color
+
+	if itemErr != nil || (hasError && !isFolder) {
+		bgColor = color.NRGBA{R: 254, G: 226, B: 226, A: 255}
+		fillColor = color.NRGBA{R: 252, G: 165, B: 165, A: 255}
+	} else if hasError {
+		bgColor = color.NRGBA{R: 254, G: 243, B: 199, A: 255}
+		fillColor = color.NRGBA{R: 253, G: 186, B: 116, A: 255}
+	} else {
+		bgColor = color.White
+		if progress >= 1.0 {
+			fillColor = color.NRGBA{R: 147, G: 197, B: 253, A: 255}
+			bgColor = fillColor
+		} else {
+			fillColor = color.NRGBA{R: 219, G: 234, B: 254, A: 255}
 		}
 	}
 
-	titleLabel := widget.NewLabelWithStyle("Syncing", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	statusLabel := widget.NewLabel("Starting...")
+	bg.FillColor = bgColor
+	fill.FillColor = fillColor
+
+	if isSelected {
+		bg.StrokeColor = color.NRGBA{R: 59, G: 130, B: 246, A: 255}
+		bg.StrokeWidth = 2
+	} else {
+		bg.StrokeWidth = 0
+	}
+
+	bg.Refresh()
+	fill.Refresh()
+	containerObj.Refresh()
+}
+
+func buildExpUIState(label string, result syncengine.PreviewResult) *expUIState {
+	exp := &expUIState{
+		label:      label,
+		status:     statusWaiting,
+		totalBytes: result.TotalBytes,
+		fileMap:    make(map[string]*fileUIState),
+	}
+
+	dirsByPath := make(map[string][]*fileUIState)
+	for _, entry := range result.Entries {
+		dir := path.Dir(entry.RelPath)
+		if dir == "." {
+			dir = "."
+		}
+
+		done := entry.Action == syncengine.ActionSkipIdentical
+		var bytesDone int64
+		if done {
+			bytesDone = entry.Size
+		}
+
+		fileState := &fileUIState{
+			relPath:   entry.RelPath,
+			name:      path.Base(entry.RelPath),
+			size:      entry.Size,
+			bytesDone: bytesDone,
+			done:      done,
+			action:    entry.Action,
+		}
+
+		exp.fileMap[entry.RelPath] = fileState
+		dirsByPath[dir] = append(dirsByPath[dir], fileState)
+	}
+
+	for dirPath, files := range dirsByPath {
+		folder := &folderUIState{
+			path: dirPath,
+		}
+		for _, f := range files {
+			folder.totalBytes += f.size
+			folder.totalFiles++
+			if f.done {
+				folder.bytesDone += f.size
+				folder.filesDone++
+			}
+			folder.files = append(folder.files, f)
+		}
+		sort.SliceStable(folder.files, func(i, j int) bool {
+			if folder.files[i].action != folder.files[j].action {
+				return folder.files[i].action == syncengine.ActionCopy
+			}
+			return folder.files[i].relPath < folder.files[j].relPath
+		})
+		exp.folders = append(exp.folders, folder)
+	}
+
+	sort.Slice(exp.folders, func(i, j int) bool {
+		return exp.folders[i].path < exp.folders[j].path
+	})
+
+	for _, f := range exp.folders {
+		exp.bytesDone += f.bytesDone
+	}
+
+	return exp
+}
+
+func createColumn(title string, list *widget.List) fyne.CanvasObject {
+	bg := canvas.NewRectangle(color.NRGBA{R: 240, G: 242, B: 245, A: 255})
+	bg.StrokeWidth = 1
+	bg.StrokeColor = color.NRGBA{R: 218, G: 220, B: 224, A: 255}
+	bg.CornerRadius = 8
+
+	titleLabel := widget.NewLabelWithStyle(title, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+
+	colContent := container.NewBorder(
+		container.NewVBox(container.NewPadded(titleLabel), widget.NewSeparator()),
+		nil, nil, nil,
+		list,
+	)
+
+	return container.NewStack(bg, colContent)
+}
+
+func showSyncFlow(s *state, tasks []previewTask, onBack func()) {
+	phase := phaseDryRunRunning
+	selectedExpIdx := -1
+	selectedFoldIdx := -1
+
+	expStates := make([]*expUIState, len(tasks))
+	for i, t := range tasks {
+		expStates[i] = &expUIState{
+			label:  t.Label,
+			status: statusWaiting,
+		}
+	}
+
+	var activeCancel context.CancelFunc
+	var currentJob atomic.Pointer[syncengine.Job]
+
+	titleLabel := widget.NewLabelWithStyle("Dry Run (Previewing...)", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	speedLabel := widget.NewLabel("")
+	speedLabel.Hide()
 
 	overallBar := widget.NewProgressBar()
+	overallBarInf := widget.NewProgressBarInfinite()
 
-	progressValue := widget.NewLabelWithStyle("0 / 0", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	expValue := widget.NewLabelWithStyle("0 / 0", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	filesValue := widget.NewLabelWithStyle("0 / 0", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	bytesValue := widget.NewLabelWithStyle("0 B / 0 B", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	errorsValue := widget.NewLabelWithStyle("0", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	progressPanel := metricPanel("Progress", progressValue, color.NRGBA{R: 232, G: 240, B: 254, A: 255})
-	filesPanel := metricPanel("Files", filesValue, color.NRGBA{R: 255, G: 239, B: 219, A: 255})
-	bytesPanel := metricPanel("Bytes", bytesValue, color.NRGBA{R: 243, G: 232, B: 255, A: 255})
-	errorsPanel := metricPanel("Errors", errorsValue, color.NRGBA{R: 240, G: 240, B: 240, A: 255})
+	expBlurb := metricPanel("Experiments", expValue, color.NRGBA{R: 232, G: 240, B: 254, A: 255})
+	filesBlurb := metricPanel("Files", filesValue, color.NRGBA{R: 255, G: 239, B: 219, A: 255})
+	bytesBlurb := metricPanel("Bytes", bytesValue, color.NRGBA{R: 243, G: 232, B: 255, A: 255})
 
-	metrics := container.NewGridWithColumns(4, progressPanel, filesPanel, bytesPanel, errorsPanel)
+	metrics := container.NewGridWithColumns(3, expBlurb, filesBlurb, bytesBlurb)
 
-	var selectedID int = 0
-	var dirRows []syncengine.PreviewDirProgress
-	var fileRows []syncengine.PreviewEntry
+	errorLabel := widget.NewLabel("")
+	errorLabel.Wrapping = fyne.TextWrapWord
+	errorLabel.Hide()
 
-	selectedTitle := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	selectedTitle.Truncation = fyne.TextTruncateEllipsis
-	selectedSummary := widget.NewLabel("")
-	selectedSummary.Truncation = fyne.TextTruncateEllipsis
-	selectedErrorLabel := widget.NewLabel("")
-	selectedErrorLabel.Wrapping = fyne.TextWrapWord
-	selectedErrorLabel.Hide()
-	selectedJobBar := widget.NewProgressBar()
-	selectedCurrentFile := widget.NewLabel("")
-	selectedCurrentFile.Truncation = fyne.TextTruncateEllipsis
-	selectedCurrentFile.Hide()
+	var expList, foldList, fileList *widget.List
 
-	dirList := widget.NewList(
-		func() int { return len(dirRows) },
-		func() fyne.CanvasObject {
-			dot := canvas.NewCircle(color.NRGBA{R: 150, G: 154, B: 160, A: 255})
-			name := widget.NewLabel("")
-			name.Truncation = fyne.TextTruncateEllipsis
-			counts := widget.NewLabel("")
-			return container.NewBorder(nil, nil, container.NewGridWrap(fyne.NewSize(10, 10), dot), counts, name)
-		},
+	expList = widget.NewList(
+		func() int { return len(expStates) },
+		func() fyne.CanvasObject { return createBackingBarItem() },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			row := dirRows[id]
-			box := obj.(*fyne.Container)
-			dotWrap := box.Objects[1].(*fyne.Container)
-			dot := dotWrap.Objects[0].(*canvas.Circle)
-			name := box.Objects[0].(*widget.Label)
-			counts := box.Objects[2].(*widget.Label)
-
-			dot.FillColor = dirColor(row)
-			dot.Refresh()
-			name.SetText(row.Path)
-			counts.SetText(fmt.Sprintf("%d sync / %d same · %s", row.CopyCount, row.SkipCount, humanBytes(row.CopyBytes)))
-		},
-	)
-
-	fileList := widget.NewList(
-		func() int { return len(fileRows) },
-		func() fyne.CanvasObject {
-			dot := canvas.NewCircle(color.NRGBA{R: 150, G: 154, B: 160, A: 255})
-			action := widget.NewLabel("")
-			name := widget.NewLabel("")
-			name.Truncation = fyne.TextTruncateEllipsis
-			size := widget.NewLabel("")
-			left := container.NewHBox(container.NewGridWrap(fyne.NewSize(10, 10), dot), action)
-			return container.NewBorder(nil, nil, left, size, name)
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			entry := fileRows[id]
-			box := obj.(*fyne.Container)
-			left := box.Objects[1].(*fyne.Container)
-			dotWrap := left.Objects[0].(*fyne.Container)
-			dot := dotWrap.Objects[0].(*canvas.Circle)
-			action := left.Objects[1].(*widget.Label)
-			name := box.Objects[0].(*widget.Label)
-			size := box.Objects[2].(*widget.Label)
-
-			dot.FillColor = previewEntryColor(entry.Action)
-			dot.Refresh()
-			action.SetText(previewActionLabel(entry.Action))
-			name.SetText(entry.RelPath)
-			size.SetText(humanBytes(entry.Size))
-		},
-	)
-
-	refreshSelected := func(id int) {
-		selectedID = id
-		if id < 0 || id >= len(runStates) {
-			return
-		}
-		st := runStates[id]
-		selectedTitle.SetText(st.job.Label)
-
-		var statusStr string
-		switch st.status {
-		case statusWaiting:
-			statusStr = "Waiting to sync"
-		case statusRunning:
-			statusStr = fmt.Sprintf("Syncing: %d/%d files · %s/%s", st.filesDone, st.filesTotal, humanBytes(st.bytesDone), humanBytes(st.bytesTotal))
-		case statusDone:
-			statusStr = fmt.Sprintf("Completed: %d files (%s) synced", st.filesTotal, humanBytes(st.bytesTotal))
-		case statusError:
-			statusStr = "Failed: " + errString(st.err)
-		case statusCanceled:
-			statusStr = "Canceled"
-		}
-		selectedSummary.SetText(statusStr)
-
-		if st.status == statusError && st.err != nil {
-			selectedErrorLabel.SetText(st.err.Error())
-			selectedErrorLabel.Show()
-		} else {
-			selectedErrorLabel.SetText("")
-			selectedErrorLabel.Hide()
-		}
-
-		if st.bytesTotal > 0 {
-			selectedJobBar.SetValue(float64(st.bytesDone) / float64(st.bytesTotal))
-		} else {
-			selectedJobBar.SetValue(0)
-		}
-
-		if st.status == statusRunning && st.currentFile != "" {
-			selectedCurrentFile.SetText("Current file: " + st.currentFile)
-			selectedCurrentFile.Show()
-		} else {
-			selectedCurrentFile.Hide()
-		}
-
-		dirRows = previewDirs(st.job.Result)
-		fileRows = append([]syncengine.PreviewEntry(nil), st.job.Result.Entries...)
-		sort.SliceStable(fileRows, func(i, k int) bool {
-			if fileRows[i].Action != fileRows[k].Action {
-				return fileRows[i].Action == syncengine.ActionCopy
+			exp := expStates[id]
+			prog := 0.0
+			if exp.totalBytes > 0 {
+				prog = float64(exp.bytesDone) / float64(exp.totalBytes)
 			}
-			return fileRows[i].RelPath < fileRows[k].RelPath
-		})
+			summary := fmt.Sprintf("%d%%", int(prog*100))
+			isSelected := selectedExpIdx == int(id)
+			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win)
+		},
+	)
 
-		dirList.Refresh()
+	foldList = widget.NewList(
+		func() int {
+			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+				return 0
+			}
+			exp := expStates[selectedExpIdx]
+			if len(exp.folders) > 0 {
+				return len(exp.folders)
+			}
+			return len(exp.tempFolders)
+		},
+		func() fyne.CanvasObject { return createBackingBarItem() },
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+				return
+			}
+			exp := expStates[selectedExpIdx]
+			isSelected := selectedFoldIdx == int(id)
+			if len(exp.folders) > 0 {
+				fold := exp.folders[id]
+				prog := 0.0
+				if fold.totalBytes > 0 {
+					prog = float64(fold.bytesDone) / float64(fold.totalBytes)
+				}
+				summary := fmt.Sprintf("%d / %d files", fold.filesDone, fold.totalFiles)
+				updateBackingBarItem(obj, fold.path, summary, prog, nil, fold.hasError, true, isSelected, s.win)
+			} else {
+				row := exp.tempFolders[id]
+				total := row.CopyCount + row.SkipCount
+				prog := 0.0
+				if total > 0 {
+					prog = float64(row.SkipCount) / float64(total)
+				}
+				summary := fmt.Sprintf("%d / %d files", row.SkipCount, total)
+				updateBackingBarItem(obj, row.Path, summary, prog, nil, false, true, isSelected, s.win)
+			}
+		},
+	)
+
+	fileList = widget.NewList(
+		func() int {
+			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+				return 0
+			}
+			exp := expStates[selectedExpIdx]
+			if len(exp.folders) > 0 {
+				if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.folders) {
+					return 0
+				}
+				return len(exp.folders[selectedFoldIdx].files)
+			}
+			return len(exp.tempRecent)
+		},
+		func() fyne.CanvasObject { return createBackingBarItem() },
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+				return
+			}
+			exp := expStates[selectedExpIdx]
+			if len(exp.folders) > 0 {
+				if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.folders) {
+					return
+				}
+				fold := exp.folders[selectedFoldIdx]
+				file := fold.files[id]
+				prog := 0.0
+				if file.size > 0 {
+					prog = float64(file.bytesDone) / float64(file.size)
+				}
+				summary := fmt.Sprintf("%s / %s", humanBytes(file.bytesDone), humanBytes(file.size))
+				updateBackingBarItem(obj, file.name, summary, prog, file.err, file.hasError, false, false, s.win)
+			} else {
+				idx := len(exp.tempRecent) - 1 - int(id)
+				if idx < 0 || idx >= len(exp.tempRecent) {
+					return
+				}
+				file := exp.tempRecent[idx]
+				prog := 0.0
+				if file.Action == syncengine.ActionSkipIdentical {
+					prog = 1.0
+				}
+				updateBackingBarItem(obj, path.Base(file.RelPath), humanBytes(file.Size), prog, nil, false, false, false, s.win)
+			}
+		},
+	)
+
+	expList.OnSelected = func(id widget.ListItemID) {
+		selectedExpIdx = int(id)
+		selectedFoldIdx = 0
+		expList.Refresh()
+		foldList.Refresh()
+		fileList.Refresh()
+		if selectedExpIdx >= 0 && selectedExpIdx < len(expStates) {
+			exp := expStates[selectedExpIdx]
+			if exp.err != nil {
+				errorLabel.SetText(fmt.Sprintf("Error in %s: %s", exp.label, exp.err.Error()))
+				errorLabel.Show()
+			} else {
+				errorLabel.Hide()
+			}
+		} else {
+			errorLabel.Hide()
+		}
+	}
+
+	foldList.OnSelected = func(id widget.ListItemID) {
+		selectedFoldIdx = int(id)
+		foldList.Refresh()
 		fileList.Refresh()
 	}
 
-	list := widget.NewList(
-		func() int { return len(runStates) },
-		func() fyne.CanvasObject {
-			dot := canvas.NewCircle(color.NRGBA{R: 150, G: 154, B: 160, A: 255})
-			name := widget.NewLabel("")
-			name.Truncation = fyne.TextTruncateEllipsis
-			statusText := widget.NewLabel("")
-			return container.NewBorder(nil, nil, container.NewGridWrap(fyne.NewSize(10, 10), dot), statusText, name)
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			state := runStates[id]
-			box := obj.(*fyne.Container)
-			dotWrap := box.Objects[1].(*fyne.Container)
-			dot := dotWrap.Objects[0].(*canvas.Circle)
-			name := box.Objects[0].(*widget.Label)
-			statusText := box.Objects[2].(*widget.Label)
+	columns := container.NewGridWithColumns(3,
+		createColumn("Experiments", expList),
+		createColumn("Folders", foldList),
+		createColumn("Files", fileList),
+	)
 
-			dot.FillColor = uiJobColor(state.status)
-			dot.Refresh()
-			name.SetText(state.job.Label)
+	var cancelBtn, backBtn, syncBtn, previewBtn *widget.Button
 
-			var st string
-			switch state.status {
-			case statusWaiting:
-				st = "waiting"
-			case statusRunning:
-				if state.bytesTotal > 0 {
-					st = fmt.Sprintf("syncing (%d%%)", int(float64(state.bytesDone)*100/float64(state.bytesTotal)))
-				} else {
-					st = "syncing..."
+	refreshUI := func() {
+		switch phase {
+		case phaseDryRunRunning:
+			titleLabel.SetText("Dry Run (Previewing...)")
+			overallBar.Hide()
+			overallBarInf.Show()
+			overallBarInf.Start()
+			syncBtn.Hide()
+			previewBtn.Hide()
+			cancelBtn.Show()
+			cancelBtn.Enable()
+			backBtn.Disable()
+		case phaseDryRunComplete:
+			titleLabel.SetText("Dry Run Complete")
+			overallBarInf.Stop()
+			overallBarInf.Hide()
+			overallBar.Hide()
+			previewBtn.Hide()
+			syncBtn.Show()
+			var totalCopyToSync int
+			for _, e := range expStates {
+				for _, f := range e.folders {
+					for _, file := range f.files {
+						if file.action == syncengine.ActionCopy {
+							totalCopyToSync++
+						}
+					}
 				}
-			case statusDone:
-				st = "done"
-			case statusError:
-				st = "failed"
-			case statusCanceled:
-				st = "canceled"
 			}
-			statusText.SetText(st)
-		},
-	)
-	list.OnSelected = func(id widget.ListItemID) {
-		if id >= 0 && id < len(runStates) {
-			refreshSelected(id)
-		}
-	}
-
-	detailsHeader := container.NewVBox(
-		selectedTitle,
-		selectedSummary,
-		selectedErrorLabel,
-		selectedJobBar,
-		selectedCurrentFile,
-		widget.NewSeparator(),
-	)
-
-	details := container.NewVSplit(
-		container.NewBorder(
-			detailsHeader,
-			nil, nil, nil,
-			dirList,
-		),
-		container.NewBorder(
-			widget.NewLabelWithStyle("Files", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			nil, nil, nil,
-			fileList,
-		),
-	)
-	details.Offset = 0.45
-
-	body := container.NewHSplit(
-		container.NewBorder(widget.NewLabelWithStyle("Experiments", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, nil, nil, list),
-		details,
-	)
-	body.Offset = 0.34
-
-	var currentJob atomic.Pointer[syncengine.Job]
-	cancelBtn := widget.NewButton("Cancel current", func() {
-		if job := currentJob.Load(); job != nil {
-			job.Cancel()
-		}
-	})
-	doneBtn := widget.NewButton("Done", onDone)
-	doneBtn.Disable()
-
-	updateUI := func() {
-		var overallDoneBytes, overallTotalBytes int64
-		var overallDoneFiles, overallTotalFiles int
-		var compCount, errCount int
-
-		for _, rs := range runStates {
-			overallDoneBytes += rs.bytesDone
-			overallTotalBytes += rs.bytesTotal
-			overallDoneFiles += rs.filesDone
-			overallTotalFiles += rs.filesTotal
-			if rs.status == statusDone || rs.status == statusError || rs.status == statusCanceled {
-				compCount++
+			if totalCopyToSync > 0 {
+				syncBtn.Enable()
+			} else {
+				syncBtn.Disable()
 			}
-			if rs.status == statusError {
-				errCount++
+			cancelBtn.Hide()
+			backBtn.Enable()
+		case phaseDryRunCancelled:
+			titleLabel.SetText("Dry Run Cancelled")
+			overallBarInf.Stop()
+			overallBarInf.Hide()
+			overallBar.Hide()
+			syncBtn.Hide()
+			previewBtn.Show()
+			previewBtn.Enable()
+			cancelBtn.Hide()
+			backBtn.Enable()
+		case phaseSyncing:
+			titleLabel.SetText("Syncing")
+			overallBarInf.Hide()
+			overallBar.Show()
+			previewBtn.Hide()
+			syncBtn.Hide()
+			cancelBtn.Show()
+			cancelBtn.Enable()
+			backBtn.Disable()
+		case phaseSyncComplete:
+			var hasAnyErrors bool
+			for _, e := range expStates {
+				if e.hasError {
+					hasAnyErrors = true
+					break
+				}
 			}
-		}
-
-		if compCount == len(runStates) {
-			if errCount > 0 {
+			if hasAnyErrors {
 				titleLabel.SetText("Sync Completed with Errors")
 			} else {
 				titleLabel.SetText("Sync Complete")
 			}
-			statusLabel.SetText(fmt.Sprintf("All done. %d experiments processed with %d error(s).", len(runStates), errCount))
-		} else {
-			titleLabel.SetText("Syncing...")
-			statusLabel.SetText(fmt.Sprintf("Syncing %d experiments · %d/%d files (%s/%s)",
-				len(runStates), overallDoneFiles, overallTotalFiles, humanBytes(overallDoneBytes), humanBytes(overallTotalBytes)))
+			overallBarInf.Hide()
+			overallBar.Show()
+			overallBar.SetValue(1.0)
+			previewBtn.Hide()
+			syncBtn.Hide()
+			cancelBtn.Hide()
+			backBtn.SetText("Done")
+			backBtn.Enable()
+		case phaseSyncCancelled:
+			titleLabel.SetText("Sync Cancelled")
+			overallBarInf.Hide()
+			overallBar.Show()
+			previewBtn.Hide()
+			syncBtn.Show()
+			syncBtn.Enable()
+			cancelBtn.Hide()
+			backBtn.Enable()
 		}
 
-		if overallTotalBytes > 0 {
-			overallBar.SetValue(float64(overallDoneBytes) / float64(overallTotalBytes))
-		} else {
-			overallBar.SetValue(0)
-		}
+		var totalExpsDone, totalExps int
+		var totalFilesDone, totalFiles int
+		var totalBytesDone, totalBytes int64
 
-		progressValue.SetText(fmt.Sprintf("%d / %d", compCount, len(runStates)))
-		filesValue.SetText(fmt.Sprintf("%d / %d", overallDoneFiles, overallTotalFiles))
-		bytesValue.SetText(fmt.Sprintf("%s / %s", humanBytes(overallDoneBytes), humanBytes(overallTotalBytes)))
-		errorsValue.SetText(fmt.Sprintf("%d", errCount))
-
-		if stack, ok := errorsPanel.(*fyne.Container); ok && len(stack.Objects) > 0 {
-			if rect, ok := stack.Objects[0].(*canvas.Rectangle); ok {
-				if errCount > 0 {
-					rect.FillColor = color.NRGBA{R: 253, G: 237, B: 237, A: 255} // soft red
-				} else {
-					rect.FillColor = color.NRGBA{R: 240, G: 240, B: 240, A: 255} // light grey
+		totalExps = len(expStates)
+		for _, e := range expStates {
+			if e.status == statusDone || e.status == statusError || e.status == statusCanceled {
+				totalExpsDone++
+			}
+			if len(e.folders) > 0 {
+				for _, fold := range e.folders {
+					totalFiles += fold.totalFiles
+					totalFilesDone += fold.filesDone
+					totalBytes += fold.totalBytes
+					totalBytesDone += fold.bytesDone
 				}
-				rect.Refresh()
+			} else {
+				for _, row := range e.tempFolders {
+					totalFiles += row.CopyCount + row.SkipCount
+					totalFilesDone += row.SkipCount
+					totalBytes += row.CopyBytes
+				}
 			}
 		}
+
+		if phase == phaseDryRunRunning {
+			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
+			filesValue.SetText(fmt.Sprintf("%d", totalFiles))
+			bytesValue.SetText(humanBytes(totalBytes))
+		} else if phase == phaseDryRunComplete || phase == phaseDryRunCancelled {
+			expValue.SetText(fmt.Sprintf("%d", totalExps))
+			var copyFiles, skipFiles int
+			for _, e := range expStates {
+				for _, f := range e.folders {
+					for _, file := range f.files {
+						if file.action == syncengine.ActionCopy {
+							copyFiles++
+						} else {
+							skipFiles++
+						}
+					}
+				}
+			}
+			filesValue.SetText(fmt.Sprintf("%d to sync / %d same", copyFiles, skipFiles))
+			bytesValue.SetText(humanBytes(totalBytes))
+		} else {
+			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
+			filesValue.SetText(fmt.Sprintf("%d / %d", totalFilesDone, totalFiles))
+			bytesValue.SetText(fmt.Sprintf("%s / %s", humanBytes(totalBytesDone), humanBytes(totalBytes)))
+			if totalBytes > 0 {
+				overallBar.SetValue(float64(totalBytesDone) / float64(totalBytes))
+			} else {
+				overallBar.SetValue(1.0)
+			}
+		}
+
+		if selectedExpIdx >= 0 && selectedExpIdx < len(expStates) {
+			exp := expStates[selectedExpIdx]
+			if exp.err != nil {
+				errorLabel.SetText(fmt.Sprintf("Error in %s: %s", exp.label, exp.err.Error()))
+				errorLabel.Show()
+			} else {
+				errorLabel.Hide()
+			}
+		} else {
+			errorLabel.Hide()
+		}
+
+		expList.Refresh()
+		// Only refresh foldList & fileList if the selected exp is static or changed.
+		// If we are in dry-run running and it's active, refresh.
+		if selectedExpIdx >= 0 && selectedExpIdx < len(expStates) {
+			exp := expStates[selectedExpIdx]
+			if len(exp.folders) == 0 {
+				foldList.Refresh()
+				fileList.Refresh()
+			}
+		} else {
+			foldList.Refresh()
+			fileList.Refresh()
+		}
 	}
+
+	cancelBtn = widget.NewButton("Cancel", func() {
+		if phase == phaseDryRunRunning {
+			if activeCancel != nil {
+				activeCancel()
+			}
+		} else if phase == phaseSyncing {
+			if job := currentJob.Load(); job != nil {
+				job.Cancel()
+			}
+			if activeCancel != nil {
+				activeCancel()
+			}
+		}
+	})
+
+	backBtn = widget.NewButton("Back", onBack)
+
+	var previewResults []syncengine.PreviewResult = make([]syncengine.PreviewResult, len(tasks))
+
+	runSync := func() {
+		// Rebuild expStates from previewResults so progress is reset when
+		// re-running after a cancellation.
+		for i, t := range tasks {
+			expStates[i] = buildExpUIState(t.Label, previewResults[i])
+		}
+		selectedFoldIdx = 0
+		phase = phaseSyncing
+		refreshUI()
+
+		jobs := make([]previewJob, len(tasks))
+		for i, t := range tasks {
+			taskCopy := t
+			resCopy := previewResults[i]
+			jobs[i] = previewJob{
+				Label:  t.Label,
+				Result: resCopy,
+				Locs:   t.Locs,
+				Start: func(ctx context.Context) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+					return taskCopy.Start(ctx, resCopy)
+				},
+			}
+		}
+
+		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			activeCancel = cancel
+
+			for i, j := range jobs {
+				if ctx.Err() != nil {
+					break
+				}
+
+				fyne.Do(func() {
+					expStates[i].status = statusRunning
+					refreshUI()
+				})
+
+				job, progress := j.Start(ctx)
+				currentJob.Store(job)
+
+				var final syncengine.ProgressSnapshot
+				for snap := range progress {
+					final = snap
+					snap := snap
+					fyne.Do(func() {
+						completedBytesSum := int64(0)
+						for _, file := range expStates[i].fileMap {
+							if p, ok := snap.Files[file.relPath]; ok {
+								file.done = p.Done
+								file.bytesDone = p.BytesDone
+								file.err = p.Err
+								file.hasError = p.Err != nil
+							} else if file.action == syncengine.ActionSkipIdentical {
+								file.done = true
+								file.bytesDone = file.size
+							} else {
+								if file.relPath != snap.CurrentFile {
+									file.done = false
+									file.bytesDone = 0
+								}
+							}
+							if file.done && file.relPath != snap.CurrentFile {
+								completedBytesSum += file.size
+							}
+						}
+
+						if snap.CurrentFile != "" {
+							if file, ok := expStates[i].fileMap[snap.CurrentFile]; ok {
+								fileBytes := snap.BytesDone - completedBytesSum
+								if fileBytes < 0 {
+									fileBytes = 0
+								}
+								if fileBytes > file.size {
+									fileBytes = file.size
+								}
+								file.bytesDone = fileBytes
+								file.done = (fileBytes == file.size)
+							}
+						}
+
+						expStates[i].hasError = false
+						expStates[i].bytesDone = 0
+						for _, fold := range expStates[i].folders {
+							fold.bytesDone = 0
+							fold.filesDone = 0
+							fold.hasError = false
+							for _, file := range fold.files {
+								fold.bytesDone += file.bytesDone
+								if file.done {
+									fold.filesDone++
+								}
+								if file.hasError {
+									fold.hasError = true
+								}
+							}
+							expStates[i].bytesDone += fold.bytesDone
+							if fold.hasError {
+								expStates[i].hasError = true
+							}
+						}
+
+						if snap.Speed > 0 {
+							speedLabel.SetText(fmt.Sprintf("Speed: %s/s", humanSpeed(snap.Speed)))
+							speedLabel.Show()
+						} else {
+							speedLabel.Hide()
+						}
+
+						// Force refreshing the active folders/files list during sync
+						if selectedExpIdx == i {
+							foldList.Refresh()
+							fileList.Refresh()
+						}
+						refreshUI()
+					})
+				}
+
+				fyne.Do(func() {
+					statusText := statusDone
+					var jobErr error
+					switch final.Status {
+					case syncengine.JobError:
+						statusText = statusError
+						jobErr = final.Err
+						expStates[i].hasError = true
+						expStates[i].err = final.Err
+						if isAuthError(final.Err) {
+							showLocationError(s, final.Err, j.Locs...)
+						}
+					case syncengine.JobCanceled:
+						statusText = statusCanceled
+					}
+					expStates[i].status = statusText
+					expStates[i].err = jobErr
+
+					if statusText == statusDone {
+						for _, fold := range expStates[i].folders {
+							fold.bytesDone = fold.totalBytes
+							fold.filesDone = fold.totalFiles
+							for _, file := range fold.files {
+								file.bytesDone = file.size
+								file.done = true
+							}
+						}
+						expStates[i].bytesDone = expStates[i].totalBytes
+					}
+
+					if selectedExpIdx == i {
+						foldList.Refresh()
+						fileList.Refresh()
+					}
+					refreshUI()
+				})
+			}
+
+			// Check cancellation before calling cancel() so ctx.Err() reflects
+			// whether the user cancelled, not the cleanup cancel below.
+			wasCancelled := ctx.Err() != nil
+			cancel()
+
+			fyne.Do(func() {
+				if wasCancelled {
+					phase = phaseSyncCancelled
+				} else {
+					phase = phaseSyncComplete
+				}
+				speedLabel.Hide()
+				refreshUI()
+			})
+		}()
+	}
+
+	syncBtn = widget.NewButton("Sync", runSync)
+	syncBtn.Importance = widget.HighImportance
+	syncBtn.Hide()
+
+	previewBtn = widget.NewButton("Preview", nil) // OnTapped set after runPreview is defined
+	previewBtn.Importance = widget.MediumImportance
+	previewBtn.Hide()
+
+	progressContainer := container.NewStack(overallBar, overallBarInf)
+
+	header := container.NewVBox(
+		container.NewHBox(titleLabel, speedLabel),
+		progressContainer,
+		metrics,
+		errorLabel,
+		widget.NewSeparator(),
+	)
 
 	content := container.NewBorder(
-		container.NewVBox(titleLabel, statusLabel, overallBar, metrics, widget.NewSeparator()),
-		container.NewHBox(cancelBtn, doneBtn),
+		header,
+		container.NewHBox(cancelBtn, previewBtn, syncBtn, backBtn),
 		nil, nil,
-		body,
+		columns,
 	)
+
 	s.setContent(container.NewPadded(content))
 
-	updateUI()
-	if len(jobs) > 0 {
-		list.Select(0)
+	if len(tasks) > 0 {
+		expList.Select(0)
 	}
 
-	go func() {
-		for i, j := range jobs {
-			i, j := i, j
-			fyne.Do(func() {
-				runStates[i].status = statusRunning
-				list.Refresh()
-				if selectedID == i {
-					refreshSelected(i)
+	refreshUI()
+
+	// runPreview resets state and (re-)runs the dry-run preview goroutine.
+	// It is called once at startup and again if the user clicks Preview after
+	// a cancellation.
+	var runPreview func()
+	runPreview = func() {
+		// Reset experiment states so the lists are clean on re-run.
+		for i, t := range tasks {
+			expStates[i] = &expUIState{
+				label:  t.Label,
+				status: statusWaiting,
+			}
+			previewResults[i] = syncengine.PreviewResult{}
+		}
+		selectedFoldIdx = 0
+		phase = phaseDryRunRunning
+		refreshUI()
+		if len(tasks) > 0 {
+			expList.Select(0)
+		}
+
+		go func() {
+			cancelled := false
+			for i, task := range tasks {
+				if phase != phaseDryRunRunning {
+					cancelled = true
+					break
 				}
-				updateUI()
-			})
-
-			job, progress := j.Start(context.Background())
-			currentJob.Store(job)
-
-			var final syncengine.ProgressSnapshot
-			for snap := range progress {
-				final = snap
-				snap := snap
 				fyne.Do(func() {
-					runStates[i].filesDone = snap.FilesDone
-					runStates[i].filesTotal = snap.FilesTotal
-					runStates[i].bytesDone = snap.BytesDone
-					runStates[i].bytesTotal = snap.BytesTotal
-					runStates[i].currentFile = snap.CurrentFile
+					expStates[i].status = statusRunning
+					refreshUI()
+				})
 
-					updateUI()
-					if selectedID == i {
-						refreshSelected(i)
+				ctx, cancel := context.WithCancel(context.Background())
+				activeCancel = cancel
+
+				result, err := task.Preview(ctx, func(p syncengine.PreviewProgress) {
+					fyne.Do(func() {
+						expStates[i].tempFolders = p.Dirs
+						expStates[i].tempRecent = p.Recent
+						refreshUI()
+					})
+				})
+
+				cancel()
+
+				if err != nil {
+					isCanceled := errors.Is(err, context.Canceled)
+					if isCanceled {
+						cancelled = true
 					}
-					list.Refresh()
+					fyne.Do(func() {
+						if isCanceled {
+							expStates[i].status = statusCanceled
+						} else {
+							expStates[i].status = statusError
+							expStates[i].err = err
+							expStates[i].hasError = true
+						}
+						refreshUI()
+					})
+					if !isCanceled && isAuthError(err) {
+						fyne.Do(func() {
+							showLocationError(s, err, task.Locs...)
+						})
+					}
+					// Always break so the phase-transition below runs.
+					break
+				}
+
+				previewResults[i] = result
+				fyne.Do(func() {
+					expStates[i] = buildExpUIState(task.Label, result)
+					expStates[i].status = statusDone
+					if selectedExpIdx == i {
+						selectedFoldIdx = 0
+						foldList.Refresh()
+						fileList.Refresh()
+						expList.Select(widget.ListItemID(i))
+					}
+					refreshUI()
 				})
 			}
 
 			fyne.Do(func() {
-				statusText := statusDone
-				var jobErr error
-				switch final.Status {
-				case syncengine.JobError:
-					statusText = statusError
-					jobErr = final.Err
-					if isAuthError(final.Err) {
-						showLocationError(s, final.Err, j.Locs...)
-					}
-				case syncengine.JobCanceled:
-					statusText = statusCanceled
+				if cancelled {
+					phase = phaseDryRunCancelled
+				} else {
+					phase = phaseDryRunComplete
 				}
-				runStates[i].status = statusText
-				runStates[i].err = jobErr
-
-				updateUI()
-				if selectedID == i {
-					refreshSelected(i)
-				}
-				list.Refresh()
+				refreshUI()
 			})
-		}
+		}()
+	}
 
-		fyne.Do(func() {
-			doneBtn.Enable()
-			cancelBtn.Disable()
-			updateUI()
-		})
-	}()
+	previewBtn.OnTapped = runPreview
+
+	runPreview()
+}
+
+// showErrorModal opens a scrollable dialog containing the full error text and
+// a Copy button. It is triggered by the error-icon button on a list row.
+func showErrorModal(win fyne.Window, errText string) {
+	errLabel := widget.NewLabel(errText)
+	errLabel.Wrapping = fyne.TextWrapWord
+
+	scroll := container.NewScroll(errLabel)
+	scroll.SetMinSize(fyne.NewSize(420, 220))
+
+	copyBtn := widget.NewButton("Copy", func() {
+		win.Clipboard().SetContent(errText)
+	})
+
+	content := container.NewBorder(
+		nil,
+		container.NewPadded(copyBtn),
+		nil, nil,
+		scroll,
+	)
+
+	d := dialog.NewCustom("Error Details", "Close", content, win)
+	d.Show()
+}
+
+func metricPanel(label string, value *widget.Label, bg color.Color) fyne.CanvasObject {
+	rect := canvas.NewRectangle(bg)
+	rect.CornerRadius = 8
+	caption := widget.NewLabelWithStyle(label, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	return container.NewStack(rect, container.NewPadded(container.NewVBox(caption, value)))
+}
+
+func humanSpeed(bytesPerSec float64) string {
+	const unit = 1024
+	if bytesPerSec < unit {
+		return fmt.Sprintf("%.1f B", bytesPerSec)
+	}
+	div, exp := float64(unit), 0
+	for m := bytesPerSec / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %ciB", bytesPerSec/div, "KMGTPE"[exp])
 }

@@ -22,6 +22,13 @@ const (
 	JobCanceled
 )
 
+// FileProgress tracks progress of a single file.
+type FileProgress struct {
+	BytesDone int64
+	Done      bool
+	Err       error
+}
+
 // ProgressSnapshot is one point-in-time update on a running Job.
 type ProgressSnapshot struct {
 	BytesDone, BytesTotal int64
@@ -29,6 +36,8 @@ type ProgressSnapshot struct {
 	CurrentFile           string
 	Status                JobStatus
 	Err                   error
+	Speed                 float64
+	Files                 map[string]FileProgress
 }
 
 // Job is a running (or finished) copy started by StartBackup/StartDownload.
@@ -148,19 +157,51 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 		defer ticker.Stop()
 		stats := accounting.Stats(ctx)
 
+		var lastBytes int64
+		var lastTime = time.Now()
+		var currentSpeed float64
+
 		emit := func(status JobStatus, err error) {
 			var current string
-			if transfers := stats.Transferred(); len(transfers) > 0 {
+			transfers := stats.Transferred()
+			if len(transfers) > 0 {
 				current = transfers[len(transfers)-1].Name
 			}
+
+			// Calculate speed
+			now := time.Now()
+			dur := now.Sub(lastTime)
+			currentBytes := stats.GetBytes()
+			if dur > 0 {
+				speed := float64(currentBytes-lastBytes) / dur.Seconds()
+				if lastBytes == 0 && currentBytes > 0 {
+					currentSpeed = speed
+				} else {
+					currentSpeed = 0.8*currentSpeed + 0.2*speed
+				}
+			}
+			lastBytes = currentBytes
+			lastTime = now
+
+			filesMap := make(map[string]FileProgress)
+			for _, t := range transfers {
+				filesMap[t.Name] = FileProgress{
+					BytesDone: t.Bytes,
+					Done:      !t.CompletedAt.IsZero() || t.Error != nil || t.Bytes == t.Size,
+					Err:       t.Error,
+				}
+			}
+
 			progress <- ProgressSnapshot{
-				BytesDone:   stats.GetBytes(),
+				BytesDone:   currentBytes,
 				BytesTotal:  expected.TotalBytes,
 				FilesDone:   int(stats.GetTransfers()),
 				FilesTotal:  expected.CopyCount,
 				CurrentFile: current,
 				Status:      status,
 				Err:         err,
+				Speed:       currentSpeed,
+				Files:       filesMap,
 			}
 		}
 
