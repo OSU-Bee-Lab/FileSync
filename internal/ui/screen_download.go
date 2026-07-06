@@ -15,7 +15,7 @@ import (
 
 // showDownload is the Download flow: a researcher pulling a subset of one
 // experiment's files into an arbitrary working directory (e.g. an R
-// project), not a saved Location. Unlike Backup/Sync, this lets the user
+// project), not a saved Location. Unlike Sync, this lets the user
 // drill to any depth under experiments/ - a whole experiment, one
 // deployment date, or one recorder directory. Scope selection is
 // deliberately folder-only, not single-file: rclone's fs.NewFs returns

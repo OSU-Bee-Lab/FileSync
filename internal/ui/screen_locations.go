@@ -19,15 +19,22 @@ func showLocations(s *state) {
 	list := widget.NewList(
 		func() int { return len(s.cfg.Locations) },
 		func() fyne.CanvasObject {
+			nameLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+			pathLabel := widget.NewLabel("")
+			removeBtn := widget.NewButton("Remove", nil)
+			removeBtn.Importance = widget.DangerImportance
 			return container.NewBorder(nil, nil, nil,
-				container.NewHBox(widget.NewButton("Edit...", nil), widget.NewButton("Export...", nil), widget.NewButton("Remove", nil)),
-				widget.NewLabel(""))
+				container.NewHBox(widget.NewButton("Edit...", nil), widget.NewButton("Export...", nil), removeBtn),
+				container.NewVBox(nameLabel, pathLabel))
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			loc := s.cfg.Locations[id]
 			border := obj.(*fyne.Container)
-			label := border.Objects[0].(*widget.Label)
-			label.SetText(fmt.Sprintf("%s  (%s: %s)", loc.Name, loc.Kind, describeLocation(loc)))
+			labelBox := border.Objects[0].(*fyne.Container)
+			nameLabel := labelBox.Objects[0].(*widget.Label)
+			pathLabel := labelBox.Objects[1].(*widget.Label)
+			nameLabel.SetText(loc.Name)
+			pathLabel.SetText(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
 
 			btnBox := border.Objects[1].(*fyne.Container)
 			editBtn := btnBox.Objects[0].(*widget.Button)
@@ -39,7 +46,7 @@ func showLocations(s *state) {
 
 			removeBtn := btnBox.Objects[2].(*widget.Button)
 			removeBtn.OnTapped = func() {
-				dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from ExpSync? This only forgets it locally - no files are touched.", func(ok bool) {
+				dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from ExpSync?", func(ok bool) {
 					if !ok {
 						return
 					}

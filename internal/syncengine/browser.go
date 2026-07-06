@@ -10,7 +10,7 @@ import (
 )
 
 // ExperimentEntry is one experiment directory found directly under a
-// Location's experiments/ root — the only thing the Backup/Sync flow ever
+// Location's experiments/ root — the only thing the Sync flow ever
 // browses.
 type ExperimentEntry struct {
 	Name string
@@ -18,7 +18,7 @@ type ExperimentEntry struct {
 
 // ListExperiments lists exactly the top-level directories under <loc>/ — a
 // single shallow List call, never recursive. This is the perf-critical fix
-// motivating the whole tool: Backup/Sync never has to look at anything
+// motivating the whole tool: Sync never has to look at anything
 // below this level to populate its picker.
 func ListExperiments(ctx context.Context, loc Location) ([]ExperimentEntry, error) {
 	entries, err := listDir(ctx, loc.rcloneSpec())
