@@ -26,6 +26,13 @@ func errString(err error) string {
 	return err.Error()
 }
 
+func plural(n int, singular string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", singular)
+	}
+	return fmt.Sprintf("%d %ss", n, singular)
+}
+
 func locationNames(locs []syncengine.Location) []string {
 	out := make([]string, len(locs))
 	for i, l := range locs {
