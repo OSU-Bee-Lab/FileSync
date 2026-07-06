@@ -155,32 +155,21 @@ func showDownload(s *state) {
 		fset, preserveModTime := s.cfg.DefaultFilter, s.cfg.PreserveModTime
 		dest := destFolder
 
-		progressDialog := dialog.NewCustom("Checking...", "Please wait", widget.NewLabel("Running dry run..."), s.win)
-		progressDialog.Show()
-
-		go func() {
-			ctx := context.Background()
-			result, err := syncengine.PreviewDownload(ctx, src, chosenRelPath, dest, fset)
-			fyne.Do(func() {
-				progressDialog.Hide()
-				if err != nil {
-					showLocationError(s, err, src)
-					return
-				}
-				label := "experiments/" + chosenRelPath
-				if chosenRelPath == "" {
-					label = "experiments/ (entire root)"
-				}
-				jobs := []previewJob{{
-					Label:  label,
-					Result: result,
-					Start: func(ctx context.Context) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-						return syncengine.StartDownload(ctx, src, chosenRelPath, dest, fset, preserveModTime, result)
-					},
-				}}
-				showPreview(s, jobs, func() { showDownload(s) })
-			})
-		}()
+		label := "experiments/" + chosenRelPath
+		if chosenRelPath == "" {
+			label = "experiments/ (entire root)"
+		}
+		tasks := []previewTask{{
+			Label: label,
+			Locs:  []syncengine.Location{src},
+			Preview: func(ctx context.Context, progress syncengine.PreviewProgressFunc) (syncengine.PreviewResult, error) {
+				return syncengine.PreviewDownloadWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
+			},
+			Start: func(ctx context.Context, result syncengine.PreviewResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+				return syncengine.StartDownload(ctx, src, chosenRelPath, dest, fset, preserveModTime, result)
+			},
+		}}
+		showPreviewRunning(s, tasks, func() { showDownload(s) })
 	})
 	previewBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })

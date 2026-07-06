@@ -72,35 +72,21 @@ func showBackup(s *state) {
 		src, dst := *srcLoc, *dstLoc
 		fset, preserveModTime := s.cfg.DefaultFilter, s.cfg.PreserveModTime
 
-		progressDialog := dialog.NewCustom("Checking...", "Please wait", widget.NewLabel("Running dry run for "+fmt.Sprint(len(selected))+" experiment(s)..."), s.win)
-		progressDialog.Show()
-
-		go func() {
-			ctx := context.Background()
-			var jobs []previewJob
-			for _, name := range selected {
-				name := name
-				result, err := syncengine.PreviewBackup(ctx, src, dst, name, fset)
-				if err != nil {
-					fyne.Do(func() {
-						progressDialog.Hide()
-						showLocationError(s, err, src, dst)
-					})
-					return
-				}
-				jobs = append(jobs, previewJob{
-					Label:  name,
-					Result: result,
-					Start: func(ctx context.Context) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-						return syncengine.StartBackup(ctx, src, dst, name, fset, preserveModTime, result)
-					},
-				})
-			}
-			fyne.Do(func() {
-				progressDialog.Hide()
-				showPreview(s, jobs, func() { showBackup(s) })
+		tasks := make([]previewTask, 0, len(selected))
+		for _, name := range selected {
+			name := name
+			tasks = append(tasks, previewTask{
+				Label: name,
+				Locs:  []syncengine.Location{src, dst},
+				Preview: func(ctx context.Context, progress syncengine.PreviewProgressFunc) (syncengine.PreviewResult, error) {
+					return syncengine.PreviewBackupWithProgress(ctx, src, dst, name, fset, progress)
+				},
+				Start: func(ctx context.Context, result syncengine.PreviewResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+					return syncengine.StartBackup(ctx, src, dst, name, fset, preserveModTime, result)
+				},
 			})
-		}()
+		}
+		showPreviewRunning(s, tasks, func() { showBackup(s) })
 	})
 	previewBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
