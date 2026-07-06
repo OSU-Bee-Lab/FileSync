@@ -12,14 +12,14 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
-// showBackup is the Backup/Sync flow: always whole-experiment granularity,
+// showBackup is the Sync flow: always whole-experiment granularity,
 // always Location <-> Location. It never exposes sub-experiment
 // drilling - that's the Download flow's job (screen_download.go).
 func showBackup(s *state) {
 	names := locationNames(s.cfg.Locations)
 	srcSelect := widget.NewSelect(names, nil)
 	dstSelect := widget.NewSelect(names, nil)
-	statusLabel := widget.NewLabel("Pick a source and destination location.")
+	statusLabel := widget.NewLabel("Pick a from and to location.")
 
 	checkGroup := widget.NewCheckGroup(nil, nil)
 
@@ -57,11 +57,11 @@ func showBackup(s *state) {
 
 	previewBtn := widget.NewButton("Preview", func() {
 		if srcLoc == nil || dstLoc == nil {
-			dialog.ShowInformation("Pick locations", "Choose a source and destination location first.", s.win)
+			dialog.ShowInformation("Pick locations", "Choose a from and to location first.", s.win)
 			return
 		}
 		if srcLoc.ID == dstLoc.ID {
-			dialog.ShowInformation("Same location", "Source and destination must be different locations.", s.win)
+			dialog.ShowInformation("Same location", "From and to must be different locations.", s.win)
 			return
 		}
 		selected := append([]string{}, checkGroup.Selected...)
@@ -107,10 +107,10 @@ func showBackup(s *state) {
 
 	content := container.NewBorder(
 		container.NewVBox(
-			widget.NewLabelWithStyle("Backup / Sync", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabelWithStyle("Sync", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewForm(
-				&widget.FormItem{Text: "Source", Widget: srcSelect},
-				&widget.FormItem{Text: "Destination", Widget: dstSelect},
+				&widget.FormItem{Text: "From", Widget: srcSelect},
+				&widget.FormItem{Text: "To", Widget: dstSelect},
 			),
 			statusLabel,
 			widget.NewSeparator(),

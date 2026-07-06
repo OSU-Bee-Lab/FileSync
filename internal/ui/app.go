@@ -52,12 +52,11 @@ func Run() {
 
 func showHome(s *state) {
 	title := widget.NewLabelWithStyle("ExpSync", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	subtitle := widget.NewLabel("Schema-scoped rclone sync for bioacoustics experiment data")
 
-	backupBtn := widget.NewButton("Backup / Sync", func() { showBackup(s) })
+	backupBtn := widget.NewButton("Sync", func() { showBackup(s) })
 	backupBtn.Importance = widget.HighImportance
 	downloadBtn := widget.NewButton("Download", func() { showDownload(s) })
-	locationsBtn := widget.NewButton("Manage Locations", func() { showLocations(s) })
+	locationsBtn := widget.NewButton("Manage Sync Locations", func() { showLocations(s) })
 
 	if len(s.cfg.Locations) < 2 {
 		backupBtn.Disable()
@@ -68,7 +67,6 @@ func showHome(s *state) {
 
 	body := container.NewVBox(
 		title,
-		subtitle,
 		widget.NewSeparator(),
 		backupBtn,
 		downloadBtn,
