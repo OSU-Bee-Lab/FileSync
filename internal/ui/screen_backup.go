@@ -119,5 +119,5 @@ func showBackup(s *state) {
 		nil, nil,
 		container.NewVScroll(checkGroup),
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }

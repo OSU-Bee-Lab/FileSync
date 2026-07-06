@@ -197,6 +197,6 @@ func showDownload(s *state) {
 		nil, nil,
 		list,
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 	upBtn.Disable()
 }

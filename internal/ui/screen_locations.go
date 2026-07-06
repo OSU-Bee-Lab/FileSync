@@ -54,7 +54,7 @@ func showLocations(s *state) {
 		nil, nil,
 		list,
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }
 
 func describeLocation(loc syncengine.Location) string {

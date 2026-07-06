@@ -75,5 +75,5 @@ func showPreview(s *state, jobs []previewJob, onBack func()) {
 		nil, nil,
 		container.NewHSplit(list, container.NewVScroll(details)),
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }

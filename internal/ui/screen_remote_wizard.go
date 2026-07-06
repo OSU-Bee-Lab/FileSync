@@ -240,7 +240,7 @@ func showAddLocation(s *state) {
 		nil, nil,
 		container.NewVScroll(form),
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }
 
 var locationIDCounter int
