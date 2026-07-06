@@ -313,6 +313,96 @@ func assertFileMissing(t *testing.T, path string) {
 	}
 }
 
+func TestFilesFromFilter_MatchesCopyEntries(t *testing.T) {
+	preview := PreviewResult{
+		CopyCount: 2,
+		SkipCount: 1,
+		Entries: []PreviewEntry{
+			{RelPath: "2026-06-23/RecorderA/260623_0900.mp3", Action: ActionCopy},
+			{RelPath: "2026-06-23/RecorderA/260623_0905.mp3", Action: ActionCopy},
+			{RelPath: "metadata.csv", Action: ActionSkipIdentical},
+		},
+	}
+
+	f := filesFromFilter(preview)
+	if f == nil {
+		t.Fatal("expected non-nil filter for CopyCount > 0")
+	}
+	if !f.HaveFilesFrom() {
+		t.Fatal("expected HaveFilesFrom() == true")
+	}
+
+	files := f.Files()
+	if _, ok := files["2026-06-23/RecorderA/260623_0900.mp3"]; !ok {
+		t.Error("expected copy file 260623_0900.mp3 to be in filter")
+	}
+	if _, ok := files["2026-06-23/RecorderA/260623_0905.mp3"]; !ok {
+		t.Error("expected copy file 260623_0905.mp3 to be in filter")
+	}
+	if _, ok := files["metadata.csv"]; ok {
+		t.Error("skipped file metadata.csv should NOT be in filter")
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files in filter, got %d", len(files))
+	}
+}
+
+func TestFilesFromFilter_NilWhenNoCopies(t *testing.T) {
+	preview := PreviewResult{
+		CopyCount: 0,
+		SkipCount: 3,
+		Entries: []PreviewEntry{
+			{RelPath: "a.mp3", Action: ActionSkipIdentical},
+			{RelPath: "b.mp3", Action: ActionSkipIdentical},
+			{RelPath: "c.mp3", Action: ActionSkipIdentical},
+		},
+	}
+	if f := filesFromFilter(preview); f != nil {
+		t.Fatal("expected nil filter when CopyCount == 0")
+	}
+}
+
+// TestBackupAfterFullSync_NoCopyOptimization verifies that the CopyCount=0
+// fallback path (no cached filter, full scan) still works: after syncing
+// everything, a re-preview shows all skips, and a second backup is a no-op
+// that completes successfully.
+func TestBackupAfterFullSync_NoCopyOptimization(t *testing.T) {
+	srcRoot, dstRoot := t.TempDir(), t.TempDir()
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src, dst := localLoc(srcRoot), localLoc(dstRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+
+	// First sync: everything should copy.
+	preview1, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview1.CopyCount != 5 {
+		t.Fatalf("first preview.CopyCount = %d, want 5", preview1.CopyCount)
+	}
+	_, progress1 := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview1)
+	if final := drain(t, progress1); final.Status != JobDone {
+		t.Fatalf("first backup status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+
+	// Second preview: everything should be identical.
+	preview2, err := PreviewBackup(ctx, src, dst, "Luke - Zucchini", fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview2.CopyCount != 0 {
+		t.Fatalf("second preview.CopyCount = %d, want 0", preview2.CopyCount)
+	}
+
+	// Second backup with CopyCount=0 preview (no-cache fallback path).
+	_, progress2 := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview2)
+	final := drain(t, progress2)
+	if final.Status != JobDone {
+		t.Fatalf("second backup status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+}
+
 func equalStrings(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

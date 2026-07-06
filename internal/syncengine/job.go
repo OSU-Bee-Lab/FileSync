@@ -7,6 +7,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/cache"
+	"github.com/rclone/rclone/fs/filter"
 	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/lib/random"
 )
@@ -63,9 +64,33 @@ func StartDownload(ctx context.Context, src Location, srcRelPath string, destFol
 	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, fset, preserveModTime, expected)
 }
 
+// filesFromFilter builds an rclone filter that restricts the copy to
+// exactly the files the preview identified as needing transfer. This
+// avoids the redundant source+destination traversal that would otherwise
+// repeat the work the preview already did. Returns nil when no files
+// need copying (the caller should still proceed — CopyDir is a no-op
+// when nothing matches).
+func filesFromFilter(expected PreviewResult) *filter.Filter {
+	if expected.CopyCount == 0 {
+		return nil
+	}
+	f, _ := filter.NewFilter(nil) // no opts → can't error
+	for _, entry := range expected.Entries {
+		if entry.Action == ActionCopy {
+			_ = f.AddFile(entry.RelPath) // path-only, can't error
+		}
+	}
+	return f
+}
+
 // startCopyPreserving is the one place sync.CopyDir is called in this
 // codebase. It must never be swapped for sync.Sync, which deletes
 // destination-only files - see TestCopyPreserving_NeverDeletesDestinationOnlyFiles.
+//
+// When expected contains files to copy (CopyCount > 0), the preview's
+// file list is used to build a files-from filter so rclone copies only
+// those files without re-scanning source or destination. This turns the
+// preview→copy round-trip from O(2×listing) into O(listing + copies).
 func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, preserveModTime bool, expected PreviewResult) (*Job, <-chan ProgressSnapshot) {
 	ctx, cancel := context.WithCancel(parent)
 	progress := make(chan ProgressSnapshot, 1)
@@ -73,6 +98,17 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 	ctx, ci := fs.AddConfig(ctx)
 	ci.NoUpdateModTime = preserveModTime
 	ci.DryRun = false
+
+	// When we have cached preview results, skip the full traversal and
+	// copy only the files the preview identified. This replaces any
+	// FilterSettings-based filter (which was already applied during the
+	// preview) with a precise files-from list and disables destination
+	// listing.
+	cachedFilter := filesFromFilter(expected)
+	if cachedFilter != nil {
+		ctx = filter.ReplaceConfig(ctx, cachedFilter)
+		ci.NoTraverse = true
+	}
 
 	groupName := "expsync-job-" + random.String(8)
 	ctx = accounting.WithStatsGroup(ctx, groupName)
@@ -82,10 +118,16 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 	go func() {
 		defer close(progress)
 
-		ctx, err := withFilter(ctx, fset)
-		if err != nil {
-			progress <- ProgressSnapshot{Status: JobError, Err: err, FilesTotal: expected.CopyCount, BytesTotal: expected.TotalBytes}
-			return
+		// Only apply the user's FilterSettings when we aren't using
+		// cached preview results (i.e. the preview found nothing to
+		// copy, so CopyDir will confirm the no-op via a full scan).
+		if cachedFilter == nil {
+			var err error
+			ctx, err = withFilter(ctx, fset)
+			if err != nil {
+				progress <- ProgressSnapshot{Status: JobError, Err: err, FilesTotal: expected.CopyCount, BytesTotal: expected.TotalBytes}
+				return
+			}
 		}
 
 		fsrc, err := cache.Get(ctx, joinSpec(srcRoot, relPath))
