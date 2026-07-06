@@ -7,18 +7,18 @@ import (
 )
 
 // FilterSettings controls which files a copy operation acts on. The zero
-// value is not usable directly — call DefaultFilterSettings for the lab's
-// default of mp3-only.
+// value can be empty, which means copy everything.
 type FilterSettings struct {
 	// IncludePatterns are rclone glob include patterns, e.g. "*.mp3".
 	// A copy with no patterns matches everything.
 	IncludePatterns []string `json:"includePatterns"`
 }
 
-// DefaultFilterSettings mirrors the lab's existing rclone habit of
-// restricting sync to audio files.
+// DefaultFilterSettings does not restrict files. ExpSync used to default to
+// mp3-only, but the lab schema includes other recorder outputs that should be
+// previewed and copied unless a future UI explicitly opts into filtering.
 func DefaultFilterSettings() FilterSettings {
-	return FilterSettings{IncludePatterns: []string{"*.mp3"}}
+	return FilterSettings{}
 }
 
 // withFilter returns a context carrying an rclone filter built from fset,

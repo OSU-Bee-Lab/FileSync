@@ -15,7 +15,7 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
-const currentVersion = 1
+const currentVersion = 2
 
 // Config is ExpSync's entire persisted app state.
 type Config struct {
@@ -64,6 +64,12 @@ func Load() (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.Version < 2 && len(cfg.DefaultFilter.IncludePatterns) == 1 && cfg.DefaultFilter.IncludePatterns[0] == "*.mp3" {
+		cfg.DefaultFilter = syncengine.DefaultFilterSettings()
+	}
+	if cfg.Version < currentVersion {
+		cfg.Version = currentVersion
 	}
 	return cfg, nil
 }

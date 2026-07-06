@@ -123,8 +123,8 @@ func TestPreviewAndStartBackup_WholeExperiment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.CopyCount != 2 {
-		t.Fatalf("preview.CopyCount = %d, want 2 (mp3s only, wav filtered)", preview.CopyCount)
+	if preview.CopyCount != 5 {
+		t.Fatalf("preview.CopyCount = %d, want 5", preview.CopyCount)
 	}
 
 	job, progress := StartBackup(ctx, src, dst, "Luke - Zucchini", fset, true, preview)
@@ -136,7 +136,9 @@ func TestPreviewAndStartBackup_WholeExperiment(t *testing.T) {
 
 	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0900.mp3"))
 	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.mp3"))
-	assertFileMissing(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.wav"))
+	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.wav"))
+	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "metadata.csv"))
+	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "README.txt"))
 }
 
 // TestDownloadPreservesSubPath reproduces the exact scenario from the
@@ -157,8 +159,8 @@ func TestDownloadPreservesSubPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.CopyCount != 2 {
-		t.Fatalf("preview.CopyCount = %d, want 2", preview.CopyCount)
+	if preview.CopyCount != 3 {
+		t.Fatalf("preview.CopyCount = %d, want 3", preview.CopyCount)
 	}
 
 	_, progress := StartDownload(ctx, src, relPath, destFolder, fset, true, preview)
@@ -221,8 +223,8 @@ func TestExperimentNameWithSpecialCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if preview.CopyCount != 2 {
-		t.Fatalf("preview.CopyCount = %d, want 2", preview.CopyCount)
+	if preview.CopyCount != 5 {
+		t.Fatalf("preview.CopyCount = %d, want 5", preview.CopyCount)
 	}
 	_, progress := StartBackup(ctx, src, dst, name, fset, true, preview)
 	final := drain(t, progress)

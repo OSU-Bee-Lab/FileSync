@@ -17,8 +17,8 @@ func TestLoadReturnsDefaultOnFirstRun(t *testing.T) {
 	if len(cfg.Locations) != 0 {
 		t.Fatalf("expected no locations on first run, got %v", cfg.Locations)
 	}
-	if len(cfg.DefaultFilter.IncludePatterns) == 0 {
-		t.Fatal("expected a non-empty default filter")
+	if len(cfg.DefaultFilter.IncludePatterns) != 0 {
+		t.Fatalf("expected no default filter, got %v", cfg.DefaultFilter.IncludePatterns)
 	}
 }
 
