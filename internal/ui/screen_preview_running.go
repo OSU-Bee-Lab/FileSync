@@ -54,7 +54,7 @@ func showPreviewRunning(s *state, tasks []previewTask, onBack func()) {
 			dot.FillColor = dirColor(row)
 			dot.Refresh()
 			name.SetText(row.Path)
-			counts.SetText(fmt.Sprintf("%d copy / %d same", row.CopyCount, row.SkipCount))
+			counts.SetText(fmt.Sprintf("%d sync / %d same", row.CopyCount, row.SkipCount))
 		},
 	)
 
@@ -93,7 +93,7 @@ func showPreviewRunning(s *state, tasks []previewTask, onBack func()) {
 	metrics := container.NewGridWithColumns(5,
 		metricPanel("Scanned", filesValue, color.NRGBA{R: 232, G: 240, B: 254, A: 255}),
 		metricPanel("Folders", dirsValue, color.NRGBA{R: 229, G: 245, B: 236, A: 255}),
-		metricPanel("To copy", copyValue, color.NRGBA{R: 255, G: 239, B: 219, A: 255}),
+		metricPanel("To sync", copyValue, color.NRGBA{R: 255, G: 239, B: 219, A: 255}),
 		metricPanel("Identical", sameValue, color.NRGBA{R: 232, G: 245, B: 233, A: 255}),
 		metricPanel("Bytes", bytesValue, color.NRGBA{R: 243, G: 232, B: 255, A: 255}),
 	)
@@ -200,5 +200,5 @@ func previewActionLabel(action syncengine.PreviewAction) string {
 	if action == syncengine.ActionSkipIdentical {
 		return "same"
 	}
-	return "copy"
+	return "sync"
 }

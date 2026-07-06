@@ -50,16 +50,16 @@ func showPreview(s *state, jobs []previewJob, onBack func()) {
 	sameValue := widget.NewLabelWithStyle(fmt.Sprintf("%d", totalSkip), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	bytesValue := widget.NewLabelWithStyle(humanBytes(totalBytes), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	summaryLabel := widget.NewLabel(fmt.Sprintf("%s checked · %d files ready to copy · %d already identical",
+	summaryLabel := widget.NewLabel(fmt.Sprintf("%s checked · %d files ready to sync · %d already identical",
 		plural(len(jobs), "experiment"), totalCopy, totalSkip))
 	allSyncedMessage := widget.NewLabel("")
 	if totalCopy == 0 {
-		allSyncedMessage.SetText("Everything is already synced. No files need to be copied.")
+		allSyncedMessage.SetText("Everything is already synced. No files need to be transferred.")
 	}
 
 	metrics := container.NewGridWithColumns(4,
 		metricPanel("Experiments", experimentValue, color.NRGBA{R: 232, G: 240, B: 254, A: 255}),
-		metricPanel("To copy", copyValue, color.NRGBA{R: 255, G: 239, B: 219, A: 255}),
+		metricPanel("To sync", copyValue, color.NRGBA{R: 255, G: 239, B: 219, A: 255}),
 		metricPanel("Identical", sameValue, color.NRGBA{R: 232, G: 245, B: 233, A: 255}),
 		metricPanel("Bytes", bytesValue, color.NRGBA{R: 243, G: 232, B: 255, A: 255}),
 	)
@@ -92,7 +92,7 @@ func showPreview(s *state, jobs []previewJob, onBack func()) {
 			dot.FillColor = experimentColor(j.Result.CopyCount)
 			dot.Refresh()
 			name.SetText(j.Label)
-			counts.SetText(fmt.Sprintf("%d copy / %d same", j.Result.CopyCount, j.Result.SkipCount))
+			counts.SetText(fmt.Sprintf("%d sync / %d same", j.Result.CopyCount, j.Result.SkipCount))
 		},
 	)
 
@@ -116,7 +116,7 @@ func showPreview(s *state, jobs []previewJob, onBack func()) {
 			dot.FillColor = dirColor(row)
 			dot.Refresh()
 			name.SetText(row.Path)
-			counts.SetText(fmt.Sprintf("%d copy / %d same · %s", row.CopyCount, row.SkipCount, humanBytes(row.CopyBytes)))
+			counts.SetText(fmt.Sprintf("%d sync / %d same · %s", row.CopyCount, row.SkipCount, humanBytes(row.CopyBytes)))
 		},
 	)
 
@@ -165,7 +165,7 @@ func showPreview(s *state, jobs []previewJob, onBack func()) {
 			return fileRows[i].RelPath < fileRows[k].RelPath
 		})
 		selectedTitle.SetText(j.Label)
-		selectedSummary.SetText(fmt.Sprintf("%d files to copy (%s) · %d already identical",
+		selectedSummary.SetText(fmt.Sprintf("%d files to sync (%s) · %d already identical",
 			j.Result.CopyCount, humanBytes(j.Result.TotalBytes), j.Result.SkipCount))
 		dirList.Refresh()
 		fileList.Refresh()
@@ -180,7 +180,7 @@ func showPreview(s *state, jobs []previewJob, onBack func()) {
 		refreshSelected(selected)
 	}
 
-	confirmBtn := widget.NewButton("Confirm & Copy", func() { showProgress(s, jobs, onBack) })
+	confirmBtn := widget.NewButton("Confirm & Sync", func() { showProgress(s, jobs, onBack) })
 	confirmBtn.Importance = widget.HighImportance
 	if totalCopy == 0 {
 		confirmBtn.Disable()

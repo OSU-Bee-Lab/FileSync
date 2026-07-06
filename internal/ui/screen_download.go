@@ -51,23 +51,48 @@ func showDownload(s *state) {
 		if srcLoc == nil {
 			return
 		}
-		ctx := context.Background()
-		result, err := syncengine.ListChildren(ctx, *srcLoc, relPath)
-		if err != nil {
-			showLocationError(s, err, *srcLoc)
-			return
-		}
-		entries = result
 		if relPath == "" {
-			breadcrumb.SetText("experiments/")
+			breadcrumb.SetText("Loading experiments/...")
 		} else {
-			breadcrumb.SetText("experiments/" + relPath + "/")
+			breadcrumb.SetText("Loading experiments/" + relPath + "/...")
 		}
-		upBtn.Disable()
-		if relPath != "" {
-			upBtn.Enable()
-		}
+		entries = nil
 		list.Refresh()
+		upBtn.Disable()
+
+		src := *srcLoc
+		path := relPath
+
+		go func() {
+			ctx := context.Background()
+			result, err := syncengine.ListChildren(ctx, src, path)
+
+			fyne.Do(func() {
+				if srcLoc == nil || srcLoc.ID != src.ID || relPath != path {
+					return
+				}
+				if err != nil {
+					if relPath == "" {
+						breadcrumb.SetText("Error loading experiments/")
+					} else {
+						breadcrumb.SetText("Error loading experiments/" + relPath + "/")
+					}
+					showLocationError(s, err, src)
+					return
+				}
+				entries = result
+				if relPath == "" {
+					breadcrumb.SetText("experiments/")
+				} else {
+					breadcrumb.SetText("experiments/" + relPath + "/")
+				}
+				upBtn.Disable()
+				if relPath != "" {
+					upBtn.Enable()
+				}
+				list.Refresh()
+			})
+		}()
 	}
 
 	list.UpdateItem = func(id widget.ListItemID, obj fyne.CanvasObject) {

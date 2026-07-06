@@ -36,3 +36,9 @@ option to preview experiments).
   long paths for looks, but the window itself can no longer be stretched.
 - Do not commit changes until the user has tested and verified them working.
 - Worktrees go in ./.claude/worktrees
+- **rclone must always use `copy`, never `sync`** — this is a core safety
+  invariant. `rclone sync` deletes destination-only files; this app is not
+  authorized to delete data ever. The UI intentionally uses the word "sync"
+  for end-user clarity (researchers understand "sync" intuitively), but the
+  underlying rclone command is always `copy`. Never change this without an
+  explicit, informed decision by the project owner.

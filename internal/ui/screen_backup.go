@@ -29,27 +29,59 @@ func showBackup(s *state) {
 		if srcLoc == nil {
 			return
 		}
-		ctx := context.Background()
-		exps, err := syncengine.ListExperiments(ctx, *srcLoc)
-		if err != nil {
-			showLocationError(s, err, *srcLoc)
-			return
-		}
-		opts := make([]string, len(exps))
-		for i, e := range exps {
-			opts[i] = e.Name
-		}
-		checkGroup.Options = opts
+		statusLabel.SetText("Loading experiments...")
+		checkGroup.Options = nil
 		checkGroup.Selected = nil
 		checkGroup.Refresh()
 
-		msg := fmt.Sprintf("%d experiment(s) found in %s", len(exps), srcLoc.Name)
+		src := *srcLoc
+		var dst *syncengine.Location
 		if dstLoc != nil {
-			if dexps, err := syncengine.ListExperiments(ctx, *dstLoc); err == nil {
-				msg += fmt.Sprintf(" · %d already present in %s", len(dexps), dstLoc.Name)
-			}
+			dstVal := *dstLoc
+			dst = &dstVal
 		}
-		statusLabel.SetText(msg)
+
+		go func() {
+			ctx := context.Background()
+			exps, err := syncengine.ListExperiments(ctx, src)
+			var dexps []syncengine.ExperimentEntry
+			var dstErr error
+			if err == nil && dst != nil {
+				dexps, dstErr = syncengine.ListExperiments(ctx, *dst)
+			}
+
+			fyne.Do(func() {
+				if srcLoc == nil || srcLoc.ID != src.ID {
+					return
+				}
+				if dstLoc != nil && dst != nil && dstLoc.ID != dst.ID {
+					return
+				}
+				if dstLoc == nil && dst != nil {
+					return
+				}
+
+				if err != nil {
+					showLocationError(s, err, src)
+					statusLabel.SetText("Error loading experiments.")
+					return
+				}
+
+				opts := make([]string, len(exps))
+				for i, e := range exps {
+					opts[i] = e.Name
+				}
+				checkGroup.Options = opts
+				checkGroup.Selected = nil
+				checkGroup.Refresh()
+
+				msg := fmt.Sprintf("%d experiment(s) found in %s", len(exps), src.Name)
+				if dst != nil && dstErr == nil {
+					msg += fmt.Sprintf(" · %d already present in %s", len(dexps), dst.Name)
+				}
+				statusLabel.SetText(msg)
+			})
+		}()
 	}
 
 	srcSelect.OnChanged = func(name string) { srcLoc = findLocation(s.cfg.Locations, name); refresh() }

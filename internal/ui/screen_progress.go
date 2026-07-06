@@ -62,7 +62,7 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 		}
 	}
 
-	titleLabel := widget.NewLabelWithStyle("Copying", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	titleLabel := widget.NewLabelWithStyle("Syncing", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	statusLabel := widget.NewLabel("Starting...")
 
 	overallBar := widget.NewProgressBar()
@@ -115,7 +115,7 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 			dot.FillColor = dirColor(row)
 			dot.Refresh()
 			name.SetText(row.Path)
-			counts.SetText(fmt.Sprintf("%d copy / %d same · %s", row.CopyCount, row.SkipCount, humanBytes(row.CopyBytes)))
+			counts.SetText(fmt.Sprintf("%d sync / %d same · %s", row.CopyCount, row.SkipCount, humanBytes(row.CopyBytes)))
 		},
 	)
 
@@ -159,11 +159,11 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 		var statusStr string
 		switch st.status {
 		case statusWaiting:
-			statusStr = "Waiting to copy"
+			statusStr = "Waiting to sync"
 		case statusRunning:
-			statusStr = fmt.Sprintf("Copying: %d/%d files · %s/%s", st.filesDone, st.filesTotal, humanBytes(st.bytesDone), humanBytes(st.bytesTotal))
+			statusStr = fmt.Sprintf("Syncing: %d/%d files · %s/%s", st.filesDone, st.filesTotal, humanBytes(st.bytesDone), humanBytes(st.bytesTotal))
 		case statusDone:
-			statusStr = fmt.Sprintf("Completed: %d files (%s) copied", st.filesTotal, humanBytes(st.bytesTotal))
+			statusStr = fmt.Sprintf("Completed: %d files (%s) synced", st.filesTotal, humanBytes(st.bytesTotal))
 		case statusError:
 			statusStr = "Failed: " + errString(st.err)
 		case statusCanceled:
@@ -232,9 +232,9 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 				st = "waiting"
 			case statusRunning:
 				if state.bytesTotal > 0 {
-					st = fmt.Sprintf("copying (%d%%)", int(float64(state.bytesDone)*100/float64(state.bytesTotal)))
+					st = fmt.Sprintf("syncing (%d%%)", int(float64(state.bytesDone)*100/float64(state.bytesTotal)))
 				} else {
-					st = "copying..."
+					st = "syncing..."
 				}
 			case statusDone:
 				st = "done"
@@ -310,14 +310,14 @@ func showProgress(s *state, jobs []previewJob, onDone func()) {
 
 		if compCount == len(runStates) {
 			if errCount > 0 {
-				titleLabel.SetText("Copy Completed with Errors")
+				titleLabel.SetText("Sync Completed with Errors")
 			} else {
-				titleLabel.SetText("Copy Complete")
+				titleLabel.SetText("Sync Complete")
 			}
 			statusLabel.SetText(fmt.Sprintf("All done. %d experiments processed with %d error(s).", len(runStates), errCount))
 		} else {
-			titleLabel.SetText("Copying...")
-			statusLabel.SetText(fmt.Sprintf("Copying %d experiments · %d/%d files (%s/%s)",
+			titleLabel.SetText("Syncing...")
+			statusLabel.SetText(fmt.Sprintf("Syncing %d experiments · %d/%d files (%s/%s)",
 				len(runStates), overallDoneFiles, overallTotalFiles, humanBytes(overallDoneBytes), humanBytes(overallTotalBytes)))
 		}
 
