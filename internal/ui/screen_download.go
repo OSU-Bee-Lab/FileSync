@@ -54,7 +54,7 @@ func showDownload(s *state) {
 		ctx := context.Background()
 		result, err := syncengine.ListChildren(ctx, *srcLoc, relPath)
 		if err != nil {
-			dialog.ShowError(err, s.win)
+			showLocationError(s, err, *srcLoc)
 			return
 		}
 		entries = result
@@ -164,7 +164,7 @@ func showDownload(s *state) {
 			fyne.Do(func() {
 				progressDialog.Hide()
 				if err != nil {
-					dialog.ShowError(err, s.win)
+					showLocationError(s, err, src)
 					return
 				}
 				label := "experiments/" + chosenRelPath

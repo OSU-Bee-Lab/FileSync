@@ -32,7 +32,7 @@ func showBackup(s *state) {
 		ctx := context.Background()
 		exps, err := syncengine.ListExperiments(ctx, *srcLoc)
 		if err != nil {
-			dialog.ShowError(err, s.win)
+			showLocationError(s, err, *srcLoc)
 			return
 		}
 		opts := make([]string, len(exps))
@@ -84,7 +84,7 @@ func showBackup(s *state) {
 				if err != nil {
 					fyne.Do(func() {
 						progressDialog.Hide()
-						dialog.ShowError(err, s.win)
+						showLocationError(s, err, src, dst)
 					})
 					return
 				}

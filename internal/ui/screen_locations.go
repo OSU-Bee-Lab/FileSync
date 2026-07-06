@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -74,50 +75,77 @@ func showLocations(s *state) {
 	s.setContent(container.NewPadded(content))
 }
 
-// isAuthError reports whether err looks like rclone's expired-OAuth-token
-// error (the "couldn't fetch token: invalid_grant: maybe token expired?"
-// message that today only surfaces as a raw error dialog, telling the user
-// to run `rclone config reconnect` themselves). rclone always wraps the
-// underlying invalid_grant with this exact prefix (see
-// lib/oauthutil/oauthutil.go), so matching on it is reliable across
-// backends.
+// reconnectHintRe extracts the remote name from rclone's
+// `please run "rclone config reconnect teams:"` hint, so a bad-token error
+// can still be routed to the reconnect window even when the caller didn't
+// pass the offending Location.
+var reconnectHintRe = regexp.MustCompile(`config reconnect (\S+?):`)
+
+// isAuthError reports whether err looks like an rclone bad/expired-token
+// error that a re-authorization would fix. rclone surfaces these in a few
+// shapes across backends and code paths:
+//   - "couldn't fetch token: invalid_grant: maybe token expired?"
+//   - "empty token found - please run \"rclone config reconnect teams:\""
+//
+// In every case rclone's remedy is the same OAuth reconnect, and it always
+// mentions either "fetch token", an empty token, or the `config reconnect`
+// hint - so matching on those is reliable across backends.
 func isAuthError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "couldn't fetch token")
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "couldn't fetch token") ||
+		strings.Contains(msg, "empty token found") ||
+		strings.Contains(msg, "config reconnect")
 }
 
-// showLocationError displays err from an operation involving locs. If it
-// looks like an expired OAuth token on one of the remote locations, it
-// offers a "Reconnect" button that re-runs the sign-in flow in place of a
-// plain error dialog; otherwise it falls back to dialog.ShowError.
+// showLocationError is the single entrypoint for surfacing errors from
+// operations that touch a remote. If err looks like a bad OAuth token
+// (isAuthError), it always routes to the reconnect window rather than a
+// plain error dialog: it prefers a remote Location from locs, and otherwise
+// falls back to the remote name rclone names in its `config reconnect` hint.
+// Non-auth errors fall through to dialog.ShowError.
 func showLocationError(s *state, err error, locs ...syncengine.Location) {
 	if isAuthError(err) {
 		for _, loc := range locs {
 			if loc.Kind != syncengine.LocationRemote {
 				continue
 			}
-			loc := loc
-			dialog.NewCustomConfirm("Sign-in expired", "Reconnect", "Cancel",
-				widget.NewLabel("\""+loc.Name+"\" needs you to sign in again:\n\n"+err.Error()),
-				func(ok bool) {
-					if ok {
-						reconnectRemote(s, loc)
-					}
-				}, s.win).Show()
+			showReconnectWindow(s, err, loc.RemoteName, loc.Name)
+			return
+		}
+		if m := reconnectHintRe.FindStringSubmatch(err.Error()); m != nil {
+			showReconnectWindow(s, err, m[1], m[1])
 			return
 		}
 	}
 	dialog.ShowError(err, s.win)
 }
 
-// reconnectRemote re-runs the OAuth sign-in for loc's remote without
-// touching any of its other settings - the fix for rclone errors like
+// showReconnectWindow is the common bad-token entrypoint: it explains the
+// sign-in has expired and offers a "Reconnect" button that runs the OAuth
+// flow for remoteName. displayName is the friendly name shown to the user
+// (a Location's name when we have it, else the raw remote name).
+func showReconnectWindow(s *state, err error, remoteName, displayName string) {
+	dialog.NewCustomConfirm("Sign-in expired", "Reconnect", "Cancel",
+		widget.NewLabel("\""+displayName+"\" needs you to sign in again:\n\n"+err.Error()),
+		func(ok bool) {
+			if ok {
+				reconnectRemote(s, remoteName, displayName)
+			}
+		}, s.win).Show()
+}
+
+// reconnectRemote re-runs the OAuth sign-in for remoteName without touching
+// any of its other settings - the fix for rclone errors like
 // "invalid_grant: maybe token expired?" that ask the user to run
 // `rclone config reconnect`. Passing no fields to UpdateRemote leaves
 // existing config alone; driveConfigSteps still drives the backend's OAuth
 // confirms to their default ("yes, refresh token"), so this forces the
 // browser sign-in flow the same way editing-and-saving an OAuth remote does.
-func reconnectRemote(s *state, loc syncengine.Location) {
-	runRemoteOAuthUpdate(s, "Reconnecting...", "Reconnecting "+loc.Name+"...", loc.RemoteName, map[string]string{}, func(err error) {
+func reconnectRemote(s *state, remoteName, displayName string) {
+	runRemoteOAuthUpdate(s, "Reconnecting...", "Reconnecting "+displayName+"...", remoteName, map[string]string{}, func(err error) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -125,7 +153,7 @@ func reconnectRemote(s *state, loc syncengine.Location) {
 			dialog.ShowError(fmt.Errorf("couldn't reconnect: %w", err), s.win)
 			return
 		}
-		dialog.ShowInformation("Reconnected", "\""+loc.Name+"\" is signed in again.", s.win)
+		dialog.ShowInformation("Reconnected", "\""+displayName+"\" is signed in again.", s.win)
 	})
 }
 

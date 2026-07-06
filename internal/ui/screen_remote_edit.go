@@ -33,6 +33,10 @@ func showEditLocation(s *state, id int) {
 	if loc.Kind == syncengine.LocationLocal {
 		localPath := loc.RootPath
 		pathLabel := widget.NewLabel(localPath)
+		// Long absolute paths otherwise force the label (and thus the whole
+		// window) to their full pixel width - which on multi-monitor setups
+		// stretches the window across displays. Truncation caps the min width.
+		pathLabel.Truncation = fyne.TextTruncateEllipsis
 		chooseFolderBtn := widget.NewButton("Choose folder...", func() {
 			chooseFolder(s.win, func(path string, err error) {
 				if err != nil {
@@ -65,7 +69,7 @@ func showEditLocation(s *state, id int) {
 
 		body = container.NewVBox(
 			widget.NewForm(&widget.FormItem{Text: "Name", Widget: nameEntry}),
-			widget.NewForm(&widget.FormItem{Text: "Folder", Widget: container.NewHBox(chooseFolderBtn, pathLabel)}),
+			widget.NewForm(&widget.FormItem{Text: "Folder", Widget: container.NewBorder(nil, nil, chooseFolderBtn, nil, pathLabel)}),
 		)
 	} else {
 		bt, currentFields, err := syncengine.RemoteConfig(loc.RemoteName)
@@ -169,7 +173,12 @@ func showEditLocation(s *state, id int) {
 		widget.NewLabelWithStyle("Edit Location", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewHBox(saveBtn, backBtn),
 		nil, nil,
-		container.NewVScroll(body),
+		// NewScroll (bidirectional), not NewVScroll: a vertical-only scroll
+		// reports the content's full min width to the window, which on
+		// multi-monitor setups lets a wide child (long path, hint text) stretch
+		// the window across displays. A bidirectional scroll reports a tiny min
+		// size, so the fixed windowSize always holds.
+		container.NewScroll(body),
 	)
-	s.win.SetContent(container.NewPadded(content))
+	s.setContent(container.NewPadded(content))
 }
