@@ -446,6 +446,8 @@ type recorderRow struct {
 	done      bool
 }
 
+// rowStatusText is the default display label for a state, used whenever a
+// row doesn't have a more specific statusMsg set.
 func rowStatusText(st recorderJobStatus) string {
 	switch st {
 	case jobIdle:
@@ -463,6 +465,16 @@ func rowStatusText(st recorderJobStatus) string {
 	default:
 		return ""
 	}
+}
+
+// rowStatusMessage is what's actually shown in the status column: row's own
+// statusMsg if it set one (e.g. an error detail, or "Done (no files)"),
+// otherwise the state's default label.
+func rowStatusMessage(row *recorderRow) string {
+	if row.statusMsg != "" {
+		return row.statusMsg
+	}
+	return rowStatusText(row.status)
 }
 
 // rowBackgroundColor matches the reference (Python/tkinter) implementation's
@@ -601,7 +613,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		}
 		rr.idText.Segments[0].(*widget.TextSegment).Text = label
 		rr.idText.Refresh()
-		rr.statusLbl.SetText(rowStatusText(rr.row.status))
+		rr.statusLbl.SetText(rowStatusMessage(rr.row))
 		rr.bar.SetValue(rr.row.progress)
 		r, g, b, a := rowBackgroundColor(rr.row.status, blinkOn)
 		rr.bg.FillColor = colorRGBA(r, g, b, a)
@@ -756,6 +768,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	beginOffload := func(row *recorderRow) {
 		row.started = true
 		row.status = recorderJobSyncing
+		row.statusMsg = ""
 		job, progress := recorder.StartOffload(watchCtx, row.driver, row.volume, row.id, destRoots, params.subpath,
 			params.experimentName, params.uploads, params.autoDelete, onUploadEvent)
 		row.job = job
@@ -770,6 +783,9 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 						row.status = jobDone
 						row.done = true
 						row.progress = 1
+						if p.FilesTotal == 0 {
+							row.statusMsg = "Done (no files)"
+						}
 					case recorder.OffloadConflict:
 						row.status = jobConflict
 					case recorder.OffloadError:
@@ -883,6 +899,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 						rows = append(rows[:i], rows[i+1:]...)
 					default:
 						row.status = jobDisconnected
+						row.statusMsg = ""
 					}
 					rebuildRows()
 				})
