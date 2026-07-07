@@ -67,6 +67,8 @@ type UploadUpdate struct {
 	RecorderID string
 	RelPath    string
 	Event      syncengine.UploadEvent
+	BytesDone  int64
+	BytesTotal int64
 	Err        error
 }
 
@@ -230,9 +232,9 @@ func StartOffload(
 				localPath := destPaths[0]
 				rel := filepath.Join(experimentName, recorderID, sf.DestRelPath)
 				go func(localPath, rel string) {
-					_ = syncengine.StartFileUpload(context.Background(), localPath, dest, rel, func(ev syncengine.UploadEvent, uerr error) {
+					_ = syncengine.StartFileUpload(context.Background(), localPath, dest, rel, func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
 						if onUpload != nil {
-							onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: ev, Err: uerr})
+							onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr})
 						}
 					})
 				}(localPath, rel)

@@ -2,11 +2,15 @@ package syncengine
 
 import (
 	"context"
+	"os"
 	"path"
 	"path/filepath"
+	"time"
 
+	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/operations"
+	"github.com/rclone/rclone/lib/random"
 )
 
 // UploadEvent is a lifecycle notification for a single file upload started
@@ -16,9 +20,15 @@ type UploadEvent int
 
 const (
 	UploadStarted UploadEvent = iota
+	UploadProgress
 	UploadDone
 	UploadFailed
 )
+
+// UploadProgressFunc is called with a file upload's lifecycle events.
+// BytesDone/BytesTotal are only meaningful for UploadProgress events (0/0
+// otherwise); err is only set for UploadFailed.
+type UploadProgressFunc func(ev UploadEvent, bytesDone, bytesTotal int64, err error)
 
 // StartFileUpload copies a single local file to relPath under dst,
 // independent of any scan/batch. It's used by the Sync Recorders
@@ -28,41 +38,70 @@ const (
 // pass.
 //
 // onEvent, if non-nil, is called synchronously with UploadStarted just
-// before the copy begins and with UploadDone or UploadFailed (with the
-// resulting error, if any) once it finishes.
-func StartFileUpload(ctx context.Context, localPath string, dst Location, relPath string, onEvent func(UploadEvent, error)) error {
-	if onEvent != nil {
-		onEvent(UploadStarted, nil)
+// before the copy begins, periodically with UploadProgress while it runs,
+// and with UploadDone or UploadFailed (with the resulting error, if any)
+// once it finishes.
+func StartFileUpload(ctx context.Context, localPath string, dst Location, relPath string, onEvent UploadProgressFunc) error {
+	var bytesTotal int64
+	if info, statErr := os.Stat(localPath); statErr == nil {
+		bytesTotal = info.Size()
 	}
 
-	err := func() error {
-		slashRel := filepath.ToSlash(relPath)
-		dstDir := path.Dir(slashRel)
-		if dstDir == "." {
-			dstDir = ""
-		}
-		dstName := path.Base(slashRel)
+	if onEvent != nil {
+		onEvent(UploadStarted, 0, bytesTotal, nil)
+	}
 
-		srcDir := filepath.Dir(localPath)
-		srcName := filepath.Base(localPath)
+	ctx = accounting.WithStatsGroup(ctx, "expsync-upload-"+random.String(8))
+	stats := accounting.Stats(ctx)
 
-		fsrc, err := cache.Get(ctx, srcDir)
-		if err != nil {
-			return err
-		}
-		fdst, err := cache.Get(ctx, joinSpec(dst.rcloneSpec(), dstDir))
-		if err != nil {
-			return err
-		}
+	copyDone := make(chan error, 1)
+	go func() {
+		copyDone <- func() error {
+			slashRel := filepath.ToSlash(relPath)
+			dstDir := path.Dir(slashRel)
+			if dstDir == "." {
+				dstDir = ""
+			}
+			dstName := path.Base(slashRel)
 
-		return operations.CopyFile(ctx, fdst, fsrc, dstName, srcName)
+			srcDir := filepath.Dir(localPath)
+			srcName := filepath.Base(localPath)
+
+			fsrc, err := cache.Get(ctx, srcDir)
+			if err != nil {
+				return err
+			}
+			fdst, err := cache.Get(ctx, joinSpec(dst.rcloneSpec(), dstDir))
+			if err != nil {
+				return err
+			}
+
+			return operations.CopyFile(ctx, fdst, fsrc, dstName, srcName)
+		}()
 	}()
+
+	var err error
+	if onEvent == nil {
+		err = <-copyDone
+	} else {
+		ticker := time.NewTicker(300 * time.Millisecond)
+		defer ticker.Stop()
+	loop:
+		for {
+			select {
+			case err = <-copyDone:
+				break loop
+			case <-ticker.C:
+				onEvent(UploadProgress, stats.GetBytes(), bytesTotal, nil)
+			}
+		}
+	}
 
 	if onEvent != nil {
 		if err != nil {
-			onEvent(UploadFailed, err)
+			onEvent(UploadFailed, 0, bytesTotal, err)
 		} else {
-			onEvent(UploadDone, nil)
+			onEvent(UploadDone, bytesTotal, bytesTotal, nil)
 		}
 	}
 	return err

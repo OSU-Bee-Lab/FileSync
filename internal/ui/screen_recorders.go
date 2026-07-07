@@ -134,11 +134,15 @@ type recorderSyncParams struct {
 // showSyncRecorders is the entry point for the Sync Recorders feature: the
 // settings screen (Screen 1) shown before any sync activity starts.
 func showSyncRecorders(s *state) {
-	localOptions := locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal)
-	destGroup := newToggleGroup(localOptions, selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs, syncengine.LocationLocal))
-
-	remoteOptions := locationNamesByKind(s.cfg.Locations, syncengine.LocationRemote)
-	uploadGroup := newToggleGroup(remoteOptions, selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs, syncengine.LocationRemote))
+	// destGroup offers every configured Location - local and cloud alike -
+	// as one combined destination picker. At sync time the selection is
+	// split back out by Kind: local ones are copied to directly, cloud
+	// ones (see recorderSyncParams.uploads) are uploaded to after the
+	// local copy completes (internal/recorder.StartOffload always needs
+	// at least one local destination to stage from).
+	preselected := append(append([]string{}, selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs)...),
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs)...)
+	destGroup := newToggleGroup(locationNames(s.cfg.Locations), preselected)
 
 	expEntry := widget.NewEntry()
 	expEntry.SetPlaceHolder("Experiment name")
@@ -150,7 +154,8 @@ func showSyncRecorders(s *state) {
 	startBtn.Importance = widget.HighImportance
 
 	updateStartEnabled := func() {
-		if len(destGroup.Selected()) > 0 && strings.TrimSpace(expEntry.Text) != "" {
+		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
+		if len(destinations) > 0 && strings.TrimSpace(expEntry.Text) != "" {
 			startBtn.Enable()
 		} else {
 			startBtn.Disable()
@@ -161,8 +166,8 @@ func showSyncRecorders(s *state) {
 	// existing-experiment chip below fills expEntry with that name and
 	// disables it (grayed out) to make clear the custom text isn't the
 	// active choice; newExpChip re-activates custom entry. Both use
-	// toggleChip - the same selected-highlight widget as destGroup/uploadGroup
-	// - so the "active" choice reads with the same color everywhere.
+	// toggleChip - the same selected-highlight widget as destGroup - so the
+	// "active" choice reads with the same color everywhere.
 	var newExpChip *toggleChip
 	var expChips []*toggleChip
 	unhighlightExpChips := func() {
@@ -250,8 +255,9 @@ func showSyncRecorders(s *state) {
 	refreshExistingExperiments()
 
 	startBtn.OnTapped = func() {
-		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
-		uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected(), syncengine.LocationRemote)
+		selected := destGroup.Selected()
+		destinations := locationsFromNames(s.cfg.Locations, selected, syncengine.LocationLocal)
+		uploads := locationsFromNames(s.cfg.Locations, selected, syncengine.LocationRemote)
 
 		if missing := missingLocalLocations(destinations...); len(missing) > 0 {
 			showLocationsNotFoundPrompt(s, missing, func() {
@@ -259,20 +265,20 @@ func showSyncRecorders(s *state) {
 				// them from the current selection and let them retry from
 				// this same screen rather than persistently disabling
 				// anything.
-				keep := make([]string, 0, len(destinations))
-				for _, d := range destinations {
-					if !containsLocation(missing, d) {
-						keep = append(keep, d.Name)
+				keep := make([]string, 0, len(selected))
+				for _, name := range selected {
+					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(missing, *loc) {
+						keep = append(keep, name)
 					}
 				}
 				destGroup.SetSelected(keep)
 				updateStartEnabled()
 			}, func() {
-				startRecorderSync(s, destGroup, uploadGroup, expEntry, autoDeleteCheck, destinations, uploads)
+				startRecorderSync(s, expEntry, autoDeleteCheck, destinations, uploads)
 			})
 			return
 		}
-		startRecorderSync(s, destGroup, uploadGroup, expEntry, autoDeleteCheck, destinations, uploads)
+		startRecorderSync(s, expEntry, autoDeleteCheck, destinations, uploads)
 	}
 
 	backBtn := widget.NewButton("Cancel", func() { showHome(s) })
@@ -281,7 +287,6 @@ func showSyncRecorders(s *state) {
 		widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewForm(
 			&widget.FormItem{Text: "Destination(s)", Widget: destGroup.CanvasObject()},
-			&widget.FormItem{Text: "Cloud upload(s)", Widget: uploadGroup.CanvasObject()},
 			&widget.FormItem{Text: "", Widget: autoDeleteCheck},
 		),
 		widget.NewLabelWithStyle("Experiment", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -296,7 +301,7 @@ func showSyncRecorders(s *state) {
 
 // startRecorderSync persists the chosen recorder settings and transitions
 // to the active-sync screen with destinations/uploads already resolved.
-func startRecorderSync(s *state, destGroup, uploadGroup *toggleGroup, expEntry *widget.Entry, autoDeleteCheck *widget.Check, destinations, uploads []syncengine.Location) {
+func startRecorderSync(s *state, expEntry *widget.Entry, autoDeleteCheck *widget.Check, destinations, uploads []syncengine.Location) {
 	s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)
 	s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(uploads)
 	s.cfg.RecorderSettings.AutoDeleteAfterVerify = autoDeleteCheck.Checked
@@ -321,12 +326,12 @@ func containsLocation(locs []syncengine.Location, loc syncengine.Location) bool 
 }
 
 // selectedFromIDs converts a set of persisted Location IDs into the
-// matching Location Names of the given kind, for pre-populating a
-// toggleGroup's selection from RecorderSettings.
-func selectedFromIDs(locs []syncengine.Location, ids []string, kind syncengine.LocationKind) []string {
+// matching Location Names, for pre-populating a toggleGroup's selection
+// from RecorderSettings.
+func selectedFromIDs(locs []syncengine.Location, ids []string) []string {
 	var out []string
 	for _, id := range ids {
-		if loc := findLocationByID(locs, id); loc != nil && loc.Kind == kind {
+		if loc := findLocationByID(locs, id); loc != nil {
 			out = append(out, loc.Name)
 		}
 	}
@@ -500,6 +505,12 @@ func (recorderRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 type uploadFileEntry struct {
 	recorderID string
 	relPath    string
+	bytesDone  int64
+	bytesTotal int64
+}
+
+func (e uploadFileEntry) label() string {
+	return fmt.Sprintf("%s: %s", e.recorderID, e.relPath)
 }
 
 // showRecorderSync is the active-sync screen (Screen 2): the redesigned
@@ -663,15 +674,25 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	onUploadEvent := func(u recorder.UploadUpdate) {
 		fyne.Do(func() {
-			entry := uploadFileEntry{recorderID: u.RecorderID, relPath: u.RelPath}
 			switch u.Event {
 			case syncengine.UploadStarted:
-				uploading = append(uploading, entry)
+				uploading = append(uploading, uploadFileEntry{
+					recorderID: u.RecorderID, relPath: u.RelPath,
+					bytesTotal: u.BytesTotal,
+				})
+			case syncengine.UploadProgress:
+				if i := findUploadEntry(uploading, u.RecorderID, u.RelPath); i >= 0 {
+					uploading[i].bytesDone = u.BytesDone
+					uploading[i].bytesTotal = u.BytesTotal
+				}
 			case syncengine.UploadDone:
-				uploading = removeUploadEntry(uploading, entry)
-				uploaded = append(uploaded, entry)
+				uploading = removeUploadEntry(uploading, u.RecorderID, u.RelPath)
+				uploaded = append(uploaded, uploadFileEntry{
+					recorderID: u.RecorderID, relPath: u.RelPath,
+					bytesDone: u.BytesTotal, bytesTotal: u.BytesTotal,
+				})
 			case syncengine.UploadFailed:
-				uploading = removeUploadEntry(uploading, entry)
+				uploading = removeUploadEntry(uploading, u.RecorderID, u.RelPath)
 			}
 			if uploadingList != nil {
 				uploadingList.Refresh()
@@ -823,18 +844,23 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	uploadingList = widget.NewList(
 		func() int { return len(uploading) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject { return createBackingBarItem() },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			e := uploading[id]
-			obj.(*widget.Label).SetText(fmt.Sprintf("%s: %s", e.recorderID, e.relPath))
+			prog := 0.0
+			if e.bytesTotal > 0 {
+				prog = float64(e.bytesDone) / float64(e.bytesTotal)
+			}
+			summary := fmt.Sprintf("%s / %s", humanBytes(e.bytesDone), humanBytes(e.bytesTotal))
+			updateBackingBarItem(obj, e.label(), summary, prog, nil, false, false, false, s.win)
 		},
 	)
 	uploadedList = widget.NewList(
 		func() int { return len(uploaded) },
-		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func() fyne.CanvasObject { return createBackingBarItem() },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			e := uploaded[id]
-			obj.(*widget.Label).SetText(fmt.Sprintf("%s: %s", e.recorderID, e.relPath))
+			updateBackingBarItem(obj, e.label(), humanBytes(e.bytesTotal), 1.0, nil, false, false, false, s.win)
 		},
 	)
 
@@ -842,10 +868,11 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	var main fyne.CanvasObject = rowsScroll
 	if len(params.uploads) > 0 {
-		uploadPanel := container.NewHSplit(
-			container.NewBorder(widget.NewLabelWithStyle("Currently uploading", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, nil, nil, uploadingList),
-			container.NewBorder(widget.NewLabelWithStyle("Uploaded", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, nil, nil, uploadedList),
+		uploadPanel := container.NewVSplit(
+			container.NewBorder(sectionHeader("Currently uploading"), nil, nil, nil, uploadingList),
+			container.NewBorder(sectionHeader("Uploaded"), nil, nil, nil, uploadedList),
 		)
+		uploadPanel.SetOffset(0.5)
 		main = container.NewHSplit(rowsScroll, uploadPanel)
 	}
 
@@ -861,11 +888,18 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	s.setContent(container.NewPadded(content))
 }
 
-func removeUploadEntry(list []uploadFileEntry, e uploadFileEntry) []uploadFileEntry {
+func findUploadEntry(list []uploadFileEntry, recorderID, relPath string) int {
 	for i, x := range list {
-		if x == e {
-			return append(list[:i], list[i+1:]...)
+		if x.recorderID == recorderID && x.relPath == relPath {
+			return i
 		}
+	}
+	return -1
+}
+
+func removeUploadEntry(list []uploadFileEntry, recorderID, relPath string) []uploadFileEntry {
+	if i := findUploadEntry(list, recorderID, relPath); i >= 0 {
+		return append(list[:i], list[i+1:]...)
 	}
 	return list
 }

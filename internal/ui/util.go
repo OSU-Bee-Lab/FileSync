@@ -40,15 +40,26 @@ func plural(n int, singular string) string {
 	return fmt.Sprintf("%d %ss", n, singular)
 }
 
-// locationNames returns the names of every enabled Location, for
-// populating a from/to picker. Disabled locations are left out so a
-// temporarily-suspended location (see Location.Enabled) can't be picked
-// as a live sync endpoint.
+// locationNames returns the names of every Location, for populating a
+// from/to picker. Local and cloud locations are offered the same way;
+// whether one is actually reachable is checked live at sync time (see
+// missingLocalLocations), not baked into which locations are offered.
 func locationNames(locs []syncengine.Location) []string {
-	var out []string
-	for _, l := range locs {
-		if l.Enabled {
-			out = append(out, l.Name)
+	out := make([]string, len(locs))
+	for i, l := range locs {
+		out[i] = l.Name
+	}
+	return out
+}
+
+// locationsFromNamesAny resolves a set of selected Names back into
+// Locations regardless of Kind, for pickers that don't separate local from
+// cloud (e.g. Sync Experiments' "To").
+func locationsFromNamesAny(locs []syncengine.Location, names []string) []syncengine.Location {
+	var out []syncengine.Location
+	for _, name := range names {
+		if loc := findLocation(locs, name); loc != nil {
+			out = append(out, *loc)
 		}
 	}
 	return out
@@ -70,21 +81,6 @@ func findLocationByID(locs []syncengine.Location, id string) *syncengine.Locatio
 		}
 	}
 	return nil
-}
-
-// locationNamesByKind returns the names of every Location of the given
-// kind, e.g. for populating a destination picker that only makes sense for
-// local folders or only for cloud remotes. Disabled locations are included
-// - whether a destination is actually usable is checked at sync time, not
-// baked into which locations are offered.
-func locationNamesByKind(locs []syncengine.Location, kind syncengine.LocationKind) []string {
-	var out []string
-	for _, l := range locs {
-		if l.Kind == kind {
-			out = append(out, l.Name)
-		}
-	}
-	return out
 }
 
 // joinRel joins a browsing breadcrumb path with a child name, both always

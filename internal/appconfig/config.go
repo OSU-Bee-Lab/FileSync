@@ -76,15 +76,6 @@ func Load() (Config, error) {
 	if cfg.Version < 2 && len(cfg.DefaultFilter.IncludePatterns) == 1 && cfg.DefaultFilter.IncludePatterns[0] == "*.mp3" {
 		cfg.DefaultFilter = syncengine.DefaultFilterSettings()
 	}
-	if cfg.Version < 4 {
-		// Enabled is new in v4; configs written before it exist have every
-		// location unmarshal to Enabled: false, which would silently
-		// disable them all. Back-fill true so upgrading never disables an
-		// existing location.
-		for i := range cfg.Locations {
-			cfg.Locations[i].Enabled = true
-		}
-	}
 	if cfg.Version < 5 && len(cfg.RecorderSettings.DestinationLocationIDs) == 0 {
 		// DestinationLocationID (singular) became DestinationLocationIDs
 		// (plural, multi-destination) in v5; without this, a config written

@@ -63,13 +63,6 @@ type Location struct {
 	// "Bee Lab Docs". It points directly at the experiments/ root — the
 	// folder whose immediate children are experiment directories.
 	RootPath string `json:"rootPath"`
-
-	// Enabled controls whether this Location is offered anywhere a
-	// Location is picked (Sync Experiments, Pull Files, recorder destination/upload).
-	// Disabling it (rather than removing it) lets a temporarily
-	// unavailable location - e.g. an unplugged external drive - be
-	// suspended without losing its settings.
-	Enabled bool `json:"enabled"`
 }
 
 // rcloneSpec returns the fs.NewFs-ready path string for this location, e.g.

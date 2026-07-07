@@ -132,7 +132,6 @@ func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 				Kind:       syncengine.LocationRemote,
 				RemoteName: remoteName,
 				RootPath:   imported.RootPath,
-				Enabled:    true,
 			})
 			s.saveConfig()
 			showLocations(s)

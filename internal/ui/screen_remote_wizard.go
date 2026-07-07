@@ -248,7 +248,6 @@ func showAddLocation(s *state) {
 				Name:     name,
 				Kind:     syncengine.LocationLocal,
 				RootPath: localPath,
-				Enabled:  true,
 			})
 			s.saveConfig()
 			showLocations(s)
@@ -264,7 +263,6 @@ func showAddLocation(s *state) {
 					Kind:       syncengine.LocationRemote,
 					RemoteName: createdRemoteName,
 					RootPath:   strings.TrimSpace(remotePathEntry.Text),
-					Enabled:    true,
 				})
 				s.saveConfig()
 				showLocations(s)
