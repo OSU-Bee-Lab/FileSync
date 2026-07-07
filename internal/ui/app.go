@@ -124,9 +124,9 @@ func showHome(s *state) {
 	title := widget.NewLabelWithStyle("ExpSync", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
 	backupBtn := widget.NewButton("Sync", func() { showBackup(s) })
-	backupBtn.Importance = widget.HighImportance
 	downloadBtn := widget.NewButton("Download", func() { showDownload(s) })
 	recordersBtn := widget.NewButton("Recorders", func() { showRecorders(s) })
+	recordersBtn.Importance = widget.HighImportance
 	locationsBtn := widget.NewButton("Manage Sync Locations", func() { showLocations(s) })
 
 	if len(s.cfg.Locations) < 2 {
@@ -139,9 +139,9 @@ func showHome(s *state) {
 	body := container.NewVBox(
 		title,
 		widget.NewSeparator(),
+		recordersBtn,
 		backupBtn,
 		downloadBtn,
-		recordersBtn,
 		locationsBtn,
 	)
 	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))
