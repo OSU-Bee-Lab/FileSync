@@ -142,6 +142,13 @@ func (l *progressItemLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 		objects[3].Resize(size)
 		objects[3].Move(fyne.NewPos(0, 0))
 	}
+
+	// Selection outline (objects[4]) sits on top of everything so the fill
+	// and fade never occlude it.
+	if len(objects) >= 5 {
+		objects[4].Resize(size)
+		objects[4].Move(fyne.NewPos(0, 0))
+	}
 }
 
 func createBackingBarItem() fyne.CanvasObject {
@@ -167,8 +174,13 @@ func createBackingBarItem() fyne.CanvasObject {
 	// fade sits on top of everything; setItemFade tints it to fade a row out.
 	fade := canvas.NewRectangle(color.Transparent)
 
+	// selectionBorder is drawn last so the selection outline is never hidden
+	// behind the progress fill or fade overlay.
+	selectionBorder := canvas.NewRectangle(color.Transparent)
+	selectionBorder.StrokeWidth = 0
+
 	itemLayout := &progressItemLayout{percent: 0.0}
-	item := container.New(itemLayout, bg, fill, paddedContent, fade)
+	item := container.New(itemLayout, bg, fill, paddedContent, fade, selectionBorder)
 	return item
 }
 
@@ -219,11 +231,15 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 	bg.FillColor = bgColor
 	fill.FillColor = fillColor
 
-	if isSelected {
-		bg.StrokeColor = color.NRGBA{R: 59, G: 130, B: 246, A: 255}
-		bg.StrokeWidth = 2
-	} else {
-		bg.StrokeWidth = 0
+	if len(containerObj.Objects) >= 5 {
+		selectionBorder := containerObj.Objects[4].(*canvas.Rectangle)
+		if isSelected {
+			selectionBorder.StrokeColor = color.NRGBA{R: 59, G: 130, B: 246, A: 255}
+			selectionBorder.StrokeWidth = 2
+		} else {
+			selectionBorder.StrokeWidth = 0
+		}
+		selectionBorder.Refresh()
 	}
 
 	setItemFade(obj, 0)
