@@ -21,10 +21,11 @@ const currentVersion = 4
 // its tag-file ID-assignment state (batch/counter scheme — see
 // internal/recorder/identity.go), so recorder IDs stay stable across runs.
 type RecorderSettings struct {
-	DestinationLocationID string         `json:"destinationLocationId,omitempty"`
-	AutoDeleteAfterVerify bool           `json:"autoDeleteAfterVerify"`
-	TagBatch              int            `json:"tagBatch"`
-	TagCounters           map[string]int `json:"tagCounters,omitempty"`
+	DestinationLocationIDs []string       `json:"destinationLocationIds,omitempty"`
+	UploadLocationIDs      []string       `json:"uploadLocationIds,omitempty"`
+	AutoDeleteAfterVerify  bool           `json:"autoDeleteAfterVerify"`
+	TagBatch               int            `json:"tagBatch"`
+	TagCounters            map[string]int `json:"tagCounters,omitempty"`
 }
 
 // Config is ExpSync's entire persisted app state.

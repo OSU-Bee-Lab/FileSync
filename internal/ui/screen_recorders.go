@@ -3,11 +3,13 @@ package ui
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"os"
 	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
@@ -15,6 +17,12 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/recorder"
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
+
+// colorRGBA builds an image/color.NRGBA, used for recorderRow status
+// background tints (see rowBackgroundColor).
+func colorRGBA(r, g, b, a uint8) color.Color {
+	return color.NRGBA{R: r, G: g, B: b, A: a}
+}
 
 // missingLocalLocations reports which of locs (only LocationLocal ones are
 // checked - a remote's availability doesn't depend on anything mounted on
@@ -38,13 +46,12 @@ func missingLocalLocations(locs ...syncengine.Location) []syncengine.Location {
 // disk. "Cancel" (the dialog's built-in dismiss button) simply aborts the
 // offload attempt. "Disable and continue" marks the missing location(s)
 // disabled - so they stop being offered anywhere a Location is picked,
-// see Location.Enabled - clears destSelect, and dismisses the prompt so the
-// user can pick a different destination. "Reconnect" re-runs the same
-// presence check (for after the drive has been plugged back in): if
+// see Location.Enabled - and dismisses the prompt. "Reconnect" re-runs the
+// same presence check (for after the drive has been plugged back in): if
 // everything now resolves it dismisses the prompt and runs onFound; if
 // something's still missing it updates the message in place naming what's
 // still absent, rather than closing.
-func showLocationsNotFoundPrompt(s *state, destSelect *widget.Select, missing []syncengine.Location, onFound func()) {
+func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDisable func(), onFound func()) {
 	msgLabel := widget.NewLabel("")
 	msgLabel.Wrapping = fyne.TextWrapWord
 	setMsg := func(missing []syncengine.Location) {
@@ -65,10 +72,10 @@ func showLocationsNotFoundPrompt(s *state, destSelect *widget.Select, missing []
 			}
 		}
 		s.saveConfig()
-		destSelect.Options = locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal)
-		destSelect.ClearSelected()
-		destSelect.Refresh()
 		d.Hide()
+		if onDisable != nil {
+			onDisable()
+		}
 	})
 	reconnectBtn := widget.NewButton("Reconnect", func() {
 		stillMissing := missingLocalLocations(missing...)
@@ -87,49 +94,209 @@ func showLocationsNotFoundPrompt(s *state, destSelect *widget.Select, missing []
 	d.Show()
 }
 
-// recorderRow is one attached device's live UI state. A device with no
-// matching Driver is still shown (as "Unrecognized"), with no action
-// available on it, so the list always reflects everything the OS has
-// mounted.
-type recorderRow struct {
-	volume   recorder.Volume
-	driver   recorder.Driver
-	id       string
-	job      *recorder.OffloadJob
-	status   string
-	progress float64
-	isError  bool
-	done     bool
+// recorderSyncParams is the locked-in configuration chosen on the
+// recorder-settings screen (Screen 1) and handed to the active-sync
+// screen (Screen 2). Nothing on Screen 2 can change these; to change
+// anything the user must Cancel Sync back to Screen 1 and start over.
+type recorderSyncParams struct {
+	destinations   []syncengine.Location // local, at least one
+	uploads        []syncengine.Location // remote, may be empty (no cloud upload)
+	experimentName string
+	autoDelete     bool
 }
 
-// showRecorders is the recorder-offload screen: watches for attached
-// recorders (no hub/port position involved — see internal/recorder),
-// assigns/reads each one's persistent tag-file ID, and offloads its files
-// into destRoot/experimentName/recorderID/... with a verified, resumable
-// copy. Completed files are queued for upload to the optional cloud
-// destination as they land, rather than waiting for a whole recorder or
-// session to finish.
+// showRecorders is the entry point for the recorder-offload feature: the
+// settings screen (Screen 1) shown before any sync activity starts.
 func showRecorders(s *state) {
-	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	localOptions := locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal)
+	destGroup := widget.NewCheckGroup(localOptions, nil)
+	destGroup.Selected = selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs, syncengine.LocationLocal)
 
-	destSelect := widget.NewSelect(locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal), nil)
-	if loc := findLocationByID(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationID); loc != nil && loc.Enabled {
-		destSelect.Selected = loc.Name
-	}
-
-	uploadOptions := append([]string{"(none)"}, locationNamesByKind(s.cfg.Locations, syncengine.LocationRemote)...)
-	uploadSelect := widget.NewSelect(uploadOptions, nil)
-	uploadSelect.Selected = "(none)"
+	remoteOptions := locationNamesByKind(s.cfg.Locations, syncengine.LocationRemote)
+	uploadGroup := widget.NewCheckGroup(remoteOptions, nil)
+	uploadGroup.Selected = selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs, syncengine.LocationRemote)
 
 	expEntry := widget.NewEntry()
 	expEntry.SetPlaceHolder("Experiment name")
 
 	autoDeleteCheck := widget.NewCheck("Delete from recorder after verified copy", nil)
 	autoDeleteCheck.SetChecked(s.cfg.RecorderSettings.AutoDeleteAfterVerify)
-	autoDeleteCheck.OnChanged = func(v bool) {
-		s.cfg.RecorderSettings.AutoDeleteAfterVerify = v
-		s.saveConfig()
+
+	startBtn := widget.NewButton("Start Sync", nil)
+	startBtn.Importance = widget.HighImportance
+
+	updateStartEnabled := func() {
+		if len(destGroup.Selected) > 0 && strings.TrimSpace(expEntry.Text) != "" {
+			startBtn.Enable()
+		} else {
+			startBtn.Disable()
+		}
 	}
+	destGroup.OnChanged = func([]string) { updateStartEnabled() }
+	expEntry.OnChanged = func(string) { updateStartEnabled() }
+	updateStartEnabled()
+
+	startBtn.OnTapped = func() {
+		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected, syncengine.LocationLocal)
+		uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected, syncengine.LocationRemote)
+
+		s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)
+		s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(uploads)
+		s.cfg.RecorderSettings.AutoDeleteAfterVerify = autoDeleteCheck.Checked
+		s.saveConfig()
+
+		params := recorderSyncParams{
+			destinations:   destinations,
+			uploads:        uploads,
+			experimentName: strings.TrimSpace(expEntry.Text),
+			autoDelete:     autoDeleteCheck.Checked,
+		}
+
+		if missing := missingLocalLocations(destinations...); len(missing) > 0 {
+			showLocationsNotFoundPrompt(s, missing, func() {
+				// Locations were disabled; re-show settings so the user
+				// picks new ones.
+				showRecorders(s)
+			}, func() {
+				showRecorderSync(s, params)
+			})
+			return
+		}
+		showRecorderSync(s, params)
+	}
+
+	backBtn := widget.NewButton("Cancel", func() { showHome(s) })
+
+	content := container.NewVBox(
+		widget.NewLabelWithStyle("Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewForm(
+			&widget.FormItem{Text: "Destination(s)", Widget: destGroup},
+			&widget.FormItem{Text: "Cloud upload(s)", Widget: uploadGroup},
+			&widget.FormItem{Text: "Experiment", Widget: expEntry},
+			&widget.FormItem{Text: "", Widget: autoDeleteCheck},
+		),
+		widget.NewSeparator(),
+		container.NewHBox(backBtn, startBtn),
+	)
+	s.setContent(container.NewPadded(content))
+}
+
+// selectedFromIDs converts a set of persisted Location IDs into the
+// matching Location Names of the given kind, for pre-populating a
+// CheckGroup's Selected field from RecorderSettings.
+func selectedFromIDs(locs []syncengine.Location, ids []string, kind syncengine.LocationKind) []string {
+	var out []string
+	for _, id := range ids {
+		if loc := findLocationByID(locs, id); loc != nil && loc.Enabled && loc.Kind == kind {
+			out = append(out, loc.Name)
+		}
+	}
+	return out
+}
+
+// locationsFromNames resolves a CheckGroup's selected Names back into
+// Locations of the given kind.
+func locationsFromNames(locs []syncengine.Location, names []string, kind syncengine.LocationKind) []syncengine.Location {
+	var out []syncengine.Location
+	for _, name := range names {
+		if loc := findLocation(locs, name); loc != nil && loc.Kind == kind {
+			out = append(out, *loc)
+		}
+	}
+	return out
+}
+
+func idsFromLocations(locs []syncengine.Location) []string {
+	ids := make([]string, len(locs))
+	for i, l := range locs {
+		ids[i] = l.ID
+	}
+	return ids
+}
+
+// recorderJobStatus is the row-level lifecycle state shown on Screen 2,
+// distinct from recorder.OffloadStatus so the UI can represent states
+// (Idle, Disconnected) that don't exist on the offload side.
+type recorderJobStatus int
+
+const (
+	jobIdle recorderJobStatus = iota
+	jobSyncing
+	jobConflict
+	jobError
+	jobDone
+	jobDisconnected
+)
+
+// recorderRow is one attached (recognized) recorder's live UI state.
+// Unrecognized volumes never get a row at all — see the VolumeAttached
+// handling in showRecorderSync.
+type recorderRow struct {
+	volume    recorder.Volume
+	driver    recorder.Driver
+	id        string
+	job       *recorder.OffloadJob
+	status    recorderJobStatus
+	statusMsg string
+	progress  float64
+	started   bool // a job was ever started for this row
+	done      bool
+}
+
+func rowStatusText(st recorderJobStatus) string {
+	switch st {
+	case jobIdle:
+		return "Idle"
+	case jobSyncing:
+		return "Syncing"
+	case jobConflict:
+		return "Conflict"
+	case jobError:
+		return "Error"
+	case jobDone:
+		return "Done"
+	case jobDisconnected:
+		return "Disconnected"
+	default:
+		return ""
+	}
+}
+
+// rowBackgroundColor matches the reference (Python/tkinter) implementation's
+// status palette: syncing = light teal, conflict = orange, error = red,
+// done = blue, disconnected = pink, idle = untinted.
+func rowBackgroundColor(st recorderJobStatus) (r, g, b, a uint8) {
+	switch st {
+	case jobSyncing:
+		return 0xC1, 0xDB, 0xD9, 0xFF
+	case jobConflict:
+		return 0xE0, 0x7B, 0x4A, 0xFF
+	case jobError:
+		return 0xE0, 0x40, 0x3B, 0xFF
+	case jobDone:
+		return 0x4A, 0x9D, 0xE0, 0xFF
+	case jobDisconnected:
+		return 0xFF, 0xAD, 0xED, 0xFF
+	default: // jobIdle
+		return 0, 0, 0, 0
+	}
+}
+
+// uploadFileEntry is one file's cloud-upload state, shown grouped by
+// recorder ID in the split upload panel.
+type uploadFileEntry struct {
+	recorderID string
+	relPath    string
+}
+
+// showRecorderSync is the active-sync screen (Screen 2): the redesigned
+// version of what used to be the whole recorders screen. Every setting
+// (destinations, upload destinations, experiment name, auto-delete) is
+// locked in from params for the duration of this screen; there are no
+// settings controls here. Offload starts automatically the instant a
+// recognized recorder attaches.
+func showRecorderSync(s *state, params recorderSyncParams) {
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
 
 	tagState := &recorder.TagState{
 		Batch:    s.cfg.RecorderSettings.TagBatch,
@@ -145,110 +312,16 @@ func showRecorders(s *state) {
 	}
 
 	var rows []*recorderRow
-	var list *widget.List
+	var rowsBox *fyne.Container
 
-	currentDest := func() *syncengine.Location {
-		return findLocation(s.cfg.Locations, destSelect.Selected)
+	var uploading []uploadFileEntry
+	var uploaded []uploadFileEntry
+	var uploadingList, uploadedList *widget.List
+
+	destRoots := make([]string, len(params.destinations))
+	for i, d := range params.destinations {
+		destRoots[i] = d.RootPath
 	}
-	currentUploadDest := func() *syncengine.Location {
-		if uploadSelect.Selected == "" || uploadSelect.Selected == "(none)" {
-			return nil
-		}
-		return findLocation(s.cfg.Locations, uploadSelect.Selected)
-	}
-
-	beginOffload := func(row *recorderRow, dest syncengine.Location) {
-		destRoot := dest.RootPath
-		experimentName := expEntry.Text
-		uploadDest := currentUploadDest()
-		autoDelete := autoDeleteCheck.Checked
-
-		job, progress := recorder.StartOffload(watchCtx, row.driver, row.volume, row.id, destRoot, experimentName, uploadDest, autoDelete)
-		row.job = job
-		row.status = "Starting..."
-		list.Refresh()
-
-		go func() {
-			for p := range progress {
-				p := p
-				fyne.Do(func() {
-					switch p.Status {
-					case recorder.OffloadDone:
-						row.status = "Done"
-						row.done = true
-						row.isError = false
-						row.progress = 1
-					case recorder.OffloadError:
-						row.status = fmt.Sprintf("Error: %s", errString(p.Err))
-						row.isError = true
-					case recorder.OffloadCanceled:
-						row.status = "Canceled"
-						row.isError = true
-					default:
-						row.status = fmt.Sprintf("Copying %d/%d files (%s)", p.FilesDone, p.FilesTotal, humanBytes(p.BytesDone))
-						if p.BytesTotal > 0 {
-							row.progress = float64(p.BytesDone) / float64(p.BytesTotal)
-						}
-					}
-					list.Refresh()
-				})
-			}
-		}()
-	}
-
-	startRow := func(row *recorderRow) {
-		dest := currentDest()
-		if dest == nil || expEntry.Text == "" || row.driver == nil || row.job != nil {
-			return
-		}
-		s.cfg.RecorderSettings.DestinationLocationID = dest.ID
-		s.saveConfig()
-
-		if missing := missingLocalLocations(*dest); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, destSelect, missing, func() {
-				beginOffload(row, *dest)
-			})
-			return
-		}
-		beginOffload(row, *dest)
-	}
-
-	list = widget.NewList(
-		func() int { return len(rows) },
-		func() fyne.CanvasObject {
-			idLabel := widget.NewLabel("")
-			idLabel.Truncation = fyne.TextTruncateEllipsis
-			statusLabel := widget.NewLabel("")
-			bar := widget.NewProgressBar()
-			btn := widget.NewButton("Offload", nil)
-			center := container.NewVBox(statusLabel, bar)
-			return container.NewBorder(nil, nil, idLabel, btn, center)
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			row := rows[id]
-			border := obj.(*fyne.Container)
-			center := border.Objects[0].(*fyne.Container)
-			idLabel := border.Objects[1].(*widget.Label)
-			btn := border.Objects[2].(*widget.Button)
-			statusLabel := center.Objects[0].(*widget.Label)
-			bar := center.Objects[1].(*widget.ProgressBar)
-
-			label := row.id
-			if row.driver == nil {
-				label = "Unrecognized device"
-			}
-			idLabel.SetText(fmt.Sprintf("%s\n%s", label, row.volume.MountPoint))
-			statusLabel.SetText(row.status)
-			bar.SetValue(row.progress)
-
-			btn.OnTapped = func() { startRow(row); list.Refresh() }
-			if row.driver == nil || row.job != nil || currentDest() == nil || expEntry.Text == "" {
-				btn.Disable()
-			} else {
-				btn.Enable()
-			}
-		},
-	)
 
 	findRow := func(mountPoint string) (*recorderRow, int) {
 		for i, r := range rows {
@@ -259,64 +332,224 @@ func showRecorders(s *state) {
 		return nil, -1
 	}
 
+	// rowRenderer holds the persistent widgets for one row's container, so
+	// we can update in place without a widget.List's tap-highlight
+	// behavior (rows here are never selectable).
+	type rowRenderer struct {
+		row       *recorderRow
+		bg        *canvas.Rectangle
+		idLabel   *widget.Label
+		statusLbl *widget.Label
+		bar       *widget.ProgressBar
+	}
+	var renderers []*rowRenderer
+
+	refreshRow := func(rr *rowRenderer) {
+		label := rr.row.id
+		if label == "" {
+			label = rr.row.volume.MountPoint
+		}
+		rr.idLabel.SetText(label)
+		rr.statusLbl.SetText(rowStatusText(rr.row.status))
+		rr.bar.SetValue(rr.row.progress)
+		r, g, b, a := rowBackgroundColor(rr.row.status)
+		rr.bg.FillColor = colorRGBA(r, g, b, a)
+		rr.bg.Refresh()
+	}
+
+	rebuildRows := func() {
+		renderers = renderers[:0]
+		objs := make([]fyne.CanvasObject, 0, len(rows))
+		for _, row := range rows {
+			row := row
+			idLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+			statusLbl := widget.NewLabel("")
+			bar := widget.NewProgressBar()
+			top := container.NewBorder(nil, nil, idLabel, statusLbl)
+			content := container.NewVBox(top, bar)
+			bg := canvas.NewRectangle(colorRGBA(0, 0, 0, 0))
+			cell := container.NewStack(bg, container.NewPadded(content))
+			rr := &rowRenderer{row: row, bg: bg, idLabel: idLabel, statusLbl: statusLbl, bar: bar}
+			refreshRow(rr)
+			renderers = append(renderers, rr)
+			objs = append(objs, cell)
+		}
+		rowsBox.Objects = objs
+		rowsBox.Refresh()
+	}
+
+	refreshAllRows := func() {
+		for _, rr := range renderers {
+			refreshRow(rr)
+		}
+	}
+
+	onUploadEvent := func(u recorder.UploadUpdate) {
+		fyne.Do(func() {
+			entry := uploadFileEntry{recorderID: u.RecorderID, relPath: u.RelPath}
+			switch u.Event {
+			case syncengine.UploadStarted:
+				uploading = append(uploading, entry)
+			case syncengine.UploadDone:
+				uploading = removeUploadEntry(uploading, entry)
+				uploaded = append(uploaded, entry)
+			case syncengine.UploadFailed:
+				uploading = removeUploadEntry(uploading, entry)
+			}
+			if uploadingList != nil {
+				uploadingList.Refresh()
+				uploadedList.Refresh()
+			}
+		})
+	}
+
+	beginOffload := func(row *recorderRow) {
+		row.started = true
+		row.status = jobSyncing
+		job, progress := recorder.StartOffload(watchCtx, row.driver, row.volume, row.id, destRoots,
+			params.experimentName, params.uploads, params.autoDelete, onUploadEvent)
+		row.job = job
+		rebuildRows()
+
+		go func() {
+			for p := range progress {
+				p := p
+				fyne.Do(func() {
+					switch p.Status {
+					case recorder.OffloadDone:
+						row.status = jobDone
+						row.done = true
+						row.progress = 1
+					case recorder.OffloadConflict:
+						row.status = jobConflict
+					case recorder.OffloadError:
+						row.status = jobError
+					case recorder.OffloadCanceled:
+						row.status = jobError
+					default:
+						row.status = jobSyncing
+						if p.BytesTotal > 0 {
+							row.progress = float64(p.BytesDone) / float64(p.BytesTotal)
+						}
+					}
+					refreshAllRows()
+				})
+			}
+		}()
+	}
+
 	go func() {
 		for ev := range recorder.WatchVolumes(watchCtx, time.Second) {
 			ev := ev
 			switch ev.Type {
 			case recorder.VolumeAttached:
 				driver := recorder.Detect(ev.Volume)
-				row := &recorderRow{volume: ev.Volume, driver: driver, status: "Idle"}
-				if driver != nil {
-					id, isNew, err := recorder.AssignOrReadID(driver, ev.Volume, tagState)
-					if err != nil {
-						row.status = fmt.Sprintf("Error reading ID: %s", err)
-						row.isError = true
-					} else {
-						row.id = id
-						fyne.Do(func() {
-							if isNew {
-								saveTagState()
-							}
-						})
-					}
+				if driver == nil {
+					// Unrecognized volumes are ignored entirely - never
+					// shown as a row.
+					continue
+				}
+				row := &recorderRow{volume: ev.Volume, driver: driver, status: jobIdle}
+				id, isNew, err := recorder.AssignOrReadID(driver, ev.Volume, tagState)
+				if err != nil {
+					row.status = jobError
+					row.statusMsg = errString(err)
+				} else {
+					row.id = id
 				}
 				fyne.Do(func() {
+					if isNew {
+						saveTagState()
+					}
 					if existing, _ := findRow(ev.Volume.MountPoint); existing != nil {
+						// Reconnect of a still-tracked (e.g. previously
+						// disconnected) row: resume its job rather than
+						// duplicating it.
+						existing.volume = ev.Volume
+						if existing.status == jobDisconnected {
+							beginOffload(existing)
+						}
+						rebuildRows()
 						return
 					}
 					rows = append(rows, row)
-					list.Refresh()
+					rebuildRows()
+					if row.status != jobError {
+						beginOffload(row)
+					}
 				})
 			case recorder.VolumeDetached:
 				fyne.Do(func() {
-					if _, i := findRow(ev.Volume.MountPoint); i >= 0 {
-						rows = append(rows[:i], rows[i+1:]...)
-						list.Refresh()
+					row, i := findRow(ev.Volume.MountPoint)
+					if i < 0 {
+						return
 					}
+					switch {
+					case row.done:
+						rows = append(rows[:i], rows[i+1:]...)
+					case !row.started:
+						rows = append(rows[:i], rows[i+1:]...)
+					default:
+						row.status = jobDisconnected
+					}
+					rebuildRows()
 				})
 			}
 		}
 	}()
 
-	backBtn := widget.NewButton("Back", func() {
+	cancelBtn := widget.NewButton("Cancel Sync", func() {
 		cancelWatch()
 		showHome(s)
 	})
 
+	rowsBox = container.NewVBox()
+
+	uploadingList = widget.NewList(
+		func() int { return len(uploading) },
+		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			e := uploading[id]
+			obj.(*widget.Label).SetText(fmt.Sprintf("%s: %s", e.recorderID, e.relPath))
+		},
+	)
+	uploadedList = widget.NewList(
+		func() int { return len(uploaded) },
+		func() fyne.CanvasObject { return widget.NewLabel("") },
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			e := uploaded[id]
+			obj.(*widget.Label).SetText(fmt.Sprintf("%s: %s", e.recorderID, e.relPath))
+		},
+	)
+
+	rowsScroll := container.NewVScroll(rowsBox)
+
+	var main fyne.CanvasObject = rowsScroll
+	if len(params.uploads) > 0 {
+		uploadPanel := container.NewHSplit(
+			container.NewBorder(widget.NewLabelWithStyle("Currently uploading", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, nil, nil, uploadingList),
+			container.NewBorder(widget.NewLabelWithStyle("Uploaded", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), nil, nil, nil, uploadedList),
+		)
+		main = container.NewHSplit(rowsScroll, uploadPanel)
+	}
+
 	content := container.NewBorder(
 		container.NewVBox(
-			widget.NewLabelWithStyle("Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			widget.NewForm(
-				&widget.FormItem{Text: "Destination", Widget: destSelect},
-				&widget.FormItem{Text: "Cloud upload", Widget: uploadSelect},
-				&widget.FormItem{Text: "Experiment", Widget: expEntry},
-				&widget.FormItem{Text: "", Widget: autoDeleteCheck},
-			),
+			widget.NewLabelWithStyle(fmt.Sprintf("Experiment: %s", params.experimentName), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewSeparator(),
 		),
-		backBtn,
+		cancelBtn,
 		nil, nil,
-		container.NewVScroll(list),
+		main,
 	)
 	s.setContent(container.NewPadded(content))
+}
+
+func removeUploadEntry(list []uploadFileEntry, e uploadFileEntry) []uploadFileEntry {
+	for i, x := range list {
+		if x == e {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
 }
