@@ -5,10 +5,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
+
+// splitSubpath breaks a user-typed subpath into its component directory
+// names, accepting either "/" or "\" as a separator regardless of the
+// current OS - so a path typed on Windows still nests correctly when the
+// destination (or the app itself) is on macOS/Linux, and vice versa. Empty
+// components (leading/trailing/doubled separators) are dropped.
+func splitSubpath(subpath string) []string {
+	parts := strings.FieldsFunc(subpath, func(r rune) bool { return r == '/' || r == '\\' })
+	return parts
+}
 
 // maxConcurrentUploads bounds simultaneous cloud uploads within one
 // StartOffload run (see uploadSem below).
@@ -81,7 +92,9 @@ type UploadUpdate struct {
 }
 
 // StartOffload copies every file driver.SourceFiles(v) reports into
-// destRoot/experimentName/recorderID/... for each destRoot in destRoots,
+// destRoot/experimentName/subpath/recorderID/... for each destRoot in
+// destRoots (subpath is the schema's "intermediate directories", e.g. a
+// deployment date or site, and is skipped if empty),
 // verifying each file byte-for-byte (see smartcopy.go) before considering
 // it complete. A file that already has different content at (any of) its
 // destination path(s) is reported as OffloadConflict rather than silently
@@ -108,6 +121,7 @@ func StartOffload(
 	v Volume,
 	recorderID string,
 	destRoots []string,
+	subpath string,
 	experimentName string,
 	uploadDests []syncengine.Location,
 	autoDelete bool,
@@ -126,9 +140,12 @@ func StartOffload(
 			return
 		}
 
+		subpathParts := splitSubpath(subpath)
+
 		destDirs := make([]string, len(destRoots))
 		for i, root := range destRoots {
-			destDirs[i] = filepath.Join(root, experimentName, recorderID)
+			parts := append([]string{root, experimentName}, subpathParts...)
+			destDirs[i] = filepath.Join(append(parts, recorderID)...)
 		}
 		files := make(map[string]FileOffloadProgress, len(sourceFiles))
 
@@ -247,7 +264,9 @@ func StartOffload(
 			for _, uploadDest := range uploadDests {
 				dest := uploadDest
 				localPath := destPaths[0]
-				rel := filepath.Join(experimentName, recorderID, sf.DestRelPath)
+				relParts := append([]string{experimentName}, subpathParts...)
+				relParts = append(relParts, recorderID, sf.DestRelPath)
+				rel := filepath.Join(relParts...)
 				if onUpload != nil {
 					onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: syncengine.UploadQueued, BytesTotal: fileTotal})
 				}

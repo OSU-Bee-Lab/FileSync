@@ -26,6 +26,12 @@ func colorRGBA(r, g, b, a uint8) color.Color {
 	return color.NRGBA{R: r, G: g, B: b, A: a}
 }
 
+// splitSubpathUI mirrors recorder.splitSubpath's separator handling (accept
+// "/" or "\" regardless of OS) for building the "Syncing to:" preview.
+func splitSubpathUI(subpath string) []string {
+	return strings.FieldsFunc(subpath, func(r rune) bool { return r == '/' || r == '\\' })
+}
+
 // missingLocalLocations reports which of locs (only LocationLocal ones are
 // checked - a remote's availability doesn't depend on anything mounted on
 // this machine) don't currently resolve to a present directory, e.g. an
@@ -127,6 +133,7 @@ func showInactivitySyncPrompt(s *state, onContinue func(), onEnd func()) {
 type recorderSyncParams struct {
 	destinations   []syncengine.Location // local, at least one
 	uploads        []syncengine.Location // remote, may be empty (no cloud upload)
+	subpath        string                // optional intermediate directories within the experiment, before recorderID (see SCHEMA.md)
 	experimentName string
 	autoDelete     bool
 }
@@ -144,13 +151,29 @@ func showSyncRecorders(s *state) {
 		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs)...)
 	destGroup := newToggleGroup(locationNames(s.cfg.Locations), preselected)
 
+	subpathEntry := widget.NewEntry()
+	subpathEntry.SetPlaceHolder("leave blank for root")
+	subpathEntry.SetText(s.cfg.RecorderSettings.Subpath)
+
 	expEntry := widget.NewEntry()
 	expEntry.SetPlaceHolder("Experiment name")
+
+	syncingToLabel := widget.NewLabel("")
+	syncingToLabel.Wrapping = fyne.TextWrapWord
+	updateSyncingTo := func() {
+		exp := strings.TrimSpace(expEntry.Text)
+		if exp == "" {
+			syncingToLabel.SetText("")
+			return
+		}
+		parts := append([]string{exp}, splitSubpathUI(subpathEntry.Text)...)
+		syncingToLabel.SetText("Syncing to: " + strings.Join(parts, "/"))
+	}
 
 	autoDeleteCheck := widget.NewCheck("Delete from recorder after verified copy", nil)
 	autoDeleteCheck.SetChecked(s.cfg.RecorderSettings.AutoDeleteAfterVerify)
 
-	startBtn := widget.NewButton("Start Recorder Sync", nil)
+	startBtn := widget.NewButton("Start Sync", nil)
 	startBtn.Importance = widget.HighImportance
 
 	updateStartEnabled := func() {
@@ -250,8 +273,10 @@ func showSyncRecorders(s *state) {
 	}
 
 	destGroup.OnChanged = func([]string) { updateStartEnabled(); refreshExistingExperiments() }
-	expEntry.OnChanged = func(string) { updateStartEnabled() }
+	expEntry.OnChanged = func(string) { updateStartEnabled(); updateSyncingTo() }
+	subpathEntry.OnChanged = func(string) { updateSyncingTo() }
 	updateStartEnabled()
+	updateSyncingTo()
 	refreshExistingExperiments()
 
 	startBtn.OnTapped = func() {
@@ -274,16 +299,16 @@ func showSyncRecorders(s *state) {
 				destGroup.SetSelected(keep)
 				updateStartEnabled()
 			}, func() {
-				startRecorderSync(s, expEntry, autoDeleteCheck, destinations, uploads)
+				startRecorderSync(s, expEntry, subpathEntry, autoDeleteCheck, destinations, uploads)
 			})
 			return
 		}
-		startRecorderSync(s, expEntry, autoDeleteCheck, destinations, uploads)
+		startRecorderSync(s, expEntry, subpathEntry, autoDeleteCheck, destinations, uploads)
 	}
 
 	backBtn := widget.NewButton("Cancel", func() { showHome(s) })
 
-	content := container.NewVBox(
+	top := container.NewVBox(
 		widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewForm(
 			&widget.FormItem{Text: "Destination(s)", Widget: destGroup.CanvasObject()},
@@ -293,23 +318,32 @@ func showSyncRecorders(s *state) {
 		container.NewBorder(nil, nil, newExpChip, nil, expEntry),
 		scanStatusLabel,
 		expGrid,
+	)
+	bottom := container.NewVBox(
+		widget.NewForm(&widget.FormItem{Text: "Subpath", Widget: subpathEntry}),
+		syncingToLabel,
 		widget.NewSeparator(),
 		container.NewHBox(backBtn, startBtn),
 	)
+	content := container.NewBorder(top, bottom, nil, nil)
 	s.setContent(container.NewPadded(content))
 }
 
 // startRecorderSync persists the chosen recorder settings and transitions
 // to the active-sync screen with destinations/uploads already resolved.
-func startRecorderSync(s *state, expEntry *widget.Entry, autoDeleteCheck *widget.Check, destinations, uploads []syncengine.Location) {
+func startRecorderSync(s *state, expEntry, subpathEntry *widget.Entry, autoDeleteCheck *widget.Check, destinations, uploads []syncengine.Location) {
+	subpath := strings.TrimSpace(subpathEntry.Text)
+
 	s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)
 	s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(uploads)
 	s.cfg.RecorderSettings.AutoDeleteAfterVerify = autoDeleteCheck.Checked
+	s.cfg.RecorderSettings.Subpath = subpath
 	s.saveConfig()
 
 	showRecorderSync(s, recorderSyncParams{
 		destinations:   destinations,
 		uploads:        uploads,
+		subpath:        subpath,
 		experimentName: strings.TrimSpace(expEntry.Text),
 		autoDelete:     autoDeleteCheck.Checked,
 	})
@@ -350,11 +384,12 @@ func locationsFromNames(locs []syncengine.Location, names []string, kind synceng
 	return out
 }
 
-// dedupeExperimentNames lists experiments present at each of locs and
-// returns the union of names, deduped and sorted. Locations that fail to
-// list (e.g. unreachable remote) are silently skipped rather than aborting
-// the whole scan, since this is an informational listing, not a precondition
-// for starting a sync.
+// dedupeExperimentNames lists experiments present at each of locs (always
+// at the location's root - experiment directories are never nested under
+// subpath) and returns the union of names, deduped and sorted. Locations
+// that fail to list (e.g. unreachable remote) are silently skipped rather
+// than aborting the whole scan, since this is an informational listing,
+// not a precondition for starting a sync.
 func dedupeExperimentNames(ctx context.Context, locs []syncengine.Location) []string {
 	seen := make(map[string]bool)
 	for _, loc := range locs {
@@ -721,7 +756,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	beginOffload := func(row *recorderRow) {
 		row.started = true
 		row.status = recorderJobSyncing
-		job, progress := recorder.StartOffload(watchCtx, row.driver, row.volume, row.id, destRoots,
+		job, progress := recorder.StartOffload(watchCtx, row.driver, row.volume, row.id, destRoots, params.subpath,
 			params.experimentName, params.uploads, params.autoDelete, onUploadEvent)
 		row.job = job
 		rebuildRows()

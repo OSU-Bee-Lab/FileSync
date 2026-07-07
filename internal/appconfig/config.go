@@ -22,6 +22,10 @@ type RecorderSettings struct {
 	DestinationLocationIDs []string `json:"destinationLocationIds,omitempty"`
 	UploadLocationIDs      []string `json:"uploadLocationIds,omitempty"`
 	AutoDeleteAfterVerify  bool     `json:"autoDeleteAfterVerify"`
+	// Subpath is an optional path prepended under each destination's root
+	// (before experimentName/recorderID) - recorders are almost never
+	// synced straight to a destination's root folder.
+	Subpath string `json:"subpath,omitempty"`
 }
 
 // Config is ExpSync's entire persisted app state.
