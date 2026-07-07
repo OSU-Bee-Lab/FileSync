@@ -34,8 +34,17 @@ func (d SonyICDPX370) Detect(v Volume) bool {
 	return d.recFileDir(v) != ""
 }
 
-func (d SonyICDPX370) IDFilePath(v Volume) string {
-	return filepath.Join(v.MountPoint, "ID.txt")
+// RecorderID reads the recorder's ID directly off its own storage layout:
+// the REC_FILE recordings-directory name (e.g. "01_02") is the device's own
+// stable identity, ported from filesync's get_identity/recorder_number.
+// Unlike Olympus, nothing is ever written to a Sony recorder for identity
+// purposes - do not add a tag-file scheme here.
+func (d SonyICDPX370) RecorderID(v Volume) (string, error) {
+	dir, err := d.recordingsDir(v)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Base(dir), nil
 }
 
 var sonyFolderPattern = regexp.MustCompile(`^FOLDER\d`)

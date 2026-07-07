@@ -40,8 +40,12 @@ func (OlympusVN541PC) Detect(v Volume) bool {
 	return true
 }
 
-func (OlympusVN541PC) IDFilePath(v Volume) string {
+func (OlympusVN541PC) idFilePath(v Volume) string {
 	return filepath.Join(v.MountPoint, "ID.txt")
+}
+
+func (d OlympusVN541PC) RecorderID(v Volume) (string, error) {
+	return readIDFile(d.idFilePath(v))
 }
 
 func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {

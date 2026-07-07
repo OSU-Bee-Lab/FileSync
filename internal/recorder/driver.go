@@ -31,9 +31,13 @@ type Driver interface {
 	// Detect reports whether v looks like this driver's recorder model.
 	Detect(v Volume) bool
 
-	// IDFilePath is where this driver stores its persistent recorder-ID
-	// tag file on the device, e.g. filepath.Join(v.MountPoint, "ID.txt").
-	IDFilePath(v Volume) string
+	// RecorderID returns v's persistent recorder ID, read from the device.
+	// This app never assigns or writes an ID to a recorder — it only reads
+	// whatever identity the device already has (Sony: its REC_FILE
+	// recordings-directory name, e.g. "01_02"; Olympus: its ID.txt tag
+	// file, assigned by an out-of-band process). If no ID is present,
+	// RecorderID returns an error rather than manufacturing one.
+	RecorderID(v Volume) (id string, err error)
 
 	// SourceFiles lists every file on the recorder that should be
 	// offloaded, with the relative path it should land at under the

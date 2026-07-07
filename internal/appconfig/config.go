@@ -17,15 +17,11 @@ import (
 
 const currentVersion = 5
 
-// RecorderSettings persists the Sync Recorders feature's defaults and
-// its tag-file ID-assignment state (batch/counter scheme — see
-// internal/recorder/identity.go), so recorder IDs stay stable across runs.
+// RecorderSettings persists the Sync Recorders feature's defaults.
 type RecorderSettings struct {
-	DestinationLocationIDs []string       `json:"destinationLocationIds,omitempty"`
-	UploadLocationIDs      []string       `json:"uploadLocationIds,omitempty"`
-	AutoDeleteAfterVerify  bool           `json:"autoDeleteAfterVerify"`
-	TagBatch               int            `json:"tagBatch"`
-	TagCounters            map[string]int `json:"tagCounters,omitempty"`
+	DestinationLocationIDs []string `json:"destinationLocationIds,omitempty"`
+	UploadLocationIDs      []string `json:"uploadLocationIds,omitempty"`
+	AutoDeleteAfterVerify  bool     `json:"autoDeleteAfterVerify"`
 }
 
 // Config is ExpSync's entire persisted app state.
@@ -41,10 +37,9 @@ type Config struct {
 // machine, before any Locations have been added.
 func Default() Config {
 	return Config{
-		Version:          currentVersion,
-		DefaultFilter:    syncengine.DefaultFilterSettings(),
-		PreserveModTime:  true,
-		RecorderSettings: RecorderSettings{TagBatch: 1},
+		Version:         currentVersion,
+		DefaultFilter:   syncengine.DefaultFilterSettings(),
+		PreserveModTime: true,
 	}
 }
 
@@ -80,9 +75,6 @@ func Load() (Config, error) {
 	}
 	if cfg.Version < 2 && len(cfg.DefaultFilter.IncludePatterns) == 1 && cfg.DefaultFilter.IncludePatterns[0] == "*.mp3" {
 		cfg.DefaultFilter = syncengine.DefaultFilterSettings()
-	}
-	if cfg.Version < 3 && cfg.RecorderSettings.TagBatch == 0 {
-		cfg.RecorderSettings.TagBatch = 1
 	}
 	if cfg.Version < 4 {
 		// Enabled is new in v4; configs written before it exist have every
