@@ -1,6 +1,7 @@
-# Various
+# 
 
-For a OneDrive remote, show only the name and site URL; the rest can go under advanced
+# Various
+For a OneDrive remote setup/edit, show only the name and site URL; the rest can go under advanced
 
 ## Sync selection
 
@@ -16,10 +17,11 @@ Configure checkers
 Filtering?
 
 
+# Remove all backwards compat
+We don't have users yet! Decruft.
 
-# Experiemtns listing page (from/to)
-Only need to show experiments existing on From, we can ignore To (previously I wanted to have some sort of preview of which experients exist where, but I don't think it's really valubale)
 
+# Experiemnts listing page (from/to)
 Gray out preview until an experiment has been selected
 
 
@@ -39,4 +41,13 @@ Add a configure recorder button? I'm not sure, maybe it has to be hardcoded.
 
 
 ### Recorders
-Each recorder should have its own file under recorders/ (that dir can go wherever it makes sense for a go project, I don't know how go does architecture). The file defines (i) how to handle setup logic (creating recorder ID), (ii) how to detect the recorder, (iii) how to copy files, including respecting recorder ID
+Each recorder should have its own .go file under recorders/ (that dir can go wherever it makes sense for a go project, I don't know how go does architecture). The file defines (i) how to handle setup logic (creating recorder ID), (ii) how to detect the recorder, (iii) how to copy files, including respecting recorder ID
+
+
+# Pull Files
+Completely rework to use the same screen as the sync screen; user chooses a location, then an experiment (or multiple), then the app does a scan first, then users can click to highlight the files/folders (when clicking a folder, all files within are selected)
+
+
+# Recorder Sync
+Split into two cols (or dynamically re-col?)
+
