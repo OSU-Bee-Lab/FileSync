@@ -23,6 +23,19 @@ func showBackup(s *state) {
 
 	checkGroup := widget.NewCheckGroup(nil, nil)
 
+	var scanBtn *widget.Button
+	updateScanBtn := func() {
+		if scanBtn == nil {
+			return
+		}
+		if len(checkGroup.Selected) == 0 {
+			scanBtn.Disable()
+		} else {
+			scanBtn.Enable()
+		}
+	}
+	checkGroup.OnChanged = func(_ []string) { updateScanBtn() }
+
 	var srcLoc, dstLoc *syncengine.Location
 	if loc := findLocation(s.cfg.Locations, s.backupSrcName); loc != nil {
 		srcLoc = loc
@@ -41,31 +54,16 @@ func showBackup(s *state) {
 		checkGroup.Options = nil
 		checkGroup.Selected = nil
 		checkGroup.Refresh()
+		updateScanBtn()
 
 		src := *srcLoc
-		var dst *syncengine.Location
-		if dstLoc != nil {
-			dstVal := *dstLoc
-			dst = &dstVal
-		}
 
 		go func() {
 			ctx := context.Background()
 			exps, err := syncengine.ListExperiments(ctx, src)
-			var dexps []syncengine.ExperimentEntry
-			var dstErr error
-			if err == nil && dst != nil {
-				dexps, dstErr = syncengine.ListExperiments(ctx, *dst)
-			}
 
 			fyne.Do(func() {
 				if srcLoc == nil || srcLoc.ID != src.ID {
-					return
-				}
-				if dstLoc != nil && dst != nil && dstLoc.ID != dst.ID {
-					return
-				}
-				if dstLoc == nil && dst != nil {
 					return
 				}
 
@@ -82,12 +80,9 @@ func showBackup(s *state) {
 				checkGroup.Options = opts
 				checkGroup.Selected = nil
 				checkGroup.Refresh()
+				updateScanBtn()
 
-				msg := fmt.Sprintf("%d experiment(s) found in %s", len(exps), src.Name)
-				if dst != nil && dstErr == nil {
-					msg += fmt.Sprintf(" · %d already present in %s", len(dexps), dst.Name)
-				}
-				statusLabel.SetText(msg)
+				statusLabel.SetText(fmt.Sprintf("%d experiment(s) found in %s", len(exps), src.Name))
 			})
 		}()
 	}
@@ -117,7 +112,7 @@ func showBackup(s *state) {
 		refresh()
 	}
 
-	scanBtn := widget.NewButton("Scan", func() {
+	scanBtn = widget.NewButton("Scan", func() {
 		if srcLoc == nil || dstLoc == nil {
 			dialog.ShowInformation("Pick locations", "Choose a from and to location first.", s.win)
 			return
@@ -151,6 +146,7 @@ func showBackup(s *state) {
 		showScanRunning(s, tasks, func() { showBackup(s) })
 	})
 	scanBtn.Importance = widget.HighImportance
+	updateScanBtn()
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
