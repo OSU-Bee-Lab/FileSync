@@ -40,6 +40,9 @@ func Default() Config {
 	return Config{
 		DefaultFilter:   syncengine.DefaultFilterSettings(),
 		PreserveModTime: true,
+		RecorderSettings: RecorderSettings{
+			AutoDeleteAfterVerify: true,
+		},
 	}
 }
 
