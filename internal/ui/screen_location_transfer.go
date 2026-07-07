@@ -5,11 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"time"
 
-	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
@@ -89,7 +86,7 @@ func confirmImportLocation(s *state, imported syncengine.ExportedLocation) {
 	if backendName == "" {
 		backendName = string(imported.BackendType)
 	}
-	msg := fmt.Sprintf("Import \"%s\"?\n\nYou'll be sent to sign in to %s to authorize it - your own account, not the exporter's.", imported.Name, backendName)
+	msg := fmt.Sprintf("Import \"%s\"?\n\nYou'll be sent to sign in to %s to authorize it.", imported.Name, backendName)
 	dialog.ShowConfirm("Sign-in required", msg, func(ok bool) {
 		if !ok {
 			return
@@ -101,26 +98,16 @@ func confirmImportLocation(s *state, imported syncengine.ExportedLocation) {
 func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 	remoteName := remoteNameSanitizer.ReplaceAllString(imported.Name, "-")
 
-	progressLabel := widget.NewLabel("Setting up " + imported.Name + "...")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	progressDialog := dialog.NewCustom("Connecting...", "Cancel", progressLabel, s.win)
-	progressDialog.SetOnClosed(cancel)
-	progressDialog.Show()
-
-	go func() {
-		defer cancel()
-		// Pass a nil drive chooser: an exported location already carries its
-		// drive_id in Fields, so driveConfigSteps preserves that rather than
-		// re-prompting for a library the importer may not recognize.
-		err := syncengine.CreateRemote(ctx, remoteName, imported.BackendType, imported.Fields, func(url string) {
-			fyne.Do(func() {
-				progressLabel.SetText("Opening your browser to sign in...\nIf it doesn't open, visit:\n" + url)
-			})
-		}, nil)
-		fyne.Do(func() {
-			progressDialog.Hide()
+	runRemoteOAuth(s, "Connecting...", "Setting up "+imported.Name+"...",
+		func(ctx context.Context, onAuthURL func(url string)) error {
+			// Pass a nil drive chooser: an exported location already carries its
+			// drive_id in Fields, so driveConfigSteps preserves that rather than
+			// re-prompting for a library the importer may not recognize.
+			return syncengine.CreateRemote(ctx, remoteName, imported.BackendType, imported.Fields, onAuthURL, nil)
+		},
+		func(err error) {
 			if err != nil {
-				if ctx.Err() != nil {
+				if err == context.Canceled {
 					return
 				}
 				dialog.ShowError(fmt.Errorf("couldn't set up remote: %w", err), s.win)
@@ -136,5 +123,4 @@ func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 			s.saveConfig()
 			showLocations(s)
 		})
-	}()
 }

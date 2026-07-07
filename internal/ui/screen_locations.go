@@ -224,6 +224,11 @@ func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx con
 	progressLabel := widget.NewLabel(progressText)
 	progressLabel.Wrapping = fyne.TextWrapWord
 
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+
+	var progressDialog dialog.Dialog
+	cancelBtn := widget.NewButton("Cancel", func() { progressDialog.Hide() })
+
 	var authURL string
 	openBtn := widget.NewButton("Open in Browser", func() {
 		if u, err := url.Parse(authURL); err == nil {
@@ -237,17 +242,18 @@ func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx con
 		}
 	})
 	// The sign-in URL isn't known until run() reaches the OAuth step, so the
-	// browser buttons start hidden and appear once onAuthURL fires.
-	buttonRow := container.NewHBox(openBtn, copyBtn)
-	buttonRow.Hide()
+	// browser buttons start hidden and appear once onAuthURL fires; Cancel
+	// stays put in the same row throughout.
+	buttonRow := container.NewHBox(openBtn, copyBtn, cancelBtn)
+	openBtn.Hide()
+	copyBtn.Hide()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-
-	progressDialog := dialog.NewCustom(dialogTitle, "Cancel", container.NewVBox(progressLabel, buttonRow), s.win)
+	progressDialog = dialog.NewCustomWithoutButtons(dialogTitle, container.NewVBox(progressLabel, buttonRow), s.win)
 	progressDialog.SetOnClosed(cancel)
 	progressDialog.Show()
-	// NewCustom sizes to content min width, which is narrow for a short label -
-	// widen it so the sign-in instructions and buttons aren't cramped.
+	// NewCustomWithoutButtons sizes to content min width, which is narrow for
+	// a short label - widen it so the sign-in instructions and buttons aren't
+	// cramped.
 	progressDialog.Resize(fyne.NewSize(460, 200))
 
 	go func() {
@@ -255,7 +261,8 @@ func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx con
 		err := run(ctx, func(rawURL string) {
 			fyne.Do(func() {
 				authURL = rawURL
-				buttonRow.Show()
+				openBtn.Show()
+				copyBtn.Show()
 				progressDialog.Resize(fyne.NewSize(460, 200))
 				progressLabel.SetText("Click Open in Browser to sign in.\n\n" +
 					"To sign in as a different account than the one your browser " +
