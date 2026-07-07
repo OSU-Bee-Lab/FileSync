@@ -1,0 +1,88 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to rebuild (e.g. v0.1.0)'
+        required: true
+
+env:
+  APP_NAME: FileSync
+  APP_ID: com.osubeelab.filesync
+
+jobs:
+  build:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            os: darwin
+          - platform: ubuntu-22.04
+            os: linux
+          - platform: windows-latest
+            os: windows
+
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev
+
+      - name: Install MinGW (cgo compiler for Windows)
+        if: matrix.os == 'windows'
+        uses: egor-tensin/setup-mingw@v2
+        with:
+          platform: x64
+
+      - name: Install fyne packaging tool
+        run: go install fyne.io/fyne/v2/cmd/fyne@latest
+
+      - name: Package (macOS)
+        if: matrix.os == 'darwin'
+        run: |
+          fyne package -os darwin -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
+          codesign --force --deep --sign - "$APP_NAME.app"
+          ditto -c -k --sequesterRsrc "$APP_NAME.app" "$APP_NAME-macOS.zip"
+
+      - name: Package (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          fyne package -os linux -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
+          mv "$APP_NAME.tar.xz" "$APP_NAME-Linux.tar.xz"
+
+      - name: Package (Windows)
+        if: matrix.os == 'windows'
+        shell: bash
+        run: |
+          fyne package -os windows -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
+          mv "$APP_NAME.exe" "$APP_NAME-Windows.exe"
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: ${{ env.APP_NAME }} ${{ inputs.tag || github.ref_name }}
+          draft: true
+          prerelease: false
+          files: |
+            ${{ env.APP_NAME }}-macOS.zip
+            ${{ env.APP_NAME }}-Linux.tar.xz
+            ${{ env.APP_NAME }}-Windows.exe
