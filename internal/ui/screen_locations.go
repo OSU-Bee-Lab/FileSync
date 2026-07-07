@@ -23,9 +23,10 @@ func showLocations(s *state) {
 		func() fyne.CanvasObject {
 			nameLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 			pathLabel := widget.NewLabel("")
+			enabledCheck := widget.NewCheck("Enabled", nil)
 			removeBtn := widget.NewButton("Remove", nil)
 			removeBtn.Importance = widget.DangerImportance
-			btnBox := container.NewHBox(widget.NewButton("Show Experiments", nil), widget.NewButton("Edit", nil), widget.NewButton("Export", nil), removeBtn)
+			btnBox := container.NewHBox(enabledCheck, widget.NewButton("Show Experiments", nil), widget.NewButton("Edit", nil), widget.NewButton("Export", nil), removeBtn)
 			nameRow := container.NewBorder(nil, nil, nil, btnBox, nameLabel)
 			return container.NewVBox(nameRow, pathLabel)
 		},
@@ -39,17 +40,24 @@ func showLocations(s *state) {
 			pathLabel.SetText(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
 
 			btnBox := nameRow.Objects[1].(*fyne.Container)
-			showExpBtn := btnBox.Objects[0].(*widget.Button)
+			enabledCheck := btnBox.Objects[0].(*widget.Check)
+			enabledCheck.SetChecked(loc.Enabled)
+			enabledCheck.OnChanged = func(v bool) {
+				s.cfg.Locations[id].Enabled = v
+				s.saveConfig()
+			}
+
+			showExpBtn := btnBox.Objects[1].(*widget.Button)
 			showExpBtn.OnTapped = func() { showLocationExperiments(s, loc) }
 
-			editBtn := btnBox.Objects[1].(*widget.Button)
+			editBtn := btnBox.Objects[2].(*widget.Button)
 			editBtn.OnTapped = func() { showEditLocation(s, id) }
 
-			exportBtn := btnBox.Objects[2].(*widget.Button)
+			exportBtn := btnBox.Objects[3].(*widget.Button)
 			exportBtn.Hidden = loc.Kind != syncengine.LocationRemote
 			exportBtn.OnTapped = func() { exportLocation(s, loc) }
 
-			removeBtn := btnBox.Objects[3].(*widget.Button)
+			removeBtn := btnBox.Objects[4].(*widget.Button)
 			removeBtn.OnTapped = func() { removeLocation(s, id, loc) }
 		},
 	)
