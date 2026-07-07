@@ -5,6 +5,7 @@ go 1.26.4
 require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/rclone/rclone v1.74.3
+	github.com/shirou/gopsutil/v4 v4.26.3
 )
 
 require (
@@ -109,7 +110,6 @@ require (
 	github.com/prometheus/procfs v0.19.2 // indirect
 	github.com/rfjakob/eme v1.2.0 // indirect
 	github.com/rymdport/portal v0.4.2 // indirect
-	github.com/shirou/gopsutil/v4 v4.26.3 // indirect
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966 // indirect
 	github.com/smarty/assertions v1.16.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect

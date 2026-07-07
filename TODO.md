@@ -7,7 +7,7 @@ For a OneDrive remote, show only the name and site URL; the rest can go under ad
 
 
 
-## Sync scan screen
+## Sync preview screen
 Use buttons for from/to? Idk we want to overall overhaul the UI here. It should be a simple 
 
 
@@ -21,8 +21,8 @@ Filtering?
 # Experiemtns listing page (from/to)
 Only need to show experiments existing on From, we can ignore To (previously I wanted to have some sort of preview of which experients exist where, but I don't think it's really valubale)
 
-Gray out scan until an experiment has been selected
+Gray out preview until an experiment has been selected
 
 
-DONE: Throughout, "Preview" and "Dry run" were renamed to "Scan" (flow is Scan -> Ready to Sync -> Sync).
+Throughout, "Preview" and "Dry run" should be changed to "Check" or "Check sync" or "checking" etc.
 

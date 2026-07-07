@@ -9,3 +9,6 @@
 
 # macOS
 .DS_Store
+
+# Worktrees / reference checkouts
+/.claude/worktrees/

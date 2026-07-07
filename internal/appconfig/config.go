@@ -15,23 +15,35 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
-const currentVersion = 2
+const currentVersion = 4
+
+// RecorderSettings persists the recorder-offload feature's defaults and
+// its tag-file ID-assignment state (batch/counter scheme — see
+// internal/recorder/identity.go), so recorder IDs stay stable across runs.
+type RecorderSettings struct {
+	DestinationLocationID string         `json:"destinationLocationId,omitempty"`
+	AutoDeleteAfterVerify bool           `json:"autoDeleteAfterVerify"`
+	TagBatch              int            `json:"tagBatch"`
+	TagCounters           map[string]int `json:"tagCounters,omitempty"`
+}
 
 // Config is ExpSync's entire persisted app state.
 type Config struct {
-	Version         int                       `json:"version"`
-	Locations       []syncengine.Location     `json:"locations"`
-	DefaultFilter   syncengine.FilterSettings `json:"defaultFilter"`
-	PreserveModTime bool                      `json:"preserveModTime"`
+	Version          int                       `json:"version"`
+	Locations        []syncengine.Location     `json:"locations"`
+	DefaultFilter    syncengine.FilterSettings `json:"defaultFilter"`
+	PreserveModTime  bool                      `json:"preserveModTime"`
+	RecorderSettings RecorderSettings          `json:"recorderSettings"`
 }
 
 // Default returns the config used the first time ExpSync runs on a
 // machine, before any Locations have been added.
 func Default() Config {
 	return Config{
-		Version:         currentVersion,
-		DefaultFilter:   syncengine.DefaultFilterSettings(),
-		PreserveModTime: true,
+		Version:          currentVersion,
+		DefaultFilter:    syncengine.DefaultFilterSettings(),
+		PreserveModTime:  true,
+		RecorderSettings: RecorderSettings{TagBatch: 1},
 	}
 }
 
@@ -67,6 +79,18 @@ func Load() (Config, error) {
 	}
 	if cfg.Version < 2 && len(cfg.DefaultFilter.IncludePatterns) == 1 && cfg.DefaultFilter.IncludePatterns[0] == "*.mp3" {
 		cfg.DefaultFilter = syncengine.DefaultFilterSettings()
+	}
+	if cfg.Version < 3 && cfg.RecorderSettings.TagBatch == 0 {
+		cfg.RecorderSettings.TagBatch = 1
+	}
+	if cfg.Version < 4 {
+		// Enabled is new in v4; configs written before it exist have every
+		// location unmarshal to Enabled: false, which would silently
+		// disable them all. Back-fill true so upgrading never disables an
+		// existing location.
+		for i := range cfg.Locations {
+			cfg.Locations[i].Enabled = true
+		}
 	}
 	if cfg.Version < currentVersion {
 		cfg.Version = currentVersion
