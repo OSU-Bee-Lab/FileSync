@@ -4,14 +4,21 @@
 package ui
 
 import (
+	_ "embed"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/appconfig"
 )
+
+//go:embed Icon.png
+var logoIconBytes []byte
 
 // windowSize is the one fixed size FileSync's single window should ever have.
 // Fyne's glfw driver (at least on macOS with multiple displays attached) can
@@ -135,7 +142,19 @@ func Run() {
 }
 
 func showHome(s *state) {
-	title := widget.NewLabelWithStyle("FileSync", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	logo := canvas.NewImageFromResource(fyne.NewStaticResource("Icon.png", logoIconBytes))
+	logo.FillMode = canvas.ImageFillContain
+	logo.SetMinSize(fyne.NewSize(120, 120))
+
+	titleText := canvas.NewText("FileSync", theme.Color(theme.ColorNameForeground))
+	titleText.TextStyle = fyne.TextStyle{Bold: true}
+	titleText.TextSize = 24
+	titleText.Alignment = fyne.TextAlignCenter
+
+	title := container.NewVBox(
+		container.NewCenter(logo),
+		container.NewCenter(titleText),
+	)
 
 	syncExperimentsBtn := widget.NewButton("Sync Experiments", func() { showSyncExperiments(s) })
 	syncExperimentsBtn.Importance = widget.HighImportance
