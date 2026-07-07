@@ -10,6 +10,14 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
+// maxConcurrentUploads bounds simultaneous cloud uploads within one
+// StartOffload run (see uploadSem below).
+const maxConcurrentUploads = 3
+
+// maxUploadAttempts is how many times uploadWithRetry tries a single file
+// upload (including the first attempt) before reporting it failed.
+const maxUploadAttempts = 3
+
 // OffloadStatus is the lifecycle state of a running Offload.
 type OffloadStatus int
 
@@ -124,6 +132,14 @@ func StartOffload(
 		}
 		files := make(map[string]FileOffloadProgress, len(sourceFiles))
 
+		// uploadSem bounds how many cloud uploads run at once across this
+		// whole offload run. Files land locally in bursts (e.g. ~100 in 15
+		// minutes during an active recorder sync), and firing an unbounded
+		// goroutine per file at the remote (SharePoint/OneDrive) causes
+		// throttling/errors under load; this caps it the same way a normal
+		// rclone copy batch would be bounded.
+		uploadSem := make(chan struct{}, maxConcurrentUploads)
+
 		emit := func(status OffloadStatus, current string, err error) {
 			done := 0
 			var bytesDone, bytesTotal int64
@@ -227,12 +243,22 @@ func StartOffload(
 			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: cp.BytesTotal, BytesTotal: cp.BytesTotal}
 			emit(OffloadRunning, sf.DestRelPath, nil)
 
+			fileTotal := cp.BytesTotal
 			for _, uploadDest := range uploadDests {
 				dest := uploadDest
 				localPath := destPaths[0]
 				rel := filepath.Join(experimentName, recorderID, sf.DestRelPath)
+				if onUpload != nil {
+					onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: syncengine.UploadQueued, BytesTotal: fileTotal})
+				}
 				go func(localPath, rel string) {
-					_ = syncengine.StartFileUpload(context.Background(), localPath, dest, rel, func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
+					select {
+					case uploadSem <- struct{}{}:
+					case <-ctx.Done():
+						return
+					}
+					defer func() { <-uploadSem }()
+					uploadWithRetry(ctx, localPath, dest, rel, func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
 						if onUpload != nil {
 							onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr})
 						}
@@ -262,6 +288,44 @@ func StartOffload(
 	}()
 
 	return job, progressCh
+}
+
+// uploadWithRetry calls syncengine.StartFileUpload, retrying transient
+// failures (rate limiting, network blips) up to maxUploadAttempts times with
+// a short backoff before giving up. Without this, a single throttled request
+// during a burst of recorder uploads reported UploadFailed once and the file
+// was never tried again or surfaced to the user.
+//
+// onEvent is de-duplicated across attempts: UploadStarted is only forwarded
+// once (on the first attempt) so the UI doesn't add a duplicate
+// "currently uploading" entry per retry, and UploadFailed is only forwarded
+// on the final attempt so a retried-then-succeeded upload doesn't flash an
+// error.
+func uploadWithRetry(ctx context.Context, localPath string, dst syncengine.Location, relPath string, onEvent syncengine.UploadProgressFunc) {
+	for attempt := 1; attempt <= maxUploadAttempts; attempt++ {
+		final := attempt == maxUploadAttempts
+		wrapped := func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
+			if onEvent == nil {
+				return
+			}
+			if ev == syncengine.UploadStarted && attempt > 1 {
+				return
+			}
+			if ev == syncengine.UploadFailed && !final {
+				return
+			}
+			onEvent(ev, bytesDone, bytesTotal, uerr)
+		}
+		err := syncengine.StartFileUpload(ctx, localPath, dst, relPath, wrapped)
+		if err == nil || final {
+			return
+		}
+		select {
+		case <-time.After(time.Duration(attempt) * 2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func cloneFileProgress(m map[string]FileOffloadProgress) map[string]FileOffloadProgress {

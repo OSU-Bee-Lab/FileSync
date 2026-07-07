@@ -19,7 +19,14 @@ import (
 type UploadEvent int
 
 const (
-	UploadStarted UploadEvent = iota
+	// UploadQueued means a file has finished its local copy/verify and is
+	// waiting for a free upload slot - it is not emitted by StartFileUpload
+	// itself (which only ever runs once a slot is free) but is defined here
+	// so callers that queue uploads behind a concurrency limit (see
+	// internal/recorder/offload.go) can report it through the same
+	// UploadProgressFunc/UploadEvent the UI already watches.
+	UploadQueued UploadEvent = iota
+	UploadStarted
 	UploadProgress
 	UploadDone
 	UploadFailed

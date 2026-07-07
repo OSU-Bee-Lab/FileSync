@@ -507,6 +507,7 @@ type uploadFileEntry struct {
 	relPath    string
 	bytesDone  int64
 	bytesTotal int64
+	err        error // set when the upload failed after retries
 }
 
 func (e uploadFileEntry) label() string {
@@ -675,11 +676,19 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	onUploadEvent := func(u recorder.UploadUpdate) {
 		fyne.Do(func() {
 			switch u.Event {
-			case syncengine.UploadStarted:
+			case syncengine.UploadQueued:
+				// Added to the queue as soon as the file is offloaded and
+				// verified, even though the upload itself may not start yet
+				// (see uploadSem in offload.go) - previously the list only
+				// picked files up once a slot freed, so it silently topped
+				// out at maxConcurrentUploads entries no matter how many
+				// files were actually waiting.
 				uploading = append(uploading, uploadFileEntry{
 					recorderID: u.RecorderID, relPath: u.RelPath,
 					bytesTotal: u.BytesTotal,
 				})
+			case syncengine.UploadStarted:
+				// Entry already added at UploadQueued; nothing to do.
 			case syncengine.UploadProgress:
 				if i := findUploadEntry(uploading, u.RecorderID, u.RelPath); i >= 0 {
 					uploading[i].bytesDone = u.BytesDone
@@ -693,6 +702,14 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 				})
 			case syncengine.UploadFailed:
 				uploading = removeUploadEntry(uploading, u.RecorderID, u.RelPath)
+				// Surface the failure in the "Uploaded" list (flagged red,
+				// with the error detail) instead of letting it vanish
+				// silently - previously a failed upload disappeared from
+				// both lists with no indication to the user.
+				uploaded = append(uploaded, uploadFileEntry{
+					recorderID: u.RecorderID, relPath: u.RelPath,
+					bytesTotal: u.BytesTotal, err: u.Err,
+				})
 			}
 			if uploadingList != nil {
 				uploadingList.Refresh()
@@ -860,7 +877,11 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		func() fyne.CanvasObject { return createBackingBarItem() },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			e := uploaded[id]
-			updateBackingBarItem(obj, e.label(), humanBytes(e.bytesTotal), 1.0, nil, false, false, false, s.win)
+			summary := humanBytes(e.bytesTotal)
+			if e.err != nil {
+				summary = "Failed"
+			}
+			updateBackingBarItem(obj, e.label(), summary, 1.0, e.err, e.err != nil, false, false, s.win)
 		},
 	)
 
@@ -869,7 +890,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	var main fyne.CanvasObject = rowsScroll
 	if len(params.uploads) > 0 {
 		uploadPanel := container.NewVSplit(
-			container.NewBorder(sectionHeader("Currently uploading"), nil, nil, nil, uploadingList),
+			container.NewBorder(sectionHeader("Upload queue"), nil, nil, nil, uploadingList),
 			container.NewBorder(sectionHeader("Uploaded"), nil, nil, nil, uploadedList),
 		)
 		uploadPanel.SetOffset(0.5)
