@@ -284,14 +284,21 @@ func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx con
 // root of loc, so users can check what's there without starting a Sync or
 // Download flow.
 func showLocationExperiments(s *state, loc syncengine.Location) {
-	progressDialog := dialog.NewCustom("Loading...", "Please wait", widget.NewLabel("Listing experiments in "+loc.Name+"..."), s.win)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	progressDialog := dialog.NewCustom("Loading...", "Cancel", widget.NewLabel("Listing experiments in "+loc.Name+"..."), s.win)
+	progressDialog.SetOnClosed(cancel)
 	progressDialog.Show()
 
 	go func() {
-		exps, err := syncengine.ListExperiments(context.Background(), loc)
+		defer cancel()
+		exps, err := syncengine.ListExperiments(ctx, loc)
 		fyne.Do(func() {
 			progressDialog.Hide()
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				showLocationError(s, err, loc)
 				return
 			}

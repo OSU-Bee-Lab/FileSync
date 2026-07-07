@@ -102,11 +102,12 @@ func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 	remoteName := remoteNameSanitizer.ReplaceAllString(imported.Name, "-")
 
 	progressLabel := widget.NewLabel("Setting up " + imported.Name + "...")
-	progressDialog := dialog.NewCustom("Connecting...", "Please wait", progressLabel, s.win)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	progressDialog := dialog.NewCustom("Connecting...", "Cancel", progressLabel, s.win)
+	progressDialog.SetOnClosed(cancel)
 	progressDialog.Show()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 		// Pass a nil drive chooser: an exported location already carries its
 		// drive_id in Fields, so driveConfigSteps preserves that rather than
@@ -119,6 +120,9 @@ func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 		fyne.Do(func() {
 			progressDialog.Hide()
 			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
 				dialog.ShowError(fmt.Errorf("couldn't set up remote: %w", err), s.win)
 				return
 			}
