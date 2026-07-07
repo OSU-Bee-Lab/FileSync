@@ -9,7 +9,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // showSyncExperiments is the Sync Experiments flow: always whole-experiment

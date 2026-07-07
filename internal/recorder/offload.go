@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // splitSubpath breaks a user-typed subpath into its component directory
@@ -110,7 +110,7 @@ type UploadUpdate struct {
 // upload's lifecycle events.
 //
 // Once every file is verified complete, source files on the recorder are
-// deleted if autoDelete is set. This is the one place in ExpSync that
+// deleted if autoDelete is set. This is the one place in FileSync that
 // deletes data, deliberately: it's the recorder's own storage being reset
 // for reuse, not a synced destination, and it only happens after a
 // verified copy — see CLAUDE.md for the scoping of the project's

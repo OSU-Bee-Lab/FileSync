@@ -120,7 +120,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 		ci.NoTraverse = true
 	}
 
-	groupName := "expsync-job-" + random.String(8)
+	groupName := "filesync-job-" + random.String(8)
 	ctx = accounting.WithStatsGroup(ctx, groupName)
 
 	job := &Job{cancel: cancel}

@@ -1,6 +1,6 @@
 # Data Storage Schema
 
-ExpSync syncs audio-experiment data organized under a fixed schema used by the
+FileSync syncs audio-experiment data organized under a fixed schema used by the
 Johnson lab. This is a summary; the canonical spec lives in the
 [schema doc](https://docs.google.com/document/d/1q9SS36vbQIg6BZ3AaXpb2KvZyMGUJfuOGdGQHJLggSk/edit?tab=t.0).
 

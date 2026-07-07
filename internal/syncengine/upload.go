@@ -58,7 +58,7 @@ func StartFileUpload(ctx context.Context, localPath string, dst Location, relPat
 		onEvent(UploadStarted, 0, bytesTotal, nil)
 	}
 
-	ctx = accounting.WithStatsGroup(ctx, "expsync-upload-"+random.String(8))
+	ctx = accounting.WithStatsGroup(ctx, "filesync-upload-"+random.String(8))
 	stats := accounting.Stats(ctx)
 
 	copyDone := make(chan error, 1)

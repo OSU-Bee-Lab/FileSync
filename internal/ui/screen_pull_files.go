@@ -10,7 +10,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // showPullFiles is the Pull Files flow: a researcher pulling a subset of one

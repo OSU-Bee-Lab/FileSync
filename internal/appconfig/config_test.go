@@ -3,7 +3,7 @@ package appconfig
 import (
 	"testing"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 func TestLoadReturnsDefaultOnFirstRun(t *testing.T) {
@@ -59,7 +59,7 @@ func TestSaveThenLoadRoundTrips(t *testing.T) {
 	}
 }
 
-func TestPathIsUnderExpSyncSubdir(t *testing.T) {
+func TestPathIsUnderFileSyncSubdir(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")
 

@@ -1,4 +1,4 @@
-# Cross-platform build pipeline for ExpSync, using fyne-cross
+# Cross-platform build pipeline for FileSync, using fyne-cross
 # (https://github.com/fyne-io/fyne-cross). Run from the repo root as
 # `make -f build/Makefile <target>`, or `cd build && make <target>`.
 #
@@ -16,8 +16,8 @@
 #   go install github.com/fyne-io/fyne-cross@latest
 #   Docker/Podman running (colima start, or Docker Desktop)
 
-APP_ID := com.osubeelab.expsync
-APP_NAME := ExpSync
+APP_ID := com.osubeelab.filesync
+APP_NAME := FileSync
 DIR := $(CURDIR)/..
 
 .PHONY: dev build-darwin build-windows build-linux release clean

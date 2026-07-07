@@ -1,4 +1,4 @@
-// Package rcbackends registers exactly the rclone backends ExpSync supports.
+// Package rcbackends registers exactly the rclone backends FileSync supports.
 //
 // Deliberately not importing github.com/rclone/rclone/backend/all: that
 // package blank-imports all 70+ rclone backends via init(), which bloats

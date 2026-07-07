@@ -3,7 +3,7 @@ package ui
 import (
 	"context"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // scanJob is one scan result the user is being asked to confirm,

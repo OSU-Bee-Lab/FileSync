@@ -7,7 +7,7 @@ import (
 	"github.com/gofrs/flock"
 )
 
-// InstanceLock guards against two copies of ExpSync running at once, which
+// InstanceLock guards against two copies of FileSync running at once, which
 // would let two independent rclone copy operations race over the same
 // destination. It wraps an OS-native advisory file lock (flock/LockFileEx),
 // which the OS releases automatically on process exit or crash, so there is
@@ -16,7 +16,7 @@ type InstanceLock struct {
 	fl *flock.Flock
 }
 
-// AcquireInstanceLock tries to take ExpSync's single-instance lock. ok is
+// AcquireInstanceLock tries to take FileSync's single-instance lock. ok is
 // false if another instance already holds it; callers should refuse to
 // start rather than proceed unlocked.
 func AcquireInstanceLock() (lock *InstanceLock, ok bool, err error) {
@@ -24,12 +24,12 @@ func AcquireInstanceLock() (lock *InstanceLock, ok bool, err error) {
 	if err != nil {
 		return nil, false, err
 	}
-	dir = filepath.Join(dir, "ExpSync")
+	dir = filepath.Join(dir, "FileSync")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, false, err
 	}
 
-	fl := flock.New(filepath.Join(dir, "expsync.lock"))
+	fl := flock.New(filepath.Join(dir, "filesync.lock"))
 	locked, err := fl.TryLock()
 	if err != nil {
 		return nil, false, err

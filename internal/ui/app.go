@@ -1,4 +1,4 @@
-// Package ui is the Fyne presentation layer for ExpSync. It never imports
+// Package ui is the Fyne presentation layer for FileSync. It never imports
 // rclone directly - it only calls internal/syncengine's exported API - so
 // the rclone dependency stays confined to one package.
 package ui
@@ -10,10 +10,10 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/appconfig"
+	"github.com/OSU-Bee-Lab/filesync/internal/appconfig"
 )
 
-// windowSize is the one fixed size ExpSync's single window should ever have.
+// windowSize is the one fixed size FileSync's single window should ever have.
 // Fyne's glfw driver (at least on macOS with multiple displays attached) can
 // recompute the window to span the whole virtual desktop instead of the
 // requested size - this has been observed both on first show and after
@@ -96,17 +96,17 @@ func (s *state) saveConfig() {
 	}
 }
 
-// Run builds and shows the ExpSync window. Blocks until the window closes.
+// Run builds and shows the FileSync window. Blocks until the window closes.
 func Run() {
-	a := app.NewWithID("com.osubeelab.expsync")
-	w := a.NewWindow("ExpSync")
+	a := app.NewWithID("com.osubeelab.filesync")
+	w := a.NewWindow("FileSync")
 
 	// Two instances copying to the same destination via rclone would race
 	// each other, so refuse to open a second window rather than risk that.
 	lock, ok, err := appconfig.AcquireInstanceLock()
 	if err == nil && !ok {
 		w.Resize(fyne.NewSize(420, 160))
-		w.SetContent(widget.NewLabel("ExpSync is already running.\nClose the other window before opening a new one."))
+		w.SetContent(widget.NewLabel("FileSync is already running.\nClose the other window before opening a new one."))
 		w.CenterOnScreen()
 		w.ShowAndRun()
 		return
@@ -135,7 +135,7 @@ func Run() {
 }
 
 func showHome(s *state) {
-	title := widget.NewLabelWithStyle("ExpSync", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	title := widget.NewLabelWithStyle("FileSync", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
 	syncExperimentsBtn := widget.NewButton("Sync Experiments", func() { showSyncExperiments(s) })
 	syncExperimentsBtn.Importance = widget.HighImportance

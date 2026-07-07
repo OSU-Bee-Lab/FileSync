@@ -1,4 +1,4 @@
-# ExpSync
+# FileSync
 
 A Fyne desktop app for syncing experiment data between local folders and cloud
 remotes (SharePoint/OneDrive, Google Drive, Dropbox, S3) via rclone.

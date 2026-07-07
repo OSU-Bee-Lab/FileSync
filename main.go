@@ -1,10 +1,10 @@
-// Command expsync is a cross-platform GUI for schema-scoped rclone
+// Command filesync is a cross-platform GUI for schema-scoped rclone
 // syncing and pulling of bioacoustics experiment data.
 package main
 
 import (
-	_ "github.com/OSU-Bee-Lab/expsync/internal/rcbackends"
-	"github.com/OSU-Bee-Lab/expsync/internal/ui"
+	_ "github.com/OSU-Bee-Lab/filesync/internal/rcbackends"
+	"github.com/OSU-Bee-Lab/filesync/internal/ui"
 	"github.com/rclone/rclone/fs/config/configfile"
 )
 

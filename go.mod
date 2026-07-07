@@ -1,4 +1,4 @@
-module github.com/OSU-Bee-Lab/expsync
+module github.com/OSU-Bee-Lab/filesync
 
 go 1.26.4
 

@@ -14,7 +14,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 func showLocations(s *state) {
@@ -68,7 +68,7 @@ func showLocations(s *state) {
 	s.setContent(container.NewPadded(content))
 }
 
-// unlistLocation drops loc at index id from ExpSync's config, leaving any
+// unlistLocation drops loc at index id from FileSync's config, leaving any
 // underlying rclone remote untouched. Shared by both removal paths so the
 // list-editing logic lives in one place.
 func unlistLocation(s *state, id int) {
@@ -86,7 +86,7 @@ func unlistLocation(s *state, id int) {
 // remote itself.
 func removeLocation(s *state, id int, loc syncengine.Location) {
 	if loc.Kind != syncengine.LocationRemote {
-		dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from ExpSync?", func(ok bool) {
+		dialog.ShowConfirm("Remove location", "Remove \""+loc.Name+"\" from FileSync?", func(ok bool) {
 			if ok {
 				unlistLocation(s, id)
 			}
@@ -94,7 +94,7 @@ func removeLocation(s *state, id int, loc syncengine.Location) {
 		return
 	}
 
-	msg := widget.NewLabel("Remove \"" + loc.Name + "\" from ExpSync?\n\n" +
+	msg := widget.NewLabel("Remove \"" + loc.Name + "\" from FileSync?\n\n" +
 		"• Unlist: forget it here, but keep the rclone remote \"" + loc.RemoteName + "\" and its sign-in.\n" +
 		"• Delete config: also delete the rclone remote's saved credentials.\n\n" +
 		"Neither option deletes any files on the remote itself.")

@@ -11,7 +11,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // backendDisplayNames mirrors kindBackends in reverse, for messaging the
@@ -32,7 +32,7 @@ func exportLocation(s *state, loc syncengine.Location) {
 		dialog.ShowError(err, s.win)
 		return
 	}
-	chooseFileSave(s.win, loc.Name+".expsync-location.json", func(path string, err error) {
+	chooseFileSave(s.win, loc.Name+".filesync-location.json", func(path string, err error) {
 		if err != nil {
 			dialog.ShowError(err, s.win)
 			return

@@ -1,8 +1,8 @@
 # Build artifacts
 /fyne-cross/
 /release/
-/expsync
-/expsync.exe
+/filesync
+/filesync.exe
 
 # Go
 *.test
@@ -12,3 +12,6 @@
 
 # Worktrees / reference checkouts
 /.claude/worktrees/
+
+
+TODO.md

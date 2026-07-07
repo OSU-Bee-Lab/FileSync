@@ -14,7 +14,7 @@ type FilterSettings struct {
 	IncludePatterns []string `json:"includePatterns"`
 }
 
-// DefaultFilterSettings does not restrict files. ExpSync used to default to
+// DefaultFilterSettings does not restrict files. FileSync used to default to
 // mp3-only, but the lab schema includes other recorder outputs that should be
 // scanned and copied unless a future UI explicitly opts into filtering.
 func DefaultFilterSettings() FilterSettings {

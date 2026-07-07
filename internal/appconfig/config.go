@@ -1,4 +1,4 @@
-// Package appconfig persists ExpSync's own settings - the list of
+// Package appconfig persists FileSync's own settings - the list of
 // configured Locations and a couple of defaults. It is deliberately
 // separate from rclone's own config file (which holds remote
 // credentials/secrets and is left at rclone's default path, untouched -
@@ -12,7 +12,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 const currentVersion = 5
@@ -28,7 +28,7 @@ type RecorderSettings struct {
 	Subpath string `json:"subpath,omitempty"`
 }
 
-// Config is ExpSync's entire persisted app state.
+// Config is FileSync's entire persisted app state.
 type Config struct {
 	Version          int                       `json:"version"`
 	Locations        []syncengine.Location     `json:"locations"`
@@ -37,7 +37,7 @@ type Config struct {
 	RecorderSettings RecorderSettings          `json:"recorderSettings"`
 }
 
-// Default returns the config used the first time ExpSync runs on a
+// Default returns the config used the first time FileSync runs on a
 // machine, before any Locations have been added.
 func Default() Config {
 	return Config{
@@ -47,16 +47,16 @@ func Default() Config {
 	}
 }
 
-// Path returns the OS-appropriate location for ExpSync's config file
-// (e.g. ~/.config/ExpSync/config.json on Linux, ~/Library/Application
-// Support/ExpSync/config.json on macOS, %AppData%\ExpSync\config.json on
+// Path returns the OS-appropriate location for FileSync's config file
+// (e.g. ~/.config/FileSync/config.json on Linux, ~/Library/Application
+// Support/FileSync/config.json on macOS, %AppData%\FileSync\config.json on
 // Windows), via os.UserConfigDir so no path is ever hardcoded.
 func Path() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "ExpSync", "config.json"), nil
+	return filepath.Join(dir, "FileSync", "config.json"), nil
 }
 
 // Load reads the config file, returning Default() if it doesn't exist yet

@@ -13,7 +13,7 @@ import (
 	"github.com/rclone/rclone/lib/oauthutil"
 )
 
-// BackendType is one of the handful of rclone backends ExpSync's curated
+// BackendType is one of the handful of rclone backends FileSync's curated
 // remote wizard exposes. Keep in sync with internal/rcbackends/register.go
 // blank imports - a BackendType with no matching registered backend will
 // fail at CreateRemote time with a clear rclone error.
@@ -346,7 +346,7 @@ func nonSecretRemoteFields(remoteName string) (BackendType, map[string]string, e
 }
 
 // RemoteInfo is one remote already present in rclone's config file,
-// whether or not ExpSync created it - lets a power user adopt an existing
+// whether or not FileSync created it - lets a power user adopt an existing
 // remote (e.g. one set up with the real rclone CLI) into a Location
 // instead of only ever creating new ones.
 type RemoteInfo struct {

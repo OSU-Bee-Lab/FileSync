@@ -23,7 +23,7 @@ func (k LocationKind) String() string {
 }
 
 // MarshalJSON/UnmarshalJSON render LocationKind as "local"/"remote" in
-// ExpSync's config.json rather than a bare int, so the file stays
+// FileSync's config.json rather than a bare int, so the file stays
 // hand-readable and stable across any future reordering of the iota.
 func (k LocationKind) MarshalJSON() ([]byte, error) {
 	return json.Marshal(k.String())
