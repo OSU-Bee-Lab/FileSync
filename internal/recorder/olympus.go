@@ -53,6 +53,9 @@ func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {
 	used := make(map[string]bool)
 
 	err := filepath.Walk(v.MountPoint, func(path string, info os.FileInfo, err error) error {
+		if info != nil && info.IsDir() && isHiddenEntry(info.Name()) {
+			return filepath.SkipDir
+		}
 		if err != nil {
 			return err
 		}
@@ -67,6 +70,7 @@ func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {
 		if err != nil {
 			return err
 		}
+		relDir = stripRecorderPrefix(relDir)
 
 		ts := bestCreationTime(info)
 		base := ts.Format("20060102_150405") + ".wma"
@@ -79,6 +83,21 @@ func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {
 		return nil, err
 	}
 	return files, nil
+}
+
+// stripRecorderPrefix drops a leading "RECORDER" path component: every
+// recording lives under <mount>/RECORDER/<category>/..., but RECORDER itself
+// is just the device's fixed storage-root name, not a meaningful grouping —
+// so destination paths start at the category (TALK, LP, etc.) instead.
+func stripRecorderPrefix(relDir string) string {
+	first, rest, found := strings.Cut(relDir, string(filepath.Separator))
+	if found && strings.EqualFold(first, "RECORDER") {
+		return rest
+	}
+	if !found && strings.EqualFold(relDir, "RECORDER") {
+		return "."
+	}
+	return relDir
 }
 
 // uniqueDestRel avoids collisions within a single offload batch (two

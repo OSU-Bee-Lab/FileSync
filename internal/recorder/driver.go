@@ -1,5 +1,15 @@
 package recorder
 
+import "strings"
+
+// isHiddenEntry reports whether name is a dotfile/dot-directory, e.g. macOS's
+// .Spotlight-V100, .Trashes, .fseventsd. These are OS-managed, sometimes
+// permission-protected, and never contain recordings, so directory walks
+// skip them rather than failing outright when the OS denies access to them.
+func isHiddenEntry(name string) bool {
+	return strings.HasPrefix(name, ".")
+}
+
 // Volume is a single mounted filesystem, as reported by the OS — the unit
 // hotplug detection and drivers work with. No hub/port information is
 // captured here on purpose: recorder identity comes from a tag file on the

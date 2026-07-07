@@ -97,6 +97,9 @@ func (d SonyICDPX370) SourceFiles(v Volume) ([]SourceFile, error) {
 func walkRelative(dir string) ([]SourceFile, error) {
 	var files []SourceFile
 	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if info != nil && info.IsDir() && isHiddenEntry(info.Name()) {
+			return filepath.SkipDir
+		}
 		if err != nil {
 			return err
 		}
