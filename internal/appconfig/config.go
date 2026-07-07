@@ -15,8 +15,6 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
-const currentVersion = 5
-
 // RecorderSettings persists the Sync Recorders feature's defaults.
 type RecorderSettings struct {
 	DestinationLocationIDs []string `json:"destinationLocationIds,omitempty"`
@@ -30,7 +28,6 @@ type RecorderSettings struct {
 
 // Config is FileSync's entire persisted app state.
 type Config struct {
-	Version          int                       `json:"version"`
 	Locations        []syncengine.Location     `json:"locations"`
 	DefaultFilter    syncengine.FilterSettings `json:"defaultFilter"`
 	PreserveModTime  bool                      `json:"preserveModTime"`
@@ -41,7 +38,6 @@ type Config struct {
 // machine, before any Locations have been added.
 func Default() Config {
 	return Config{
-		Version:         currentVersion,
 		DefaultFilter:   syncengine.DefaultFilterSettings(),
 		PreserveModTime: true,
 	}
@@ -76,25 +72,6 @@ func Load() (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
-	}
-	if cfg.Version < 2 && len(cfg.DefaultFilter.IncludePatterns) == 1 && cfg.DefaultFilter.IncludePatterns[0] == "*.mp3" {
-		cfg.DefaultFilter = syncengine.DefaultFilterSettings()
-	}
-	if cfg.Version < 5 && len(cfg.RecorderSettings.DestinationLocationIDs) == 0 {
-		// DestinationLocationID (singular) became DestinationLocationIDs
-		// (plural, multi-destination) in v5; without this, a config written
-		// by v4 would silently lose its chosen destination on upgrade.
-		var legacy struct {
-			RecorderSettings struct {
-				DestinationLocationID string `json:"destinationLocationId"`
-			} `json:"recorderSettings"`
-		}
-		if err := json.Unmarshal(data, &legacy); err == nil && legacy.RecorderSettings.DestinationLocationID != "" {
-			cfg.RecorderSettings.DestinationLocationIDs = []string{legacy.RecorderSettings.DestinationLocationID}
-		}
-	}
-	if cfg.Version < currentVersion {
-		cfg.Version = currentVersion
 	}
 	return cfg, nil
 }
