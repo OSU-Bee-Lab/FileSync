@@ -142,6 +142,7 @@ func showHome(s *state) {
 		recordersBtn,
 		backupBtn,
 		downloadBtn,
+		recordersBtn,
 		locationsBtn,
 	)
 	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))

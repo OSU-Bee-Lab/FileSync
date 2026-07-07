@@ -18,6 +18,12 @@ const (
 	OffloadDone
 	OffloadError
 	OffloadCanceled
+	// OffloadConflict is a specific case of OffloadError: a file already
+	// exists at (one of) the destination(s) with different content than
+	// the source, so it can neither be resumed nor safely overwritten.
+	// Reported separately from OffloadError so the UI can label it
+	// "Conflict" rather than a generic error.
+	OffloadConflict
 )
 
 // FileOffloadProgress tracks progress of a single file within an Offload.
@@ -53,18 +59,32 @@ func (j *OffloadJob) Cancel() {
 	j.cancel()
 }
 
+// UploadUpdate is a per-file upload lifecycle notification threaded up
+// from StartOffload's per-file upload goroutines, one per (destination,
+// file) pair, so a UI can build "currently uploading"/"uploaded" lists
+// without polling.
+type UploadUpdate struct {
+	RecorderID string
+	RelPath    string
+	Event      syncengine.UploadEvent
+	Err        error
+}
+
 // StartOffload copies every file driver.SourceFiles(v) reports into
-// destRoot/experimentName/recorderID/..., verifying each file
-// byte-for-byte (see smartcopy.go) before considering it complete. A file
-// that already has different content at its destination path is reported
-// as an error rather than silently overwritten or auto-resolved — there is
-// no interactive conflict-resolution step in this pass.
+// destRoot/experimentName/recorderID/... for each destRoot in destRoots,
+// verifying each file byte-for-byte (see smartcopy.go) before considering
+// it complete. A file that already has different content at (any of) its
+// destination path(s) is reported as OffloadConflict rather than silently
+// overwritten or auto-resolved — there is no interactive
+// conflict-resolution step in this pass.
 //
 // Each file that reaches verified-complete is immediately queued for
-// upload to uploadDest (if non-nil), independent of the other files in
-// this recorder and of the eventual delete step below — this is what lets
-// cloud upload start well before a whole recorder or session finishes,
-// rather than waiting for a separate scan+sync pass afterward.
+// upload to every Location in uploadDests, independent of the other files
+// in this recorder and of the eventual delete step below — this is what
+// lets cloud upload start well before a whole recorder or session
+// finishes, rather than waiting for a separate scan+sync pass afterward.
+// onUpload, if non-nil, is called from those upload goroutines with each
+// upload's lifecycle events.
 //
 // Once every file is verified complete, source files on the recorder are
 // deleted if autoDelete is set. This is the one place in ExpSync that
@@ -77,10 +97,11 @@ func StartOffload(
 	driver Driver,
 	v Volume,
 	recorderID string,
-	destRoot string,
+	destRoots []string,
 	experimentName string,
-	uploadDest *syncengine.Location,
+	uploadDests []syncengine.Location,
 	autoDelete bool,
+	onUpload func(UploadUpdate),
 ) (*OffloadJob, <-chan OffloadProgress) {
 	ctx, cancel := context.WithCancel(ctx)
 	progressCh := make(chan OffloadProgress, 1)
@@ -95,7 +116,10 @@ func StartOffload(
 			return
 		}
 
-		destDir := filepath.Join(destRoot, experimentName, recorderID)
+		destDirs := make([]string, len(destRoots))
+		for i, root := range destRoots {
+			destDirs[i] = filepath.Join(root, experimentName, recorderID)
+		}
 		files := make(map[string]FileOffloadProgress, len(sourceFiles))
 
 		emit := func(status OffloadStatus, current string, err error) {
@@ -130,34 +154,51 @@ func StartOffload(
 				return
 			}
 
-			destPath := filepath.Join(destDir, sf.DestRelPath)
-			if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-				files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-				emit(OffloadError, sf.DestRelPath, err)
-				return
+			destPaths := make([]string, len(destDirs))
+			for i, dir := range destDirs {
+				destPaths[i] = filepath.Join(dir, sf.DestRelPath)
+			}
+			for _, dp := range destPaths {
+				if err := os.MkdirAll(filepath.Dir(dp), 0o755); err != nil {
+					files[sf.DestRelPath] = FileOffloadProgress{Err: err}
+					emit(OffloadError, sf.DestRelPath, err)
+					return
+				}
 			}
 
-			states, err := fileStates(sf.AbsPath, []string{destPath})
+			states, err := fileStates(sf.AbsPath, destPaths)
 			if err != nil {
 				files[sf.DestRelPath] = FileOffloadProgress{Err: err}
 				emit(OffloadError, sf.DestRelPath, err)
 				return
 			}
 
-			switch states[destPath] {
-			case StateComplete:
-				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete}
-				continue
-			case StateConflict:
+			var pending []string
+			conflict := false
+			for _, dp := range destPaths {
+				switch states[dp] {
+				case StateComplete:
+					// already done at this destination, nothing to do
+				case StateConflict:
+					conflict = true
+				default:
+					pending = append(pending, dp)
+				}
+			}
+			if conflict {
 				err := fmt.Errorf("%s already exists at destination with different content", sf.DestRelPath)
 				files[sf.DestRelPath] = FileOffloadProgress{Err: err, State: StateConflict}
-				emit(OffloadError, sf.DestRelPath, err)
+				emit(OffloadConflict, sf.DestRelPath, err)
 				return
+			}
+			if len(pending) == 0 {
+				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete}
+				continue
 			}
 
 			cp := &CopyProgress{}
 			copyDone := make(chan error, 1)
-			go func(src, dst string) { copyDone <- smartcopy(src, []string{dst}, cp) }(sf.AbsPath, destPath)
+			go func(src string, dsts []string) { copyDone <- smartcopy(src, dsts, cp) }(sf.AbsPath, pending)
 
 			ticker := time.NewTicker(300 * time.Millisecond)
 		copyLoop:
@@ -184,11 +225,17 @@ func StartOffload(
 			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: cp.BytesTotal, BytesTotal: cp.BytesTotal}
 			emit(OffloadRunning, sf.DestRelPath, nil)
 
-			if uploadDest != nil {
-				dest := *uploadDest
+			for _, uploadDest := range uploadDests {
+				dest := uploadDest
+				localPath := destPaths[0]
+				rel := filepath.Join(experimentName, recorderID, sf.DestRelPath)
 				go func(localPath, rel string) {
-					_ = syncengine.StartFileUpload(context.Background(), localPath, dest, rel)
-				}(destPath, filepath.Join(experimentName, recorderID, sf.DestRelPath))
+					_ = syncengine.StartFileUpload(context.Background(), localPath, dest, rel, func(ev syncengine.UploadEvent, uerr error) {
+						if onUpload != nil {
+							onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: ev, Err: uerr})
+						}
+					})
+				}(localPath, rel)
 			}
 		}
 

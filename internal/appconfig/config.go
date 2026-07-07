@@ -15,16 +15,17 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
-const currentVersion = 4
+const currentVersion = 5
 
 // RecorderSettings persists the recorder-offload feature's defaults and
 // its tag-file ID-assignment state (batch/counter scheme — see
 // internal/recorder/identity.go), so recorder IDs stay stable across runs.
 type RecorderSettings struct {
-	DestinationLocationID string         `json:"destinationLocationId,omitempty"`
-	AutoDeleteAfterVerify bool           `json:"autoDeleteAfterVerify"`
-	TagBatch              int            `json:"tagBatch"`
-	TagCounters           map[string]int `json:"tagCounters,omitempty"`
+	DestinationLocationIDs []string       `json:"destinationLocationIds,omitempty"`
+	UploadLocationIDs      []string       `json:"uploadLocationIds,omitempty"`
+	AutoDeleteAfterVerify  bool           `json:"autoDeleteAfterVerify"`
+	TagBatch               int            `json:"tagBatch"`
+	TagCounters            map[string]int `json:"tagCounters,omitempty"`
 }
 
 // Config is ExpSync's entire persisted app state.
@@ -90,6 +91,19 @@ func Load() (Config, error) {
 		// existing location.
 		for i := range cfg.Locations {
 			cfg.Locations[i].Enabled = true
+		}
+	}
+	if cfg.Version < 5 && len(cfg.RecorderSettings.DestinationLocationIDs) == 0 {
+		// DestinationLocationID (singular) became DestinationLocationIDs
+		// (plural, multi-destination) in v5; without this, a config written
+		// by v4 would silently lose its chosen destination on upgrade.
+		var legacy struct {
+			RecorderSettings struct {
+				DestinationLocationID string `json:"destinationLocationId"`
+			} `json:"recorderSettings"`
+		}
+		if err := json.Unmarshal(data, &legacy); err == nil && legacy.RecorderSettings.DestinationLocationID != "" {
+			cfg.RecorderSettings.DestinationLocationIDs = []string{legacy.RecorderSettings.DestinationLocationID}
 		}
 	}
 	if cfg.Version < currentVersion {
