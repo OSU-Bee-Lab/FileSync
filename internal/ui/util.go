@@ -33,10 +33,16 @@ func plural(n int, singular string) string {
 	return fmt.Sprintf("%d %ss", n, singular)
 }
 
+// locationNames returns the names of every enabled Location, for
+// populating a from/to picker. Disabled locations are left out so a
+// temporarily-suspended location (see Location.Enabled) can't be picked
+// as a live sync endpoint.
 func locationNames(locs []syncengine.Location) []string {
-	out := make([]string, len(locs))
-	for i, l := range locs {
-		out[i] = l.Name
+	var out []string
+	for _, l := range locs {
+		if l.Enabled {
+			out = append(out, l.Name)
+		}
 	}
 	return out
 }
@@ -48,6 +54,28 @@ func findLocation(locs []syncengine.Location, name string) *syncengine.Location 
 		}
 	}
 	return nil
+}
+
+func findLocationByID(locs []syncengine.Location, id string) *syncengine.Location {
+	for i := range locs {
+		if locs[i].ID == id {
+			return &locs[i]
+		}
+	}
+	return nil
+}
+
+// locationNamesByKind returns the names of every enabled Location of the
+// given kind, e.g. for populating a destination picker that only makes
+// sense for local folders or only for cloud remotes.
+func locationNamesByKind(locs []syncengine.Location, kind syncengine.LocationKind) []string {
+	var out []string
+	for _, l := range locs {
+		if l.Kind == kind && l.Enabled {
+			out = append(out, l.Name)
+		}
+	}
+	return out
 }
 
 // joinRel joins a browsing breadcrumb path with a child name, both always

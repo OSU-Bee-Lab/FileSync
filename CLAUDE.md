@@ -38,7 +38,14 @@ option to scan experiments).
 - Worktrees go in ./.claude/worktrees
 - **rclone must always use `copy`, never `sync`** — this is a core safety
   invariant. `rclone sync` deletes destination-only files; this app is not
-  authorized to delete data ever. The UI intentionally uses the word "sync"
-  for end-user clarity (researchers understand "sync" intuitively), but the
-  underlying rclone command is always `copy`. Never change this without an
-  explicit, informed decision by the project owner.
+  authorized to delete data from a synced destination ever. The UI
+  intentionally uses the word "sync" for end-user clarity (researchers
+  understand "sync" intuitively), but the underlying rclone command is
+  always `copy`. Never change this without an explicit, informed decision
+  by the project owner.
+- This never-delete rule scopes to rclone/cloud destinations only. It does
+  not cover `internal/recorder`'s recorder-side deletion: once a file has
+  been copied off a recorder (Sony ICD-PX370, Olympus VN-541PC, ...) and
+  verified byte-for-byte, deleting it from the recorder's own storage is
+  intentional and user-toggleable (`RecorderSettings.AutoDeleteAfterVerify`)
+  — it's how a recorder gets reset for reuse in the field, not data loss.
