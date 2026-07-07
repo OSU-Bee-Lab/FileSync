@@ -281,8 +281,8 @@ func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx con
 }
 
 // showLocationExperiments lists the experiment directories found at the
-// root of loc, so users can check what's there without starting a Sync or
-// Download flow.
+// root of loc, so users can check what's there without starting a Sync
+// Experiments or Pull Files flow.
 func showLocationExperiments(s *state, loc syncengine.Location) {
 	ctx, cancel := context.WithCancel(context.Background())
 

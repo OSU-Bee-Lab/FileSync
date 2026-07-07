@@ -97,7 +97,7 @@ func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDisa
 // recorderSyncParams is the locked-in configuration chosen on the
 // recorder-settings screen (Screen 1) and handed to the active-sync
 // screen (Screen 2). Nothing on Screen 2 can change these; to change
-// anything the user must Cancel Sync back to Screen 1 and start over.
+// anything the user must Cancel Recorder Sync back to Screen 1 and start over.
 type recorderSyncParams struct {
 	destinations   []syncengine.Location // local, at least one
 	uploads        []syncengine.Location // remote, may be empty (no cloud upload)
@@ -105,9 +105,9 @@ type recorderSyncParams struct {
 	autoDelete     bool
 }
 
-// showRecorders is the entry point for the recorder-offload feature: the
+// showSyncRecorders is the entry point for the Sync Recorders feature: the
 // settings screen (Screen 1) shown before any sync activity starts.
-func showRecorders(s *state) {
+func showSyncRecorders(s *state) {
 	localOptions := locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal)
 	destGroup := widget.NewCheckGroup(localOptions, nil)
 	destGroup.Selected = selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs, syncengine.LocationLocal)
@@ -122,7 +122,7 @@ func showRecorders(s *state) {
 	autoDeleteCheck := widget.NewCheck("Delete from recorder after verified copy", nil)
 	autoDeleteCheck.SetChecked(s.cfg.RecorderSettings.AutoDeleteAfterVerify)
 
-	startBtn := widget.NewButton("Start Sync", nil)
+	startBtn := widget.NewButton("Start Recorder Sync", nil)
 	startBtn.Importance = widget.HighImportance
 
 	updateStartEnabled := func() {
@@ -156,7 +156,7 @@ func showRecorders(s *state) {
 			showLocationsNotFoundPrompt(s, missing, func() {
 				// Locations were disabled; re-show settings so the user
 				// picks new ones.
-				showRecorders(s)
+				showSyncRecorders(s)
 			}, func() {
 				showRecorderSync(s, params)
 			})
@@ -168,7 +168,7 @@ func showRecorders(s *state) {
 	backBtn := widget.NewButton("Cancel", func() { showHome(s) })
 
 	content := container.NewVBox(
-		widget.NewLabelWithStyle("Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewForm(
 			&widget.FormItem{Text: "Destination(s)", Widget: destGroup},
 			&widget.FormItem{Text: "Cloud upload(s)", Widget: uploadGroup},
@@ -221,7 +221,7 @@ type recorderJobStatus int
 
 const (
 	jobIdle recorderJobStatus = iota
-	jobSyncing
+	recorderJobSyncing
 	jobConflict
 	jobError
 	jobDone
@@ -247,7 +247,7 @@ func rowStatusText(st recorderJobStatus) string {
 	switch st {
 	case jobIdle:
 		return "Idle"
-	case jobSyncing:
+	case recorderJobSyncing:
 		return "Syncing"
 	case jobConflict:
 		return "Conflict"
@@ -267,7 +267,7 @@ func rowStatusText(st recorderJobStatus) string {
 // done = blue, disconnected = pink, idle = untinted.
 func rowBackgroundColor(st recorderJobStatus) (r, g, b, a uint8) {
 	switch st {
-	case jobSyncing:
+	case recorderJobSyncing:
 		return 0xC1, 0xDB, 0xD9, 0xFF
 	case jobConflict:
 		return 0xE0, 0x7B, 0x4A, 0xFF
@@ -405,7 +405,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	beginOffload := func(row *recorderRow) {
 		row.started = true
-		row.status = jobSyncing
+		row.status = recorderJobSyncing
 		job, progress := recorder.StartOffload(watchCtx, row.driver, row.volume, row.id, destRoots,
 			params.experimentName, params.uploads, params.autoDelete, onUploadEvent)
 		row.job = job
@@ -427,7 +427,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 					case recorder.OffloadCanceled:
 						row.status = jobError
 					default:
-						row.status = jobSyncing
+						row.status = recorderJobSyncing
 						if p.BytesTotal > 0 {
 							row.progress = float64(p.BytesDone) / float64(p.BytesTotal)
 						}
@@ -498,7 +498,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		}
 	}()
 
-	cancelBtn := widget.NewButton("Cancel Sync", func() {
+	cancelBtn := widget.NewButton("Cancel Recorder Sync", func() {
 		cancelWatch()
 		showHome(s)
 	})

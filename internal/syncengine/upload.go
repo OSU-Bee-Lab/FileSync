@@ -21,7 +21,7 @@ const (
 )
 
 // StartFileUpload copies a single local file to relPath under dst,
-// independent of any scan/batch. It's used by the recorder-offload
+// independent of any scan/batch. It's used by the Sync Recorders
 // feature (internal/recorder) to push each file to the cloud as soon as
 // it lands locally and is verified, rather than waiting for a whole
 // recorder or experiment to finish and going through a separate scan+sync

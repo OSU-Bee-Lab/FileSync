@@ -65,7 +65,7 @@ type Location struct {
 	RootPath string `json:"rootPath"`
 
 	// Enabled controls whether this Location is offered anywhere a
-	// Location is picked (Sync, Download, recorder destination/upload).
+	// Location is picked (Sync Experiments, Pull Files, recorder destination/upload).
 	// Disabling it (rather than removing it) lets a temporarily
 	// unavailable location - e.g. an unplugged external drive - be
 	// suspended without losing its settings.

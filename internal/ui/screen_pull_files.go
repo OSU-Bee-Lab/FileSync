@@ -13,22 +13,22 @@ import (
 	"github.com/OSU-Bee-Lab/expsync/internal/syncengine"
 )
 
-// showDownload is the Download flow: a researcher pulling a subset of one
+// showPullFiles is the Pull Files flow: a researcher pulling a subset of one
 // experiment's files into an arbitrary working directory (e.g. an R
-// project), not a saved Location. Unlike Sync, this lets the user
+// project), not a saved Location. Unlike Sync Experiments, this lets the user
 // drill to any depth under experiments/ - a whole experiment, one
 // deployment date, or one recorder directory. Scope selection is
 // deliberately folder-only, not single-file: rclone's fs.NewFs returns
 // ErrorIsFile (rooted at the parent, not the file) when pointed at a bare
 // file path, which syncengine's copy/scan helpers don't special-case -
 // so a single file isn't a safe scope choice here.
-func showDownload(s *state) {
+func showPullFiles(s *state) {
 	names := locationNames(s.cfg.Locations)
 	srcSelect := widget.NewSelect(names, nil)
 
 	var srcLoc *syncengine.Location
 	relPath := ""
-	var scopePath string // "" until the user picks a scope folder to download
+	var scopePath string // "" until the user picks a scope folder to pull
 
 	breadcrumb := widget.NewLabel("experiments/")
 	scopeLabel := widget.NewLabel("No scope chosen yet - tap \"Use this\" on a folder or file below.")
@@ -188,20 +188,20 @@ func showDownload(s *state) {
 			Label: label,
 			Locs:  []syncengine.Location{src},
 			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-				return syncengine.ScanDownloadWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
+				return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
 			},
 			Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-				return syncengine.StartDownload(ctx, src, chosenRelPath, dest, fset, preserveModTime, result)
+				return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, fset, preserveModTime, result)
 			},
 		}}
-		showScanRunning(s, tasks, func() { showDownload(s) })
+		showScanRunning(s, tasks, func() { showPullFiles(s) })
 	})
 	scanBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
 		container.NewVBox(
-			widget.NewLabelWithStyle("Download", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabelWithStyle("Pull Files", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewForm(&widget.FormItem{Text: "Source", Widget: srcSelect}),
 			container.NewHBox(upBtn, breadcrumb),
 		),

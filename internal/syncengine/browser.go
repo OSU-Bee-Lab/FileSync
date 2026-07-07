@@ -11,7 +11,7 @@ import (
 )
 
 // ExperimentEntry is one experiment directory found directly under a
-// Location's experiments/ root — the only thing the Sync flow ever
+// Location's experiments/ root — the only thing the Sync Experiments flow ever
 // browses.
 type ExperimentEntry struct {
 	Name string
@@ -19,7 +19,7 @@ type ExperimentEntry struct {
 
 // ListExperiments lists exactly the top-level directories under <loc>/ — a
 // single shallow List call, never recursive. This is the perf-critical fix
-// motivating the whole tool: Sync never has to look at anything
+// motivating the whole tool: Sync Experiments never has to look at anything
 // below this level to populate its picker.
 func ListExperiments(ctx context.Context, loc Location) ([]ExperimentEntry, error) {
 	entries, err := listDir(ctx, loc.rcloneSpec())
@@ -37,7 +37,7 @@ func ListExperiments(ctx context.Context, loc Location) ([]ExperimentEntry, erro
 }
 
 // Entry is one child (file or directory) found while drilling into a
-// Location's tree for the Download flow.
+// Location's tree for the Pull Files flow.
 type Entry struct {
 	Name  string
 	IsDir bool
@@ -46,7 +46,7 @@ type Entry struct {
 
 // ListChildren lists exactly one level under <loc>/<relPath>. relPath == ""
 // lists the experiment directories themselves. It never recurses further
-// than the requested level — the Download flow's UI drills deeper by
+// than the requested level — the Pull Files flow's UI drills deeper by
 // calling this again with the child's relPath appended.
 func ListChildren(ctx context.Context, loc Location, relPath string) ([]Entry, error) {
 	entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))

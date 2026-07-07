@@ -17,7 +17,7 @@ import (
 
 const currentVersion = 5
 
-// RecorderSettings persists the recorder-offload feature's defaults and
+// RecorderSettings persists the Sync Recorders feature's defaults and
 // its tag-file ID-assignment state (batch/counter scheme — see
 // internal/recorder/identity.go), so recorder IDs stay stable across runs.
 type RecorderSettings struct {

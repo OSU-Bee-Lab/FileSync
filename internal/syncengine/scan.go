@@ -68,29 +68,29 @@ type ScanProgress struct {
 // return quickly; slow UI work should be handed off to the UI thread.
 type ScanProgressFunc func(ScanProgress)
 
-// ScanBackup scans one whole experiment from src to dst
+// ScanSyncExperiments scans one whole experiment from src to dst
 // (Location <-> Location, mirrored under each side's own experiments/
 // root). Read-only, safe to call anytime.
-func ScanBackup(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings) (ScanResult, error) {
-	return ScanBackupWithProgress(ctx, src, dst, experimentName, fset, nil)
+func ScanSyncExperiments(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings) (ScanResult, error) {
+	return ScanSyncExperimentsWithProgress(ctx, src, dst, experimentName, fset, nil)
 }
 
-// ScanBackupWithProgress is ScanBackup with live progress updates.
-func ScanBackupWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+// ScanSyncExperimentsWithProgress is ScanSyncExperiments with live progress updates.
+func ScanSyncExperimentsWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	return scanCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, fset, experimentName, progress)
 }
 
-// ScanDownload scans an arbitrary sub-path (any depth: a
+// ScanPullFiles scans an arbitrary sub-path (any depth: a
 // whole experiment, one deployment date, one recorder directory, even a
 // single file) from src into destFolder, preserving srcRelPath's structure
 // under destFolder rather than flattening. destFolder is a raw local path
 // (from an OS folder picker), never a saved Location.
-func ScanDownload(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings) (ScanResult, error) {
-	return ScanDownloadWithProgress(ctx, src, srcRelPath, destFolder, fset, nil)
+func ScanPullFiles(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings) (ScanResult, error) {
+	return ScanPullFilesWithProgress(ctx, src, srcRelPath, destFolder, fset, nil)
 }
 
-// ScanDownloadWithProgress is ScanDownload with live progress updates.
-func ScanDownloadWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+// ScanPullFilesWithProgress is ScanPullFiles with live progress updates.
+func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	label := srcRelPath
 	if label == "" {
 		label = "experiments/"
@@ -99,7 +99,7 @@ func ScanDownloadWithProgress(ctx context.Context, src Location, srcRelPath stri
 }
 
 // scanCopyPreserving is the shared scan implementation behind both
-// ScanBackup and ScanDownload: it walks <srcRoot>/<relPath> (through
+// ScanSyncExperiments and ScanPullFiles: it walks <srcRoot>/<relPath> (through
 // fset's filter) and diffs each file against <dstRoot>/<relPath>, without
 // transferring anything.
 func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, label string, progress ScanProgressFunc) (ScanResult, error) {

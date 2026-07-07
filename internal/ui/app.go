@@ -30,11 +30,11 @@ type state struct {
 	win fyne.Window
 	cfg appconfig.Config
 
-	// backupSrcName and backupDstName cache the last-selected From/To
-	// locations on the Sync screen so they're still populated if the user
-	// navigates away and back.
-	backupSrcName string
-	backupDstName string
+	// syncExperimentsSrcName and syncExperimentsDstName cache the
+	// last-selected From/To locations on the Sync Experiments screen so
+	// they're still populated if the user navigates away and back.
+	syncExperimentsSrcName string
+	syncExperimentsDstName string
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to
@@ -123,26 +123,26 @@ func Run() {
 func showHome(s *state) {
 	title := widget.NewLabelWithStyle("ExpSync", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
-	backupBtn := widget.NewButton("Sync", func() { showBackup(s) })
-	downloadBtn := widget.NewButton("Download", func() { showDownload(s) })
-	recordersBtn := widget.NewButton("Recorders", func() { showRecorders(s) })
-	recordersBtn.Importance = widget.HighImportance
-	locationsBtn := widget.NewButton("Manage Sync Locations", func() { showLocations(s) })
+	syncExperimentsBtn := widget.NewButton("Sync Experiments", func() { showSyncExperiments(s) })
+	syncExperimentsBtn.Importance = widget.HighImportance
+	pullFilesBtn := widget.NewButton("Pull Files", func() { showPullFiles(s) })
+	syncRecordersBtn := widget.NewButton("Sync Recorders", func() { showSyncRecorders(s) })
+	syncRecordersBtn.Importance = widget.HighImportance
+	locationsBtn := widget.NewButton("Manage Locations", func() { showLocations(s) })
 
 	if len(s.cfg.Locations) < 2 {
-		backupBtn.Disable()
+		syncExperimentsBtn.Disable()
 	}
 	if len(s.cfg.Locations) < 1 {
-		downloadBtn.Disable()
+		pullFilesBtn.Disable()
 	}
 
 	body := container.NewVBox(
 		title,
 		widget.NewSeparator(),
-		recordersBtn,
-		backupBtn,
-		downloadBtn,
-		recordersBtn,
+		syncRecordersBtn,
+		syncExperimentsBtn,
+		pullFilesBtn,
 		locationsBtn,
 	)
 	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))

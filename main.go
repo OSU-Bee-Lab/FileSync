@@ -1,5 +1,5 @@
 // Command expsync is a cross-platform GUI for schema-scoped rclone
-// backup/sync and download of bioacoustics experiment data.
+// syncing and pulling of bioacoustics experiment data.
 package main
 
 import (

@@ -40,7 +40,7 @@ type ProgressSnapshot struct {
 	Files                 map[string]FileProgress
 }
 
-// Job is a running (or finished) copy started by StartBackup/StartDownload.
+// Job is a running (or finished) copy started by StartSyncExperiments/StartPullFiles.
 type Job struct {
 	cancel context.CancelFunc
 }
@@ -54,22 +54,22 @@ func (j *Job) Cancel() {
 	j.cancel()
 }
 
-// StartBackup copies one whole experiment from src to dst (Location <->
+// StartSyncExperiments copies one whole experiment from src to dst (Location <->
 // Location, mirrored under each side's own experiments/ root). expected
 // should be the ScanResult the user already confirmed, used to seed the
 // progress bar's totals — the same relPath/filter that produced it is what
 // actually runs here, so the set of files acted on can't drift from what
 // was shown.
-func StartBackup(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+func StartSyncExperiments(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	return startCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, fset, preserveModTime, expected)
 }
 
-// StartDownload copies an arbitrary sub-path from src into destFolder,
-// preserving srcRelPath's structure under destFolder (e.g. downloading
+// StartPullFiles copies an arbitrary sub-path from src into destFolder,
+// preserving srcRelPath's structure under destFolder (e.g. pulling
 // "Luke - Zucchini/2026-06-23" into "/Downloads/foo" lands at
 // "/Downloads/foo/Luke - Zucchini/2026-06-23/..."). destFolder is a raw
 // local path, never a saved Location.
-func StartDownload(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+func StartPullFiles(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, preserveModTime bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, fset, preserveModTime, expected)
 }
 
