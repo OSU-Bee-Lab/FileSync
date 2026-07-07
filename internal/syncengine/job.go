@@ -8,6 +8,7 @@ import (
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/filter"
+	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/lib/random"
 )
@@ -162,12 +163,6 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 		var currentSpeed float64
 
 		emit := func(status JobStatus, err error) {
-			var current string
-			transfers := stats.Transferred()
-			if len(transfers) > 0 {
-				current = transfers[len(transfers)-1].Name
-			}
-
 			// Calculate speed
 			now := time.Now()
 			dur := now.Sub(lastTime)
@@ -184,11 +179,31 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 			lastTime = now
 
 			filesMap := make(map[string]FileProgress)
-			for _, t := range transfers {
+			for _, t := range stats.Transferred() {
 				filesMap[t.Name] = FileProgress{
 					BytesDone: t.Bytes,
 					Done:      !t.CompletedAt.IsZero() || t.Error != nil || t.Bytes == t.Size,
 					Err:       t.Error,
+				}
+			}
+
+			// Transferred() above only reports completed transfers, so a
+			// file actively being copied would otherwise sit at 0 bytes
+			// until it finishes (the bar looked like it jumped 0%→100%).
+			// RemoteStats' "transferring" list carries live in-progress
+			// byte counts for files currently being copied.
+			var current string
+			if remoteStats, rcErr := stats.RemoteStats(false); rcErr == nil {
+				if transferring, ok := remoteStats["transferring"].([]rc.Params); ok {
+					for _, t := range transferring {
+						name, _ := t["name"].(string)
+						bytesDone, _ := t["bytes"].(int64)
+						if name == "" {
+							continue
+						}
+						filesMap[name] = FileProgress{BytesDone: bytesDone}
+						current = name
+					}
 				}
 			}
 

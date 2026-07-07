@@ -398,7 +398,7 @@ func createColumn(title string, content fyne.CanvasObject) fyne.CanvasObject {
 }
 
 // sectionHeader is a heavy-weight banner that labels a Files sub-panel
-// ("Unsynced" / "Already synced"). It sits above its panel's list, so it
+// ("Current Sync" / "Already synced"). It sits above its panel's list, so it
 // stays fixed while the list scrolls.
 func sectionHeader(title string) fyne.CanvasObject {
 	bg := canvas.NewRectangle(color.NRGBA{R: 240, G: 242, B: 245, A: 255})
@@ -507,6 +507,20 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	// already-synced groups. Works from live scan data (tempRecent) before
 	// completion and from exp.folders afterwards. Already-synced rows carry
 	// gray=true and no fill so they never turn blue.
+	// fileSyncRank orders the Current Sync list while a sync is running:
+	// actively-transferring files first, not-yet-started files in the
+	// middle, and files that have already finished at the bottom.
+	fileSyncRank := func(f *fileUIState) int {
+		switch {
+		case f.done:
+			return 2
+		case f.bytesDone > 0:
+			return 0
+		default:
+			return 1
+		}
+	}
+
 	computeFileRows := func() (unsynced, synced []barRow) {
 		if selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
 			return nil, nil
@@ -516,7 +530,16 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			if selectedFoldIdx < 0 || selectedFoldIdx >= len(exp.folders) {
 				return nil, nil
 			}
-			for _, f := range exp.folders[selectedFoldIdx].files {
+			folderFiles := exp.folders[selectedFoldIdx].files
+			if isSyncing() {
+				sorted := make([]*fileUIState, len(folderFiles))
+				copy(sorted, folderFiles)
+				sort.SliceStable(sorted, func(i, j int) bool {
+					return fileSyncRank(sorted[i]) < fileSyncRank(sorted[j])
+				})
+				folderFiles = sorted
+			}
+			for _, f := range folderFiles {
 				if f.action == syncengine.ActionSkipIdentical {
 					synced = append(synced, barRow{
 						label:   f.name,
@@ -630,7 +653,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	// buildSplit wires two section lists into a VSplit and returns a function
 	// that shows one or both panels depending on which groups have rows.
 	buildSplit := func(unsyncedList, syncedList *widget.List) (fyne.CanvasObject, func(hasUnsynced, hasSynced bool)) {
-		unsyncedPanel := container.NewBorder(sectionHeader("Unsynced"), nil, nil, nil, unsyncedList)
+		unsyncedPanel := container.NewBorder(sectionHeader("Current Sync"), nil, nil, nil, unsyncedList)
 		syncedPanel := container.NewBorder(sectionHeader("Already synced"), nil, nil, nil, syncedList)
 		split := container.NewVSplit(unsyncedPanel, syncedPanel)
 		split.SetOffset(0.5)
