@@ -101,6 +101,20 @@ func Run() {
 	a := app.NewWithID("com.osubeelab.expsync")
 	w := a.NewWindow("ExpSync")
 
+	// Two instances copying to the same destination via rclone would race
+	// each other, so refuse to open a second window rather than risk that.
+	lock, ok, err := appconfig.AcquireInstanceLock()
+	if err == nil && !ok {
+		w.Resize(fyne.NewSize(420, 160))
+		w.SetContent(widget.NewLabel("ExpSync is already running.\nClose the other window before opening a new one."))
+		w.CenterOnScreen()
+		w.ShowAndRun()
+		return
+	}
+	if lock != nil {
+		defer lock.Release()
+	}
+
 	cfg, err := appconfig.Load()
 	s := &state{win: w, cfg: cfg}
 	if err != nil {
