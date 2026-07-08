@@ -7,7 +7,7 @@ import (
 	"image/color"
 	"path"
 	"sort"
-	"sync/atomic"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -18,6 +18,13 @@ import (
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
+
+// maxConcurrentTasks bounds how many (experiment, destination) scan/sync
+// tasks run at once. Tasks are independent (each opens its own src/dst Fs),
+// so running them concurrently means a slow cloud destination no longer
+// blocks a fast local one. Capped rather than unbounded to avoid hammering
+// a single remote's API with too many simultaneous listings/transfers.
+const maxConcurrentTasks = 4
 
 type syncPhase int
 
@@ -420,7 +427,6 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	}
 
 	var activeCancel context.CancelFunc
-	var currentJob atomic.Pointer[syncengine.Job]
 
 	titleLabel := widget.NewLabelWithStyle("Scanning...", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	speedLabel := widget.NewLabel("")
@@ -920,17 +926,12 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	}
 
 	cancelBtn = widget.NewButton("Cancel", func() {
-		if phase == phaseScanRunning {
-			if activeCancel != nil {
-				activeCancel()
-			}
-		} else if phase == phaseSyncing {
-			if job := currentJob.Load(); job != nil {
-				job.Cancel()
-			}
-			if activeCancel != nil {
-				activeCancel()
-			}
+		// All running tasks' contexts (scan or sync) are children of the
+		// single context created for this run, so cancelling it cascades
+		// to every task/job currently in flight, however many are running
+		// concurrently.
+		if activeCancel != nil {
+			activeCancel()
 		}
 	})
 
@@ -966,9 +967,15 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			ctx, cancel := context.WithCancel(context.Background())
 			activeCancel = cancel
 
-			for i, j := range jobs {
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, maxConcurrentTasks)
+
+			runOne := func(i int, j scanJob) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
 				if ctx.Err() != nil {
-					break
+					return
 				}
 
 				fyne.Do(func() {
@@ -977,7 +984,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 				})
 
 				job, progress := j.Start(ctx)
-				currentJob.Store(job)
+				_ = job
 
 				var final syncengine.ProgressSnapshot
 				for snap := range progress {
@@ -1094,6 +1101,13 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 				})
 			}
 
+			for i, j := range jobs {
+				wg.Add(1)
+				sem <- struct{}{}
+				go runOne(i, j)
+			}
+			wg.Wait()
+
 			// Check cancellation before calling cancel() so ctx.Err() reflects
 			// whether the user cancelled, not the cleanup cancel below.
 			wasCancelled := ctx.Err() != nil
@@ -1165,19 +1179,30 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 		}
 
 		go func() {
+			ctx, cancel := context.WithCancel(context.Background())
+			activeCancel = cancel
+
+			var wg sync.WaitGroup
+			sem := make(chan struct{}, maxConcurrentTasks)
+
+			var mu sync.Mutex
 			cancelled := false
-			for i, task := range tasks {
-				if phase != phaseScanRunning {
+
+			runOne := func(i int, task scanTask) {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				if ctx.Err() != nil {
+					mu.Lock()
 					cancelled = true
-					break
+					mu.Unlock()
+					return
 				}
+
 				fyne.Do(func() {
 					expStates[i].status = statusRunning
 					refreshUI()
 				})
-
-				ctx, cancel := context.WithCancel(context.Background())
-				activeCancel = cancel
 
 				result, err := task.Scan(ctx, func(p syncengine.ScanProgress) {
 					fyne.Do(func() {
@@ -1187,12 +1212,12 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					})
 				})
 
-				cancel()
-
 				if err != nil {
 					isCanceled := errors.Is(err, context.Canceled)
 					if isCanceled {
+						mu.Lock()
 						cancelled = true
+						mu.Unlock()
 					}
 					fyne.Do(func() {
 						if isCanceled {
@@ -1209,8 +1234,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 							showLocationError(s, err, task.Locs...)
 						})
 					}
-					// Always break so the phase-transition below runs.
-					break
+					return
 				}
 
 				scanResults[i] = result
@@ -1227,8 +1251,19 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 				})
 			}
 
+			for i, task := range tasks {
+				wg.Add(1)
+				sem <- struct{}{}
+				go runOne(i, task)
+			}
+			wg.Wait()
+			cancel()
+
 			fyne.Do(func() {
-				if cancelled {
+				mu.Lock()
+				wasCancelled := cancelled
+				mu.Unlock()
+				if wasCancelled {
 					phase = phaseScanCancelled
 				} else {
 					phase = phaseScanComplete
