@@ -459,6 +459,15 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	speedLabel := widget.NewLabel("")
 	speedLabel.Hide()
 
+	// retryLabel surfaces transient copy errors (dropped connections,
+	// timeouts) that rclone is retrying on its own - see
+	// syncengine.ProgressSnapshot.Retrying. It's amber, not red: these
+	// aren't failures yet, and the progress bar keeps running normally
+	// underneath while a retry is pending.
+	retryLabel := canvas.NewText("", color.NRGBA{R: 217, G: 119, B: 6, A: 255})
+	retryLabel.TextStyle = fyne.TextStyle{Bold: true}
+	retryLabel.Hide()
+
 	overallBar := widget.NewProgressBar()
 	overallBarInf := widget.NewProgressBarInfinite()
 
@@ -1106,6 +1115,14 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 							}
 						}
 
+						if snap.Retrying {
+							retryLabel.Text = fmt.Sprintf("⚠ Connection hiccup, retrying (%d/%d)…", snap.RetryAttempt, snap.RetryMax)
+							retryLabel.Refresh()
+							retryLabel.Show()
+						} else {
+							retryLabel.Hide()
+						}
+
 						if snap.Speed > 0 {
 							speedLabel.SetText(fmt.Sprintf("Speed: %s/s", humanSpeed(snap.Speed)))
 							speedLabel.Show()
@@ -1183,6 +1200,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					phase = phaseSyncComplete
 				}
 				speedLabel.Hide()
+				retryLabel.Hide()
 				refreshUI()
 			})
 		}()
@@ -1199,7 +1217,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	progressContainer := container.NewStack(overallBar, overallBarInf)
 
 	header := container.NewVBox(
-		container.NewHBox(titleLabel, speedLabel),
+		container.NewHBox(titleLabel, speedLabel, retryLabel),
 		progressContainer,
 		metrics,
 		errorLabel,
