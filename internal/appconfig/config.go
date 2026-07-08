@@ -38,6 +38,17 @@ type Config struct {
 	// rclone's own internal logging, for troubleshooting a stuck or slow
 	// sync without adding a separate CLI surface.
 	DebugMode bool `json:"debugMode"`
+	// RecorderInactivityTimeoutMinutes is how long showRecorderSync waits,
+	// with no recorder actively syncing, before prompting to end the
+	// Recorder Sync session. See internal/ui.recorderInactivityTimeout.
+	RecorderInactivityTimeoutMinutes int `json:"recorderInactivityTimeoutMinutes"`
+	// Checkers is rclone's --checkers value: how many file-comparison
+	// checks run concurrently during a scan/copy. 0 means "use rclone's
+	// own default" (currently 8).
+	Checkers int `json:"checkers"`
+	// BwLimitMiBPerSec caps rclone's transfer bandwidth in MiB/s. 0 means
+	// unlimited.
+	BwLimitMiBPerSec int `json:"bwLimitMiBPerSec"`
 }
 
 // Default returns the config used the first time FileSync runs on a
@@ -49,6 +60,7 @@ func Default() Config {
 		RecorderSettings: RecorderSettings{
 			AutoDeleteAfterVerify: true,
 		},
+		RecorderInactivityTimeoutMinutes: 5,
 	}
 }
 
@@ -81,6 +93,12 @@ func Load() (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
+	}
+	if cfg.RecorderInactivityTimeoutMinutes == 0 {
+		// Config files saved before this setting existed unmarshal it to
+		// zero; treat that as "not yet configured" rather than "disabled"
+		// so upgrading doesn't make the timer fire instantly.
+		cfg.RecorderInactivityTimeoutMinutes = Default().RecorderInactivityTimeoutMinutes
 	}
 	return cfg, nil
 }
