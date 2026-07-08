@@ -7,6 +7,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -153,7 +154,6 @@ func showSyncRecorders(s *state) {
 
 	subpathEntry := widget.NewEntry()
 	subpathEntry.SetPlaceHolder("leave blank for root")
-	subpathEntry.SetText(s.cfg.RecorderSettings.Subpath)
 
 	expEntry := widget.NewEntry()
 	expEntry.SetPlaceHolder("Experiment name")
@@ -202,6 +202,7 @@ func showSyncRecorders(s *state) {
 		unhighlightExpChips()
 		newExpChip.SetSelected(true)
 		expEntry.Enable()
+		subpathEntry.SetText(s.cfg.RecorderSettings.Subpaths[strings.TrimSpace(expEntry.Text)])
 		s.win.Canvas().Focus(expEntry)
 		updateStartEnabled()
 	}
@@ -211,6 +212,7 @@ func showSyncRecorders(s *state) {
 		newExpChip.SetSelected(false)
 		unhighlightExpChips()
 		chip.SetSelected(true)
+		subpathEntry.SetText(s.cfg.RecorderSettings.Subpaths[name])
 		updateStartEnabled()
 	}
 	newExpChip = newToggleChip("New Experiment", nil)
@@ -333,11 +335,15 @@ func showSyncRecorders(s *state) {
 // to the active-sync screen with destinations/uploads already resolved.
 func startRecorderSync(s *state, expEntry, subpathEntry *widget.Entry, autoDeleteCheck *widget.Check, destinations, uploads []syncengine.Location) {
 	subpath := strings.TrimSpace(subpathEntry.Text)
+	expName := strings.TrimSpace(expEntry.Text)
 
 	s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)
 	s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(uploads)
 	s.cfg.RecorderSettings.AutoDeleteAfterVerify = autoDeleteCheck.Checked
-	s.cfg.RecorderSettings.Subpath = subpath
+	if s.cfg.RecorderSettings.Subpaths == nil {
+		s.cfg.RecorderSettings.Subpaths = make(map[string]string)
+	}
+	s.cfg.RecorderSettings.Subpaths[expName] = subpath
 	s.saveConfig()
 
 	showRecorderSync(s, recorderSyncParams{
@@ -558,7 +564,7 @@ type uploadFileEntry struct {
 }
 
 func (e uploadFileEntry) label() string {
-	return fmt.Sprintf("%s: %s", e.recorderID, e.relPath)
+	return e.relPath
 }
 
 // showRecorderSync is the active-sync screen (Screen 2): the redesigned
@@ -628,11 +634,32 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		}
 	}
 
-	// sortRows puts finished (jobDone) recorders in the top rows, keeping
-	// relative order stable within the done and not-done groups.
+	// sortByPlugOrder, toggled via the "Sort: ..." button in the local
+	// sync panel's header, switches sortRows between the default
+	// finished-first/by-progress order and plain plug-in (attachment)
+	// order - new rows are always appended to rows in attach order, and
+	// reconnects update the existing row in place, so leaving rows
+	// untouched here is enough to preserve that order.
+	var sortByPlugOrder bool
+
+	// sortRows normally puts finished (jobDone) recorders in the top rows,
+	// then orders the rest by descending progress (closest to finishing
+	// next), keeping relative order stable among otherwise-equal rows. When
+	// sortByPlugOrder is set it does nothing, leaving rows in attach order.
 	sortRows := func() {
+		if sortByPlugOrder {
+			return
+		}
 		sort.SliceStable(rows, func(i, j int) bool {
-			return rows[i].status == jobDone && rows[j].status != jobDone
+			iDone := rows[i].status == jobDone
+			jDone := rows[j].status == jobDone
+			if iDone != jDone {
+				return iDone
+			}
+			if iDone {
+				return false
+			}
+			return rows[i].progress > rows[j].progress
 		})
 	}
 
@@ -660,8 +687,26 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		rowsBox.Refresh()
 	}
 
+	// recordersIdle mirrors "no recorders are actively syncing" (every row
+	// is jobDone, or there are no rows at all) into a value the inactivity
+	// timer goroutine below can read without racing on rows itself, since
+	// rows is otherwise only ever touched from the fyne UI thread.
+	var recordersIdle atomic.Bool
+	recordersIdle.Store(true)
+	updateRecordersIdle := func() {
+		idle := true
+		for _, r := range rows {
+			if r.status != jobDone {
+				idle = false
+				break
+			}
+		}
+		recordersIdle.Store(idle)
+	}
+
 	rebuildRows := func() {
 		sortRows()
+		updateRecordersIdle()
 		renderers = renderers[:0]
 		objs := make([]fyne.CanvasObject, 0, len(rows))
 		for _, row := range rows {
@@ -697,6 +742,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		for _, rr := range renderers {
 			refreshRow(rr)
 		}
+		updateRecordersIdle()
 		reorderRowsBox()
 	}
 
@@ -799,6 +845,14 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 						if p.BytesTotal > 0 {
 							row.progress = float64(p.BytesDone) / float64(p.BytesTotal)
 						}
+						row.statusMsg = ""
+						if p.CurrentFile != "" {
+							phase := p.Phase
+							if phase == "" {
+								phase = "syncing"
+							}
+							row.statusMsg = fmt.Sprintf("%s%s: %s", strings.ToUpper(phase[:1]), phase[1:], p.CurrentFile)
+						}
 					}
 					refreshAllRows()
 				})
@@ -823,27 +877,62 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	}
 
 	go func() {
-		timer := time.NewTimer(recorderInactivityTimeout)
-		defer timer.Stop()
+		// pollInterval checks recordersIdle far more often than the timeout
+		// itself fires, so the countdown starts promptly once the last
+		// active recorder finishes (or is removed) rather than only on the
+		// next explicit signalActivity call.
+		const pollInterval = 2 * time.Second
+		poll := time.NewTicker(pollInterval)
+		defer poll.Stop()
+
+		var timer *time.Timer
+		var timerC <-chan time.Time
+		stopTimer := func() {
+			if timer != nil {
+				timer.Stop()
+				timer = nil
+				timerC = nil
+			}
+		}
+		restartTimer := func() {
+			stopTimer()
+			timer = time.NewTimer(recorderInactivityTimeout)
+			timerC = timer.C
+		}
+
+		running := false
 		for {
 			select {
 			case <-watchCtx.Done():
+				stopTimer()
 				return
 			case <-resetInactivity:
-				if !timer.Stop() {
-					<-timer.C
+				// A recorder was attached or removed, or the user chose to
+				// keep waiting: restart the countdown only if it's actually
+				// applicable (nothing left actively syncing); otherwise make
+				// sure it stays off until things go idle again.
+				if recordersIdle.Load() {
+					restartTimer()
+					running = true
+				} else {
+					stopTimer()
+					running = false
 				}
-				timer.Reset(recorderInactivityTimeout)
-			case <-timer.C:
+			case <-poll.C:
+				idle := recordersIdle.Load()
+				if idle && !running {
+					restartTimer()
+					running = true
+				} else if !idle && running {
+					stopTimer()
+					running = false
+				}
+			case <-timerC:
+				stopTimer()
+				running = false
 				fyne.Do(func() {
 					showInactivitySyncPrompt(s, signalActivity, endSync)
 				})
-				select {
-				case <-watchCtx.Done():
-					return
-				case <-resetInactivity:
-					timer.Reset(recorderInactivityTimeout)
-				}
 			}
 		}
 	}()
@@ -902,6 +991,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 						row.statusMsg = ""
 					}
 					rebuildRows()
+					signalActivity()
 				})
 			}
 		}
@@ -939,19 +1029,36 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	rowsScroll := container.NewVScroll(rowsBox)
 
-	var main fyne.CanvasObject = rowsScroll
+	var sortToggleBtn *widget.Button
+	sortToggleLabel := func() string {
+		if sortByPlugOrder {
+			return "Sort: Plug-in order"
+		}
+		return "Sort: Progress"
+	}
+	sortToggleBtn = widget.NewButton(sortToggleLabel(), nil)
+	sortToggleBtn.OnTapped = func() {
+		sortByPlugOrder = !sortByPlugOrder
+		sortToggleBtn.SetText(sortToggleLabel())
+		reorderRowsBox()
+	}
+	localHeader := container.NewBorder(nil, nil, nil, sortToggleBtn, sectionHeader("Local Sync"))
+	localPanel := container.NewBorder(localHeader, nil, nil, nil, rowsScroll)
+
+	var main fyne.CanvasObject = localPanel
 	if len(params.uploads) > 0 {
 		uploadPanel := container.NewVSplit(
 			container.NewBorder(sectionHeader("Upload queue"), nil, nil, nil, uploadingList),
 			container.NewBorder(sectionHeader("Uploaded"), nil, nil, nil, uploadedList),
 		)
 		uploadPanel.SetOffset(0.5)
-		main = container.NewHSplit(rowsScroll, uploadPanel)
+		main = container.NewHSplit(localPanel, uploadPanel)
 	}
 
+	identParts := append([]string{params.experimentName}, splitSubpathUI(params.subpath)...)
 	content := container.NewBorder(
 		container.NewVBox(
-			widget.NewLabelWithStyle(fmt.Sprintf("Experiment: %s", params.experimentName), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabelWithStyle("Syncing to: "+strings.Join(identParts, "/"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewSeparator(),
 		),
 		cancelBtn,

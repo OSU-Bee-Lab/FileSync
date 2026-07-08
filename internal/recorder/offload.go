@@ -61,9 +61,14 @@ type OffloadProgress struct {
 	FilesDone, FilesTotal int
 	BytesDone, BytesTotal int64
 	CurrentFile           string
-	Status                OffloadStatus
-	Err                   error
-	Files                 map[string]FileOffloadProgress
+	// Phase describes what's happening to CurrentFile right now
+	// ("checking", "syncing", "deleting"), so the UI can show more than a
+	// generic "Syncing" for the whole run - e.g. the verify-before-copy
+	// step and the post-verify recorder cleanup are both silent otherwise.
+	Phase  string
+	Status OffloadStatus
+	Err    error
+	Files  map[string]FileOffloadProgress
 }
 
 // OffloadJob is a running (or finished) Offload started by StartOffload.
@@ -147,7 +152,24 @@ func StartOffload(
 			parts := append([]string{root, experimentName}, subpathParts...)
 			destDirs[i] = filepath.Join(append(parts, recorderID)...)
 		}
+
+		// fileSize is stat'd upfront for every source file so the progress
+		// bar's denominator (bytesTotal, summed across files below) is known
+		// in full from the very first emit. Previously files only entered
+		// the `files` map (and so only contributed to bytesTotal) once their
+		// own copy started, so bytesTotal grew mid-run: the bar could reach
+		// 100% on file 1 alone, then drop back down the instant file 2's
+		// entry was added and inflated the denominator.
+		fileSize := make(map[string]int64, len(sourceFiles))
 		files := make(map[string]FileOffloadProgress, len(sourceFiles))
+		for _, sf := range sourceFiles {
+			var size int64
+			if info, err := os.Stat(sf.AbsPath); err == nil {
+				size = info.Size()
+			}
+			fileSize[sf.DestRelPath] = size
+			files[sf.DestRelPath] = FileOffloadProgress{BytesTotal: size}
+		}
 
 		// uploadSem bounds how many cloud uploads run at once across this
 		// whole offload run. Files land locally in bursts (e.g. ~100 in 15
@@ -157,7 +179,7 @@ func StartOffload(
 		// rclone copy batch would be bounded.
 		uploadSem := make(chan struct{}, maxConcurrentUploads)
 
-		emit := func(status OffloadStatus, current string, err error) {
+		emit := func(status OffloadStatus, phase, current string, err error) {
 			done := 0
 			var bytesDone, bytesTotal int64
 			for _, fp := range files {
@@ -173,6 +195,7 @@ func StartOffload(
 				BytesDone:   bytesDone,
 				BytesTotal:  bytesTotal,
 				CurrentFile: current,
+				Phase:       phase,
 				Status:      status,
 				Err:         err,
 				Files:       cloneFileProgress(files),
@@ -185,9 +208,11 @@ func StartOffload(
 
 		for _, sf := range sourceFiles {
 			if ctx.Err() != nil {
-				emit(OffloadCanceled, sf.DestRelPath, ctx.Err())
+				emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
 				return
 			}
+
+			emit(OffloadRunning, "checking", sf.DestRelPath, nil)
 
 			destPaths := make([]string, len(destDirs))
 			for i, dir := range destDirs {
@@ -196,7 +221,7 @@ func StartOffload(
 			for _, dp := range destPaths {
 				if err := os.MkdirAll(filepath.Dir(dp), 0o755); err != nil {
 					files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-					emit(OffloadError, sf.DestRelPath, err)
+					emit(OffloadError, "", sf.DestRelPath, err)
 					return
 				}
 			}
@@ -204,7 +229,7 @@ func StartOffload(
 			states, err := fileStates(sf.AbsPath, destPaths)
 			if err != nil {
 				files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-				emit(OffloadError, sf.DestRelPath, err)
+				emit(OffloadError, "", sf.DestRelPath, err)
 				return
 			}
 
@@ -223,11 +248,11 @@ func StartOffload(
 			if conflict {
 				err := fmt.Errorf("%s already exists at destination with different content", sf.DestRelPath)
 				files[sf.DestRelPath] = FileOffloadProgress{Err: err, State: StateConflict}
-				emit(OffloadConflict, sf.DestRelPath, err)
+				emit(OffloadConflict, "", sf.DestRelPath, err)
 				return
 			}
 			if len(pending) == 0 {
-				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete}
+				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: fileSize[sf.DestRelPath], BytesTotal: fileSize[sf.DestRelPath]}
 				continue
 			}
 
@@ -243,22 +268,22 @@ func StartOffload(
 					ticker.Stop()
 					if err != nil {
 						files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-						emit(OffloadError, sf.DestRelPath, err)
+						emit(OffloadError, "", sf.DestRelPath, err)
 						return
 					}
 					break copyLoop
 				case <-ticker.C:
 					files[sf.DestRelPath] = FileOffloadProgress{BytesDone: cp.ByteCurrent, BytesTotal: cp.BytesTotal}
-					emit(OffloadRunning, sf.DestRelPath, nil)
+					emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
 				case <-ctx.Done():
 					ticker.Stop()
-					emit(OffloadCanceled, sf.DestRelPath, ctx.Err())
+					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
 					return
 				}
 			}
 
 			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: cp.BytesTotal, BytesTotal: cp.BytesTotal}
-			emit(OffloadRunning, sf.DestRelPath, nil)
+			emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
 
 			fileTotal := cp.BytesTotal
 			for _, uploadDest := range uploadDests {
@@ -296,14 +321,15 @@ func StartOffload(
 
 		if autoDelete && allComplete {
 			for _, sf := range sourceFiles {
+				emit(OffloadRunning, "deleting", sf.DestRelPath, nil)
 				if err := os.Remove(sf.AbsPath); err != nil {
-					emit(OffloadError, sf.DestRelPath, err)
+					emit(OffloadError, "", sf.DestRelPath, err)
 					return
 				}
 			}
 		}
 
-		emit(OffloadDone, "", nil)
+		emit(OffloadDone, "", "", nil)
 	}()
 
 	return job, progressCh
