@@ -118,6 +118,24 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 	}
 	debugf("scan %s: walking %s against %s", label, fsrc.Root(), fdst.Root())
 
+	// List the whole destination tree up front into an in-memory map so
+	// diffing each source file is a local lookup rather than a per-file
+	// network round-trip (fdst.NewObject) against the destination. This
+	// matters most for cloud remotes (SharePoint/OneDrive, etc.) where
+	// per-call latency otherwise dominates the scan.
+	dstObjects := map[string]fs.Object{}
+	err = walk.ListR(ctx, fdst, "", false, -1, walk.ListObjects, func(entries fs.DirEntries) error {
+		for _, entry := range entries {
+			if obj, ok := entry.(fs.Object); ok {
+				dstObjects[obj.Remote()] = obj
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
+		return ScanResult{}, err
+	}
+
 	var result ScanResult
 	var recent []ScanEntry
 	dirStats := map[string]*ScanDirProgress{}
@@ -186,7 +204,7 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 				ensureDir(x.Remote()).UpdatedSeq = updateSeq
 				emit(x.Remote(), x.Remote(), false)
 			case fs.Object:
-				if err := scanOneObject(ctx, fdst, x, &result, &recent, ensureDir, &updateSeq); err != nil {
+				if err := scanOneObject(ctx, dstObjects, x, &result, &recent, ensureDir, &updateSeq); err != nil {
 					return err
 				}
 				emit(parentDir(x.Remote()), x.Remote(), false)
@@ -214,20 +232,12 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 	return result, nil
 }
 
-func scanOneObject(ctx context.Context, fdst fs.Fs, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) error {
+func scanOneObject(ctx context.Context, dstObjects map[string]fs.Object, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) error {
 	relFile := srcObj.Remote()
 	action := ActionCopy
 
-	dstObj, err := fdst.NewObject(ctx, relFile)
-	switch {
-	case err == nil:
-		if operations.Equal(ctx, srcObj, dstObj) {
-			action = ActionSkipIdentical
-		}
-	case errors.Is(err, fs.ErrorObjectNotFound):
-		// not present at dest yet - stays ActionCopy
-	default:
-		return err
+	if dstObj, ok := dstObjects[relFile]; ok && operations.Equal(ctx, srcObj, dstObj) {
+		action = ActionSkipIdentical
 	}
 
 	entry := ScanEntry{
