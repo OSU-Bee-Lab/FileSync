@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -162,6 +163,21 @@ func showSyncExperiments(s *state) {
 			tasks := make([]scanTask, 0, len(selected)*len(dsts))
 			for _, name := range selected {
 				name := name
+
+				// Shared across every destination task for this experiment:
+				// the first destination's Scan to run triggers the one
+				// source walk, and every other destination reuses its
+				// result instead of re-walking the same source tree.
+				var listingOnce sync.Once
+				var listing syncengine.SourceListing
+				var listingErr error
+				getListing := func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.SourceListing, error) {
+					listingOnce.Do(func() {
+						listing, listingErr = syncengine.ScanExperimentSource(ctx, src, name, fset, progress)
+					})
+					return listing, listingErr
+				}
+
 				for _, dst := range dsts {
 					dst := dst
 					label := name
@@ -172,7 +188,11 @@ func showSyncExperiments(s *state) {
 						Label: label,
 						Locs:  []syncengine.Location{src, dst},
 						Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-							return syncengine.ScanSyncExperimentsWithProgress(ctx, src, dst, name, fset, progress)
+							listing, err := getListing(ctx, progress)
+							if err != nil {
+								return syncengine.ScanResult{}, err
+							}
+							return syncengine.ScanSyncExperimentsAgainstSource(ctx, listing, dst, name, progress)
 						},
 						Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
 							return syncengine.StartSyncExperiments(ctx, src, dst, name, fset, preserveModTime, result)

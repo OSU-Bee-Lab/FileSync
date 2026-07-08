@@ -68,6 +68,57 @@ type ScanProgress struct {
 // return quickly; slow UI work should be handed off to the UI thread.
 type ScanProgressFunc func(ScanProgress)
 
+// SourceListing is a full recursive listing of one source subtree (an
+// experiment, or any relPath under a Location), captured once so it can be
+// diffed against multiple destinations without re-walking the source once
+// per destination. See ScanExperimentSource /
+// ScanSyncExperimentsAgainstSource.
+type SourceListing struct {
+	objects []fs.Object
+	dirs    []string
+}
+
+// listSource walks <srcRoot>/<relPath> (through fset's filter) exactly
+// once, collecting every file and directory it finds. It performs no
+// comparison against any destination.
+func listSource(ctx context.Context, srcRoot, relPath string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
+	ctx, err := withFilter(ctx, fset)
+	if err != nil {
+		return SourceListing{}, err
+	}
+
+	fsrc, err := cache.Get(ctx, joinSpec(srcRoot, relPath))
+	if err != nil {
+		return SourceListing{}, err
+	}
+
+	var listing SourceListing
+	lastEmit := time.Time{}
+
+	err = walk.ListR(ctx, fsrc, "", false, -1, walk.ListAll, func(entries fs.DirEntries) error {
+		for _, entry := range entries {
+			switch x := entry.(type) {
+			case fs.Directory:
+				listing.dirs = append(listing.dirs, x.Remote())
+			case fs.Object:
+				listing.objects = append(listing.objects, x)
+			}
+		}
+		if progress != nil {
+			now := time.Now()
+			if lastEmit.IsZero() || now.Sub(lastEmit) >= 100*time.Millisecond {
+				lastEmit = now
+				progress(ScanProgress{FilesScanned: len(listing.objects), DirsSeen: len(listing.dirs)})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return SourceListing{}, err
+	}
+	return listing, nil
+}
+
 // ScanSyncExperiments scans one whole experiment from src to dst
 // (Location <-> Location, mirrored under each side's own experiments/
 // root). Read-only, safe to call anytime.
@@ -77,7 +128,26 @@ func ScanSyncExperiments(ctx context.Context, src, dst Location, experimentName 
 
 // ScanSyncExperimentsWithProgress is ScanSyncExperiments with live progress updates.
 func ScanSyncExperimentsWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
-	return scanCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, fset, experimentName, progress)
+	listing, err := listSource(ctx, src.rcloneSpec(), experimentName, fset, progress)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	return scanAgainstDest(ctx, listing, dst.rcloneSpec(), experimentName, experimentName, progress)
+}
+
+// ScanExperimentSource walks one experiment's full source file tree exactly
+// once. The returned listing can be fed into ScanSyncExperimentsAgainstSource
+// for as many destinations as needed, so syncing one experiment to N
+// destinations only ever walks the source once instead of N times.
+func ScanExperimentSource(ctx context.Context, src Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
+	return listSource(ctx, src.rcloneSpec(), experimentName, fset, progress)
+}
+
+// ScanSyncExperimentsAgainstSource diffs a previously-captured source
+// listing (see ScanExperimentSource) against dst, without re-walking the
+// source.
+func ScanSyncExperimentsAgainstSource(ctx context.Context, listing SourceListing, dst Location, experimentName string, progress ScanProgressFunc) (ScanResult, error) {
+	return scanAgainstDest(ctx, listing, dst.rcloneSpec(), experimentName, experimentName, progress)
 }
 
 // ScanPullFiles scans an arbitrary sub-path (any depth: a
@@ -95,25 +165,39 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 	if label == "" {
 		label = "experiments/"
 	}
-	return scanCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, fset, label, progress)
+	listing, err := listSource(ctx, src.rcloneSpec(), srcRelPath, fset, progress)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	return scanAgainstDest(ctx, listing, destFolder, srcRelPath, label, progress)
 }
 
-// scanCopyPreserving is the shared scan implementation behind both
-// ScanSyncExperiments and ScanPullFiles: it walks <srcRoot>/<relPath> (through
-// fset's filter) and diffs each file against <dstRoot>/<relPath>, without
-// transferring anything.
-func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, fset FilterSettings, label string, progress ScanProgressFunc) (ScanResult, error) {
-	ctx, err := withFilter(ctx, fset)
+// scanAgainstDest is the shared scan implementation behind
+// ScanSyncExperiments and ScanPullFiles: it diffs a pre-walked source
+// listing against <dstRoot>/<relPath>, without transferring anything.
+//
+// The destination is listed in bulk once (like the source) rather than
+// stat'd per file: a per-file fs.Fs.NewObject call is a network round trip
+// for cloud remotes, so diffing N source files against a per-file stat
+// would mean N destination round trips. Listing once and comparing against
+// an in-memory map turns that into a single listing plus in-memory
+// comparisons.
+func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPath, label string, progress ScanProgressFunc) (ScanResult, error) {
+	fdst, err := cache.Get(ctx, joinSpec(dstRoot, relPath))
 	if err != nil {
 		return ScanResult{}, err
 	}
 
-	fsrc, err := cache.Get(ctx, joinSpec(srcRoot, relPath))
-	if err != nil {
-		return ScanResult{}, err
-	}
-	fdst, err := cache.Get(ctx, joinSpec(dstRoot, relPath))
-	if err != nil {
+	dstObjs := make(map[string]fs.Object, len(listing.objects))
+	err = walk.ListR(ctx, fdst, "", false, -1, walk.ListAll, func(entries fs.DirEntries) error {
+		for _, entry := range entries {
+			if o, ok := entry.(fs.Object); ok {
+				dstObjs[o.Remote()] = o
+			}
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
 		return ScanResult{}, err
 	}
 
@@ -174,25 +258,20 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 		return stat
 	}
 
-	err = walk.ListR(ctx, fsrc, "", false, -1, walk.ListAll, func(entries fs.DirEntries) error {
-		for _, entry := range entries {
-			switch x := entry.(type) {
-			case fs.Directory:
-				updateSeq++
-				ensureDir(x.Remote()).UpdatedSeq = updateSeq
-				emit(x.Remote(), x.Remote(), false)
-			case fs.Object:
-				if err := scanOneObject(ctx, fdst, x, &result, &recent, ensureDir, &updateSeq); err != nil {
-					return err
-				}
-				emit(parentDir(x.Remote()), x.Remote(), false)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		return ScanResult{}, err
+	for _, dir := range listing.dirs {
+		updateSeq++
+		ensureDir(dir).UpdatedSeq = updateSeq
+		emit(dir, dir, false)
 	}
+
+	for _, srcObj := range listing.objects {
+		if err := ctx.Err(); err != nil {
+			return ScanResult{}, err
+		}
+		scanOneObject(ctx, dstObjs, srcObj, &result, &recent, ensureDir, &updateSeq)
+		emit(parentDir(srcObj.Remote()), srcObj.Remote(), false)
+	}
+
 	if progress != nil {
 		progress(ScanProgress{
 			Label:        label,
@@ -209,20 +288,14 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 	return result, nil
 }
 
-func scanOneObject(ctx context.Context, fdst fs.Fs, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) error {
+func scanOneObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) {
 	relFile := srcObj.Remote()
 	action := ActionCopy
 
-	dstObj, err := fdst.NewObject(ctx, relFile)
-	switch {
-	case err == nil:
+	if dstObj, ok := dstObjs[relFile]; ok {
 		if operations.Equal(ctx, srcObj, dstObj) {
 			action = ActionSkipIdentical
 		}
-	case errors.Is(err, fs.ErrorObjectNotFound):
-		// not present at dest yet - stays ActionCopy
-	default:
-		return err
 	}
 
 	entry := ScanEntry{
@@ -246,7 +319,6 @@ func scanOneObject(ctx context.Context, fdst fs.Fs, srcObj fs.Object, result *Sc
 		result.SkipCount++
 		dir.SkipCount++
 	}
-	return nil
 }
 
 func parentDir(remote string) string {
