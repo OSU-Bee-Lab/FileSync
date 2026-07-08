@@ -34,6 +34,10 @@ type Config struct {
 	DefaultFilter    syncengine.FilterSettings `json:"defaultFilter"`
 	PreserveModTime  bool                      `json:"preserveModTime"`
 	RecorderSettings RecorderSettings          `json:"recorderSettings"`
+	// DebugMode enables verbose console logging of scan/copy progress and
+	// rclone's own internal logging, for troubleshooting a stuck or slow
+	// sync without adding a separate CLI surface.
+	DebugMode bool `json:"debugMode"`
 }
 
 // Default returns the config used the first time FileSync runs on a

@@ -151,6 +151,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 			return
 		}
 
+		debugf("copy %s -> %s: starting, %d files queued", fsrc.Root(), fdst.Root(), expected.CopyCount)
 		done := make(chan error, 1)
 		go func() { done <- sync.CopyDir(ctx, fdst, fsrc, false) }()
 
@@ -207,6 +208,10 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 				}
 			}
 
+			if current != "" {
+				debugf("copy %s -> %s: transferring %s (%d/%d bytes)", fsrc.Root(), fdst.Root(), current, currentBytes, expected.TotalBytes)
+			}
+
 			progress <- ProgressSnapshot{
 				BytesDone:   currentBytes,
 				BytesTotal:  expected.TotalBytes,
@@ -230,6 +235,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 						status = JobCanceled
 					}
 				}
+				debugf("copy %s -> %s: finished, status=%v err=%v", fsrc.Root(), fdst.Root(), status, err)
 				emit(status, err)
 				return
 			case <-ticker.C:

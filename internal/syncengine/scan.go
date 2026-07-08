@@ -116,6 +116,7 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 	if err != nil {
 		return ScanResult{}, err
 	}
+	debugf("scan %s: walking %s against %s", label, fsrc.Root(), fdst.Root())
 
 	var result ScanResult
 	var recent []ScanEntry
@@ -140,6 +141,9 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 	}
 
 	emit := func(currentDir, currentPath string, force bool) {
+		if currentPath != "" {
+			debugf("scan %s: checking %s", label, currentPath)
+		}
 		if progress == nil {
 			return
 		}
@@ -193,6 +197,7 @@ func scanCopyPreserving(ctx context.Context, srcRoot, dstRoot, relPath string, f
 	if err != nil {
 		return ScanResult{}, err
 	}
+	debugf("scan %s: done, %d to copy, %d identical", label, result.CopyCount, result.SkipCount)
 	if progress != nil {
 		progress(ScanProgress{
 			Label:        label,
