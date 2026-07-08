@@ -1040,7 +1040,32 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		}
 	}()
 
-	cancelBtn := widget.NewButton("End Sync", endSync)
+	// confirmEndSync warns before ending the session if any row is actively
+	// mid-transfer (recorderJobSyncing), since ending the sync cancels that
+	// job in progress rather than merely closing the screen. Other states
+	// (idle, done, error, disconnected) end silently, as before.
+	confirmEndSync := func() {
+		syncing := false
+		for _, r := range rows {
+			if r.status == recorderJobSyncing {
+				syncing = true
+				break
+			}
+		}
+		if !syncing {
+			endSync()
+			return
+		}
+		dialog.NewConfirm("Recorder still syncing",
+			"At least one recorder is still syncing. Ending now will cancel its transfer.\n\nEnd sync anyway?",
+			func(ok bool) {
+				if ok {
+					endSync()
+				}
+			}, s.win).Show()
+	}
+
+	cancelBtn := widget.NewButton("End Sync", confirmEndSync)
 
 	rowsBox = container.NewVBox()
 
