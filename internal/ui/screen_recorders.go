@@ -597,6 +597,27 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		return nil, -1
 	}
 
+	// findDisconnectedRow looks up a still-tracked row by the recorder's own
+	// persistent identity (RecorderID + driver model), not by OS mount
+	// point. Mount points are assigned by the OS and get reused across
+	// unrelated physical devices - e.g. two recorders offloaded one after
+	// another through the same USB hub/card reader slot. Matching a
+	// reconnect on mount point alone (the old behavior) could silently
+	// treat a brand new recorder as a "reconnect" of whatever row last held
+	// that mount point, offloading its files under the wrong recorder ID.
+	// Only jobDisconnected rows are eligible: any row whose device is still
+	// attached, or whose job already finished/never started, has already
+	// been resolved by the attach/detach handlers below and is not a valid
+	// reconnect target.
+	findDisconnectedRow := func(driver recorder.Driver, id string) *recorderRow {
+		for _, r := range rows {
+			if r.status == jobDisconnected && r.id == id && r.driver != nil && r.driver.Name() == driver.Name() {
+				return r
+			}
+		}
+		return nil
+	}
+
 	// rowRenderer holds the persistent widgets for one row's container, so
 	// we can update in place without a widget.List's tap-highlight
 	// behavior (rows here are never selectable).
@@ -958,16 +979,19 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 					row.id = id
 				}
 				fyne.Do(func() {
-					if existing, _ := findRow(ev.Volume.MountPoint); existing != nil {
-						// Reconnect of a still-tracked (e.g. previously
-						// disconnected) row: resume its job rather than
-						// duplicating it.
-						existing.volume = ev.Volume
-						if existing.status == jobDisconnected {
+					if err == nil {
+						if existing := findDisconnectedRow(driver, id); existing != nil {
+							// Reconnect of a still-tracked, previously
+							// disconnected row, confirmed by the recorder's
+							// own ID (not just the mount point it landed
+							// on): resume its job rather than duplicating
+							// it.
+							existing.volume = ev.Volume
+							existing.driver = driver
 							beginOffload(existing)
+							rebuildRows()
+							return
 						}
-						rebuildRows()
-						return
 					}
 					rows = append(rows, row)
 					rebuildRows()
