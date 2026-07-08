@@ -66,6 +66,14 @@ type folderUIState struct {
 	filesDone  int
 	hasError   bool
 	files      []*fileUIState
+
+	// copy* track only files with action == ActionCopy (the remaining work),
+	// excluding already-synced files entirely. Used to show remaining
+	// progress during an active sync rather than including pre-done files.
+	copyTotalBytes int64
+	copyBytesDone  int64
+	copyTotalFiles int
+	copyFilesDone  int
 }
 
 type expUIState struct {
@@ -79,6 +87,13 @@ type expUIState struct {
 	fileMap     map[string]*fileUIState
 	tempFolders []syncengine.ScanDirProgress
 	tempRecent  []syncengine.ScanEntry
+
+	// copy* mirror folderUIState's remaining-work aggregates, summed across
+	// folders.
+	copyTotalBytes int64
+	copyBytesDone  int64
+	copyTotalFiles int
+	copyFilesDone  int
 }
 
 // barRow is one rendered row in a split sub-panel (Files or Folders): a real
@@ -320,10 +335,9 @@ func tintItemBg(obj fyne.CanvasObject, c color.Color) {
 
 func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 	exp := &expUIState{
-		label:      label,
-		status:     statusWaiting,
-		totalBytes: result.TotalBytes,
-		fileMap:    make(map[string]*fileUIState),
+		label:   label,
+		status:  statusWaiting,
+		fileMap: make(map[string]*fileUIState),
 	}
 
 	dirsByPath := make(map[string][]*fileUIState)
@@ -363,6 +377,14 @@ func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 				folder.bytesDone += f.size
 				folder.filesDone++
 			}
+			if f.action == syncengine.ActionCopy {
+				folder.copyTotalBytes += f.size
+				folder.copyTotalFiles++
+				if f.done {
+					folder.copyBytesDone += f.size
+					folder.copyFilesDone++
+				}
+			}
 			folder.files = append(folder.files, f)
 		}
 		sort.SliceStable(folder.files, func(i, j int) bool {
@@ -379,7 +401,12 @@ func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 	})
 
 	for _, f := range exp.folders {
+		exp.totalBytes += f.totalBytes
 		exp.bytesDone += f.bytesDone
+		exp.copyTotalBytes += f.copyTotalBytes
+		exp.copyBytesDone += f.copyBytesDone
+		exp.copyTotalFiles += f.copyTotalFiles
+		exp.copyFilesDone += f.copyFilesDone
 	}
 
 	return exp
@@ -464,7 +491,13 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			exp := expStates[id]
 			prog := 0.0
-			if exp.totalBytes > 0 {
+			if isSyncing() {
+				if exp.copyTotalBytes > 0 {
+					prog = float64(exp.copyBytesDone) / float64(exp.copyTotalBytes)
+				} else {
+					prog = 1.0
+				}
+			} else if exp.totalBytes > 0 {
 				prog = float64(exp.bytesDone) / float64(exp.totalBytes)
 			}
 			summary := fmt.Sprintf("%d%%", int(prog*100))
@@ -600,13 +633,17 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					})
 					continue
 				}
+				filesDone, filesTotal := fold.filesDone, fold.totalFiles
+				if isSyncing() {
+					filesDone, filesTotal = fold.copyFilesDone, fold.copyTotalFiles
+				}
 				prog := 0.0
-				if isSyncing() && fold.totalBytes > 0 {
-					prog = float64(fold.bytesDone) / float64(fold.totalBytes)
+				if filesTotal > 0 {
+					prog = float64(filesDone) / float64(filesTotal)
 				}
 				unsynced = append(unsynced, barRow{
 					label:    fold.path,
-					summary:  fmt.Sprintf("%d / %d files", fold.filesDone, fold.totalFiles),
+					summary:  fmt.Sprintf("%d / %d files", filesDone, filesTotal),
 					progress: prog,
 					hasError: fold.hasError,
 					isFolder: true,
@@ -842,6 +879,8 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 		var totalExpsDone, totalExps int
 		var totalFilesDone, totalFiles int
 		var totalBytesDone, totalBytes int64
+		var copyFilesDone, copyFilesTotal int
+		var copyBytesDone, copyBytesTotal int64
 
 		totalExps = len(expStates)
 		for _, e := range expStates {
@@ -854,12 +893,18 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					totalFilesDone += fold.filesDone
 					totalBytes += fold.totalBytes
 					totalBytesDone += fold.bytesDone
+					copyFilesTotal += fold.copyTotalFiles
+					copyFilesDone += fold.copyFilesDone
+					copyBytesTotal += fold.copyTotalBytes
+					copyBytesDone += fold.copyBytesDone
 				}
 			} else {
 				for _, row := range e.tempFolders {
 					totalFiles += row.CopyCount + row.SkipCount
 					totalFilesDone += row.SkipCount
 					totalBytes += row.CopyBytes
+					copyFilesTotal += row.CopyCount
+					copyBytesTotal += row.CopyBytes
 				}
 			}
 		}
@@ -889,10 +934,12 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			bytesValue.SetText(fmt.Sprintf("%s unsynced / %s synced", humanBytes(copyBytes), humanBytes(skipBytes)))
 		} else {
 			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
-			filesValue.SetText(fmt.Sprintf("%d / %d", totalFilesDone, totalFiles))
-			bytesValue.SetText(fmt.Sprintf("%s / %s", humanBytes(totalBytesDone), humanBytes(totalBytes)))
-			if totalBytes > 0 {
-				overallBar.SetValue(float64(totalBytesDone) / float64(totalBytes))
+			skipFilesTotal := totalFiles - copyFilesTotal
+			skipBytesTotal := totalBytes - copyBytesTotal
+			filesValue.SetText(fmt.Sprintf("%d / %d\n(%d already synced)", copyFilesDone, copyFilesTotal, skipFilesTotal))
+			bytesValue.SetText(fmt.Sprintf("%s / %s\n(%s already synced)", humanBytes(copyBytesDone), humanBytes(copyBytesTotal), humanBytes(skipBytesTotal)))
+			if copyBytesTotal > 0 {
+				overallBar.SetValue(float64(copyBytesDone) / float64(copyBytesTotal))
 			} else {
 				overallBar.SetValue(1.0)
 			}
@@ -1028,20 +1075,32 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 
 						expStates[i].hasError = false
 						expStates[i].bytesDone = 0
+						expStates[i].copyBytesDone = 0
+						expStates[i].copyFilesDone = 0
 						for _, fold := range expStates[i].folders {
 							fold.bytesDone = 0
 							fold.filesDone = 0
+							fold.copyBytesDone = 0
+							fold.copyFilesDone = 0
 							fold.hasError = false
 							for _, file := range fold.files {
 								fold.bytesDone += file.bytesDone
 								if file.done {
 									fold.filesDone++
 								}
+								if file.action == syncengine.ActionCopy {
+									fold.copyBytesDone += file.bytesDone
+									if file.done {
+										fold.copyFilesDone++
+									}
+								}
 								if file.hasError {
 									fold.hasError = true
 								}
 							}
 							expStates[i].bytesDone += fold.bytesDone
+							expStates[i].copyBytesDone += fold.copyBytesDone
+							expStates[i].copyFilesDone += fold.copyFilesDone
 							if fold.hasError {
 								expStates[i].hasError = true
 							}
@@ -1085,12 +1144,16 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 						for _, fold := range expStates[i].folders {
 							fold.bytesDone = fold.totalBytes
 							fold.filesDone = fold.totalFiles
+							fold.copyBytesDone = fold.copyTotalBytes
+							fold.copyFilesDone = fold.copyTotalFiles
 							for _, file := range fold.files {
 								file.bytesDone = file.size
 								file.done = true
 							}
 						}
 						expStates[i].bytesDone = expStates[i].totalBytes
+						expStates[i].copyBytesDone = expStates[i].copyTotalBytes
+						expStates[i].copyFilesDone = expStates[i].copyTotalFiles
 					}
 
 					if selectedExpIdx == i {
