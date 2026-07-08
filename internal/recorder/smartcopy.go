@@ -9,6 +9,7 @@ package recorder
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -223,7 +224,13 @@ type CopyProgress struct {
 // they're written simultaneously) already left off. Callers must have
 // already checked file_states and only pass paths in the "nonexistent" or
 // "partial" state — smartcopy does not itself re-derive that classification.
-func smartcopy(sourcePath string, destPaths []string, progress *CopyProgress) error {
+//
+// ctx is checked between chunks of the main copy loop so a caller can abort
+// a large in-flight copy promptly (e.g. the source recorder was unplugged
+// mid-transfer) instead of it running to completion — or erroring out and
+// getting silently retried — against a source path that may no longer point
+// at the same physical device.
+func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progress *CopyProgress) error {
 	const chunkSize = 4096 * 256
 
 	fileSource, err := os.Open(sourcePath)
@@ -360,6 +367,9 @@ func smartcopy(sourcePath string, destPaths []string, progress *CopyProgress) er
 
 	buf := make([]byte, chunkSize)
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		n, readErr := fileSource.Read(buf)
 		if n > 0 {
 			for _, f := range filesDest {

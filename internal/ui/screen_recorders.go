@@ -859,8 +859,15 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 						row.status = jobError
 						row.statusMsg = errString(p.Err)
 					case recorder.OffloadCanceled:
-						row.status = jobError
-						row.statusMsg = errString(p.Err)
+						// A cancel is expected and races with the detach
+						// handler's own jobDisconnected assignment (see
+						// VolumeDetached above, which calls job.Cancel()) -
+						// don't clobber that with jobError just because this
+						// event happened to arrive after it.
+						if row.status != jobDisconnected {
+							row.status = jobError
+							row.statusMsg = errString(p.Err)
+						}
 					default:
 						row.status = recorderJobSyncing
 						if p.BytesTotal > 0 {
@@ -1011,6 +1018,18 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 					case !row.started:
 						rows = append(rows[:i], rows[i+1:]...)
 					default:
+						// Cancel the in-flight job rather than leaving it
+						// running against a mount point that may be
+						// reassigned to a different physical recorder any
+						// time after this point (e.g. a jostled hub, or
+						// another recorder plugged into the same slot).
+						// StartOffload also re-verifies the recorder's own
+						// ID before each file as a second layer of defense,
+						// but this is what makes that abandonment prompt
+						// instead of racing.
+						if row.job != nil {
+							row.job.Cancel()
+						}
 						row.status = jobDisconnected
 						row.statusMsg = ""
 					}

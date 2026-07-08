@@ -2,6 +2,7 @@ package recorder
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -67,7 +68,7 @@ func TestSmartcopyFreshCopy(t *testing.T) {
 
 	dest := filepath.Join(dir, "dest.bin")
 	progress := &CopyProgress{}
-	if err := smartcopy(source, []string{dest}, progress); err != nil {
+	if err := smartcopy(context.Background(), source, []string{dest}, progress); err != nil {
 		t.Fatalf("smartcopy: %v", err)
 	}
 
@@ -94,7 +95,7 @@ func TestSmartcopyResumesPartialTransfer(t *testing.T) {
 	dest := filepath.Join(dir, "dest.bin")
 	writeFile(t, dest, sourceData[:1_200_345])
 
-	if err := smartcopy(source, []string{dest}, nil); err != nil {
+	if err := smartcopy(context.Background(), source, []string{dest}, nil); err != nil {
 		t.Fatalf("smartcopy resume: %v", err)
 	}
 
@@ -118,7 +119,7 @@ func TestSmartcopyAlreadyComplete(t *testing.T) {
 
 	// Should be a no-op: same size as source, so pickupByte == sizeSource
 	// and smartcopy returns immediately without touching the file.
-	if err := smartcopy(source, []string{dest}, nil); err != nil {
+	if err := smartcopy(context.Background(), source, []string{dest}, nil); err != nil {
 		t.Fatalf("smartcopy on already-complete dest: %v", err)
 	}
 	got, err := os.ReadFile(dest)
@@ -138,7 +139,7 @@ func TestSmartcopyDestinationTooLarge(t *testing.T) {
 	dest := filepath.Join(dir, "dest.bin")
 	writeFile(t, dest, patternBytes(2000))
 
-	err := smartcopy(source, []string{dest}, nil)
+	err := smartcopy(context.Background(), source, []string{dest}, nil)
 	if _, ok := err.(*DestinationTooLargeError); !ok {
 		t.Fatalf("smartcopy error = %v (%T), want *DestinationTooLargeError", err, err)
 	}
@@ -156,7 +157,7 @@ func TestSmartcopyIrreconcilable(t *testing.T) {
 	dest := filepath.Join(dir, "dest.bin")
 	writeFile(t, dest, bytes.Repeat([]byte{0x00}, 20000))
 
-	err := smartcopy(source, []string{dest}, nil)
+	err := smartcopy(context.Background(), source, []string{dest}, nil)
 	if _, ok := err.(*IrreconcilableError); !ok {
 		t.Fatalf("smartcopy error = %v (%T), want *IrreconcilableError", err, err)
 	}

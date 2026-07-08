@@ -206,9 +206,38 @@ func StartOffload(
 			}
 		}
 
+		// verifyIdentity re-reads the recorder's own ID off v and confirms it
+		// still matches recorderID. It's cheap (one directory listing or one
+		// small file read) and is the last line of defense against a device
+		// swap mid-offload: a volume can be unplugged and a *different*
+		// physical recorder attached at the same OS mount point (e.g. a
+		// jostled hub, or two recorders offloaded back-to-back through the
+		// same slot) faster than the detach handler can cancel this job's
+		// context. Without this check, a stale AbsPath/destPath computed
+		// from the original volume could silently read the new device's
+		// bytes into the original recorder's destination folder, or (worse,
+		// under autoDelete) delete a file on a device that was never
+		// verified at all.
+		verifyIdentity := func() error {
+			gotID, err := driver.RecorderID(v)
+			if err != nil {
+				return fmt.Errorf("recorder %s: re-checking identity: %w", recorderID, err)
+			}
+			if gotID != recorderID {
+				return fmt.Errorf("recorder %s: device at this mount point now identifies as %q — it was disconnected and replaced mid-sync", recorderID, gotID)
+			}
+			return nil
+		}
+
 		for _, sf := range sourceFiles {
 			if ctx.Err() != nil {
 				emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
+				return
+			}
+
+			if err := verifyIdentity(); err != nil {
+				files[sf.DestRelPath] = FileOffloadProgress{Err: err}
+				emit(OffloadError, "", sf.DestRelPath, err)
 				return
 			}
 
@@ -258,7 +287,7 @@ func StartOffload(
 
 			cp := &CopyProgress{}
 			copyDone := make(chan error, 1)
-			go func(src string, dsts []string) { copyDone <- smartcopy(src, dsts, cp) }(sf.AbsPath, pending)
+			go func(src string, dsts []string) { copyDone <- smartcopy(ctx, src, dsts, cp) }(sf.AbsPath, pending)
 
 			ticker := time.NewTicker(300 * time.Millisecond)
 		copyLoop:
@@ -320,7 +349,19 @@ func StartOffload(
 		}
 
 		if autoDelete && allComplete {
+			// Re-verify identity once more right before deleting anything:
+			// this is the one place StartOffload deletes source data (see
+			// package doc), so it must never run against a device that
+			// swapped in after the last file's copy completed.
+			if err := verifyIdentity(); err != nil {
+				emit(OffloadError, "", "", err)
+				return
+			}
 			for _, sf := range sourceFiles {
+				if ctx.Err() != nil {
+					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
+					return
+				}
 				emit(OffloadRunning, "deleting", sf.DestRelPath, nil)
 				if err := os.Remove(sf.AbsPath); err != nil {
 					emit(OffloadError, "", sf.DestRelPath, err)
