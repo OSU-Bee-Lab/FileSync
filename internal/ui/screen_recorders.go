@@ -100,9 +100,20 @@ func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDese
 	d.Show()
 }
 
-// recorderInactivityTimeout is how long showRecorderSync waits for a new
-// recorder to attach before pausing the session and prompting the user.
-const recorderInactivityTimeout = 5 * time.Minute
+// defaultRecorderInactivityTimeoutMinutes is used if Config.
+// RecorderInactivityTimeoutMinutes is somehow unset (see appconfig.Default).
+const defaultRecorderInactivityTimeoutMinutes = 5
+
+// recorderInactivityTimeout returns how long showRecorderSync waits for a
+// new recorder to attach before pausing the session and prompting the
+// user, per the Settings screen's configurable value.
+func recorderInactivityTimeout(s *state) time.Duration {
+	minutes := s.cfg.RecorderInactivityTimeoutMinutes
+	if minutes <= 0 {
+		minutes = defaultRecorderInactivityTimeoutMinutes
+	}
+	return time.Duration(minutes) * time.Minute
+}
 
 // showInactivitySyncPrompt is shown when no new recorder has attached within
 // recorderInactivityTimeout during an active sync session. "Continue Sync"
@@ -121,7 +132,8 @@ func showInactivitySyncPrompt(s *state, onContinue func(), onEnd func()) {
 	continueBtn.Importance = widget.HighImportance
 	d = dialog.NewCustomWithoutButtons("Sync paused due to inactivity",
 		container.NewVBox(
-			widget.NewLabel("No new recorders have been added in the last 5 minutes."),
+			widget.NewLabel(fmt.Sprintf("No new recorders have been added in the last %v.",
+				recorderInactivityTimeout(s))),
 			container.NewHBox(endBtn, continueBtn),
 		), s.win)
 	d.Show()
@@ -924,7 +936,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		}
 		restartTimer := func() {
 			stopTimer()
-			timer = time.NewTimer(recorderInactivityTimeout)
+			timer = time.NewTimer(recorderInactivityTimeout(s))
 			timerC = timer.C
 		}
 
@@ -1040,7 +1052,32 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		}
 	}()
 
-	cancelBtn := widget.NewButton("End Sync", endSync)
+	// confirmEndSync warns before ending the session if any row is actively
+	// mid-transfer (recorderJobSyncing), since ending the sync cancels that
+	// job in progress rather than merely closing the screen. Other states
+	// (idle, done, error, disconnected) end silently, as before.
+	confirmEndSync := func() {
+		syncing := false
+		for _, r := range rows {
+			if r.status == recorderJobSyncing {
+				syncing = true
+				break
+			}
+		}
+		if !syncing {
+			endSync()
+			return
+		}
+		dialog.NewConfirm("Recorder still syncing",
+			"At least one recorder is still syncing. Ending now will cancel its transfer.\n\nEnd sync anyway?",
+			func(ok bool) {
+				if ok {
+					endSync()
+				}
+			}, s.win).Show()
+	}
+
+	cancelBtn := widget.NewButton("End Sync", confirmEndSync)
 
 	rowsBox = container.NewVBox()
 

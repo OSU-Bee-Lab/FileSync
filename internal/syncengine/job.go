@@ -2,16 +2,29 @@ package syncengine
 
 import (
 	"context"
+	stdsync "sync"
 	"time"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/filter"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/lib/random"
 )
+
+// copyRetries is the number of times a whole-directory copy is retried
+// after a transient error (e.g. a dropped HTTP/2 connection) before it's
+// reported to the UI as a failure. This mirrors the outer retry loop the
+// rclone CLI runs (its --retries flag), which FileSync doesn't get for
+// free since it calls sync.CopyDir directly instead of going through
+// rclone's cmd.Run.
+const copyRetries = 3
+
+// copyRetriesInterval is the pause between retry attempts.
+const copyRetriesInterval = 5 * time.Second
 
 // JobStatus is the lifecycle state of a running copy.
 type JobStatus int
@@ -39,6 +52,15 @@ type ProgressSnapshot struct {
 	Err                   error
 	Speed                 float64
 	Files                 map[string]FileProgress
+
+	// Retrying is true while the job is paused between attempts after a
+	// transient error (see copyDirWithRetry). The job is still JobRunning
+	// at this point - it isn't a failure until every retry is exhausted -
+	// so callers should show this as a "will resolve itself" notice
+	// rather than an error state.
+	Retrying               bool
+	RetryAttempt, RetryMax int
+	RetryErr               error
 }
 
 // Job is a running (or finished) copy started by StartSyncExperiments/StartPullFiles.
@@ -91,6 +113,45 @@ func filesFromFilter(expected ScanResult) *filter.Filter {
 		}
 	}
 	return f
+}
+
+// copyDirWithRetry runs sync.CopyDir, retrying on transient errors (dropped
+// connections, timeouts, etc. per fserrors.ShouldRetry) up to copyRetries
+// times before giving up. Files already copied in a failed attempt are left
+// in place (CopyDir never deletes), so a retry just picks up whatever the
+// destination is still missing - it isn't redone from scratch, though a
+// retried attempt does re-list source and destination.
+//
+// onRetry, if non-nil, is called just before each retry sleep so a caller
+// can surface a "retrying" indicator in the UI without the error being
+// treated as a hard failure - the copy is still in flight, not stalled.
+func copyDirWithRetry(ctx context.Context, fdst, fsrc fs.Fs, onRetry func(attempt, max int, err error)) error {
+	var err error
+	for attempt := 1; attempt <= copyRetries; attempt++ {
+		err = sync.CopyDir(ctx, fdst, fsrc, false)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		if !fserrors.ShouldRetry(err) {
+			return err
+		}
+		if attempt == copyRetries {
+			break
+		}
+		debugf("copy %s -> %s: transient error (attempt %d/%d), retrying in %s: %v", fsrc.Root(), fdst.Root(), attempt, copyRetries, copyRetriesInterval, err)
+		if onRetry != nil {
+			onRetry(attempt, copyRetries, err)
+		}
+		select {
+		case <-time.After(copyRetriesInterval):
+		case <-ctx.Done():
+			return err
+		}
+		if onRetry != nil {
+			onRetry(attempt, copyRetries, nil) // resumed: clear the "retrying" indicator
+		}
+	}
+	return err
 }
 
 // startCopyPreserving is the one place sync.CopyDir is called in this
@@ -151,8 +212,20 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 			return
 		}
 
+		debugf("copy %s -> %s: starting, %d files queued", fsrc.Root(), fdst.Root(), expected.CopyCount)
 		done := make(chan error, 1)
-		go func() { done <- sync.CopyDir(ctx, fdst, fsrc, false) }()
+
+		var retryMu stdsync.Mutex
+		var retrying bool
+		var retryAttempt, retryMax int
+		var retryErr error
+		onRetry := func(attempt, max int, err error) {
+			retryMu.Lock()
+			retrying, retryAttempt, retryMax, retryErr = err != nil, attempt, max, err
+			retryMu.Unlock()
+		}
+
+		go func() { done <- copyDirWithRetry(ctx, fdst, fsrc, onRetry) }()
 
 		ticker := time.NewTicker(300 * time.Millisecond)
 		defer ticker.Stop()
@@ -207,16 +280,28 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 				}
 			}
 
+			if current != "" {
+				debugf("copy %s -> %s: transferring %s (%d/%d bytes)", fsrc.Root(), fdst.Root(), current, currentBytes, expected.TotalBytes)
+			}
+
+			retryMu.Lock()
+			snapRetrying, snapAttempt, snapMax, snapRetryErr := retrying, retryAttempt, retryMax, retryErr
+			retryMu.Unlock()
+
 			progress <- ProgressSnapshot{
-				BytesDone:   currentBytes,
-				BytesTotal:  expected.TotalBytes,
-				FilesDone:   int(stats.GetTransfers()),
-				FilesTotal:  expected.CopyCount,
-				CurrentFile: current,
-				Status:      status,
-				Err:         err,
-				Speed:       currentSpeed,
-				Files:       filesMap,
+				BytesDone:    currentBytes,
+				BytesTotal:   expected.TotalBytes,
+				FilesDone:    int(stats.GetTransfers()),
+				FilesTotal:   expected.CopyCount,
+				CurrentFile:  current,
+				Status:       status,
+				Err:          err,
+				Speed:        currentSpeed,
+				Files:        filesMap,
+				Retrying:     snapRetrying,
+				RetryAttempt: snapAttempt,
+				RetryMax:     snapMax,
+				RetryErr:     snapRetryErr,
 			}
 		}
 
@@ -230,6 +315,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 						status = JobCanceled
 					}
 				}
+				debugf("copy %s -> %s: finished, status=%v err=%v", fsrc.Root(), fdst.Root(), status, err)
 				emit(status, err)
 				return
 			case <-ticker.C:

@@ -189,7 +189,7 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 	}
 
 	dstObjs := make(map[string]fs.Object, len(listing.objects))
-	err = walk.ListR(ctx, fdst, "", false, -1, walk.ListAll, func(entries fs.DirEntries) error {
+	err = walk.ListR(ctx, fdst, "", false, -1, walk.ListObjects, func(entries fs.DirEntries) error {
 		for _, entry := range entries {
 			if o, ok := entry.(fs.Object); ok {
 				dstObjs[o.Remote()] = o
@@ -200,6 +200,7 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 	if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
 		return ScanResult{}, err
 	}
+	debugf("scan %s: walking %s against %s", label, joinSpec(dstRoot, relPath), fdst.Root())
 
 	var result ScanResult
 	var recent []ScanEntry
@@ -224,6 +225,9 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 	}
 
 	emit := func(currentDir, currentPath string, force bool) {
+		if currentPath != "" {
+			debugf("scan %s: checking %s", label, currentPath)
+		}
 		if progress == nil {
 			return
 		}
@@ -272,6 +276,7 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 		emit(parentDir(srcObj.Remote()), srcObj.Remote(), false)
 	}
 
+	debugf("scan %s: done, %d to copy, %d identical", label, result.CopyCount, result.SkipCount)
 	if progress != nil {
 		progress(ScanProgress{
 			Label:        label,
@@ -292,10 +297,8 @@ func scanOneObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.
 	relFile := srcObj.Remote()
 	action := ActionCopy
 
-	if dstObj, ok := dstObjs[relFile]; ok {
-		if operations.Equal(ctx, srcObj, dstObj) {
-			action = ActionSkipIdentical
-		}
+	if dstObj, ok := dstObjs[relFile]; ok && operations.Equal(ctx, srcObj, dstObj) {
+		action = ActionSkipIdentical
 	}
 
 	entry := ScanEntry{

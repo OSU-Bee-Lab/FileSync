@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/appconfig"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 //go:embed Icon.png
@@ -129,6 +130,9 @@ func Run() {
 		// re-saving from the Locations screen.
 		s.cfg = appconfig.Default()
 	}
+	syncengine.SetDebugLogging(s.cfg.DebugMode)
+	syncengine.SetCheckers(s.cfg.Checkers)
+	syncengine.SetBwLimitMiBPerSec(s.cfg.BwLimitMiBPerSec)
 
 	// Content must be set before Resize/CenterOnScreen - otherwise Fyne has
 	// no size hints yet and (at least on macOS with multiple displays) can
@@ -162,6 +166,7 @@ func showHome(s *state) {
 	syncRecordersBtn := widget.NewButton("Sync Recorders", func() { showSyncRecorders(s) })
 	syncRecordersBtn.Importance = widget.HighImportance
 	locationsBtn := widget.NewButton("Manage Locations", func() { showLocations(s) })
+	settingsBtn := widget.NewButton("Settings", func() { showSettings(s) })
 
 	if len(s.cfg.Locations) < 2 {
 		syncExperimentsBtn.Disable()
@@ -177,6 +182,7 @@ func showHome(s *state) {
 		syncExperimentsBtn,
 		pullFilesBtn,
 		locationsBtn,
+		settingsBtn,
 	)
 	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))
 }
