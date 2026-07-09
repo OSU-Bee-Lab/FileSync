@@ -48,14 +48,16 @@ const (
 )
 
 type fileUIState struct {
-	relPath   string
-	name      string
-	size      int64
-	bytesDone int64
-	done      bool
-	err       error
-	hasError  bool
-	action    syncengine.ScanAction
+	relPath        string
+	name           string
+	size           int64
+	bytesDone      int64
+	done           bool
+	err            error
+	hasError       bool
+	action         syncengine.ScanAction
+	dstSize        int64
+	conflictReason string
 }
 
 type folderUIState struct {
@@ -110,6 +112,10 @@ type barRow struct {
 	gray     bool    // render with a permanent grey wash (already-synced items)
 	refIdx   int     // index this row maps back to (folder rows only)
 	fade     float64 // 0 fully visible … 1 invisible (trailing rows of a capped list)
+	// conflictRelPath, when non-empty, marks this row as a scanned conflict
+	// the user can click to open the N-way resolver at (N-way sessions only,
+	// and only once the owning experiment's scan has completed).
+	conflictRelPath string
 }
 
 // isFullySkipped reports whether every file in the folder was already present
@@ -354,12 +360,14 @@ func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 		}
 
 		fileState := &fileUIState{
-			relPath:   entry.RelPath,
-			name:      path.Base(entry.RelPath),
-			size:      entry.Size,
-			bytesDone: bytesDone,
-			done:      done,
-			action:    entry.Action,
+			relPath:        entry.RelPath,
+			name:           path.Base(entry.RelPath),
+			size:           entry.Size,
+			bytesDone:      bytesDone,
+			done:           done,
+			action:         entry.Action,
+			dstSize:        entry.DstSize,
+			conflictReason: entry.ConflictReason,
 		}
 
 		exp.fileMap[entry.RelPath] = fileState
@@ -440,7 +448,31 @@ func sectionHeader(title string) fyne.CanvasObject {
 	return container.NewStack(bg, container.NewPadded(label))
 }
 
+// syncFlowExtras adapts showSyncFlow's two extra modes beyond the plain
+// pairwise scan-then-sync flow, both used by N-way sync (see
+// screen_sync_experiments.go):
+type syncFlowExtras struct {
+	// nway, when non-nil, marks this session as an N-way scan: conflict rows
+	// caption and click through to the resolver, and Sync is gated until
+	// every conflict carries an explicit resolution.
+	nway *nwayResolver
+	// onNWaySync replaces the built-in Sync behavior (pairwise conflict
+	// prompt + in-place copy run). The N-way session's tasks have no Start —
+	// applying resolutions and building the real transfer plan happens in
+	// this callback, which launches a fresh transfer session.
+	onNWaySync func()
+	// autoSync starts the copy run as soon as the scan phase completes
+	// cleanly. Used by the N-way transfer session, whose "scan" is an
+	// instant replay of an already-reviewed, already-confirmed plan — a
+	// second Sync press there would be pure ceremony.
+	autoSync bool
+}
+
 func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
+	showSyncFlowExtras(s, tasks, onBack, syncFlowExtras{})
+}
+
+func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFlowExtras) {
 	phase := phaseScanRunning
 	selectedExpIdx := -1
 	selectedFoldIdx := -1
@@ -596,6 +628,20 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					})
 					continue
 				}
+				if f.action == syncengine.ActionConflict {
+					summary := fmt.Sprintf("⚠ conflict — %s", f.conflictReason)
+					relPath := ""
+					if extras.nway != nil {
+						summary = extras.nway.rowSummary(exp.label, f.relPath, f.conflictReason)
+						relPath = f.relPath
+					}
+					unsynced = append(unsynced, barRow{
+						label:           f.name,
+						summary:         summary,
+						conflictRelPath: relPath,
+					})
+					continue
+				}
 				prog := 0.0
 				if isSyncing() && f.size > 0 {
 					prog = float64(f.bytesDone) / float64(f.size)
@@ -610,9 +656,12 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			}
 		} else {
 			for _, e := range tempEntriesForFolder(exp) {
-				if e.Action == syncengine.ActionSkipIdentical {
+				switch e.Action {
+				case syncengine.ActionSkipIdentical:
 					synced = append(synced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size), gray: true})
-				} else {
+				case syncengine.ActionConflict:
+					unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: fmt.Sprintf("⚠ conflict — %s", e.ConflictReason)})
+				default:
 					unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size)})
 				}
 			}
@@ -650,9 +699,19 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 				if filesTotal > 0 {
 					prog = float64(filesDone) / float64(filesTotal)
 				}
+				summary := fmt.Sprintf("%d / %d files", filesDone, filesTotal)
+				conflicts := 0
+				for _, f := range fold.files {
+					if f.action == syncengine.ActionConflict {
+						conflicts++
+					}
+				}
+				if conflicts > 0 {
+					summary = fmt.Sprintf("⚠ %d · %s", conflicts, summary)
+				}
 				unsynced = append(unsynced, barRow{
 					label:    fold.path,
-					summary:  fmt.Sprintf("%d / %d files", filesDone, filesTotal),
+					summary:  summary,
 					progress: prog,
 					hasError: fold.hasError,
 					isFolder: true,
@@ -661,10 +720,14 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			}
 		} else {
 			for i, row := range exp.tempFolders {
-				total := row.CopyCount + row.SkipCount
+				total := row.CopyCount + row.SkipCount + row.ConflictCount
+				summary := fmt.Sprintf("%d / %d files", row.SkipCount, total)
+				if row.ConflictCount > 0 {
+					summary = fmt.Sprintf("⚠ %d · %s", row.ConflictCount, summary)
+				}
 				unsynced = append(unsynced, barRow{
 					label:    row.Path,
-					summary:  fmt.Sprintf("%d / %d files", row.SkipCount, total),
+					summary:  summary,
 					isFolder: true,
 					refIdx:   i,
 				})
@@ -734,6 +797,23 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 	fileSyncedList := makeBarList(&fileSyncedRows, nil)
 	filesSplit, applyFilesMode := buildSplit(fileUnsyncedList, fileSyncedList)
 
+	if extras.nway != nil {
+		// Clicking a conflict row opens the resolver at that file (rows only
+		// carry conflictRelPath once their experiment's scan has completed).
+		fileUnsyncedList.OnSelected = func(id widget.ListItemID) {
+			defer fileUnsyncedList.UnselectAll()
+			if int(id) < 0 || int(id) >= len(fileUnsyncedRows) {
+				return
+			}
+			row := fileUnsyncedRows[id]
+			if row.conflictRelPath == "" || selectedExpIdx < 0 || selectedExpIdx >= len(expStates) {
+				return
+			}
+			key := nwayConflictKey{expName: expStates[selectedExpIdx].label, relPath: row.conflictRelPath}
+			showNWayResolveDialog(s, extras.nway, &key)
+		}
+	}
+
 	refreshFiles := func() {
 		fileUnsyncedRows, fileSyncedRows = computeFileRows()
 		applyFilesMode(len(fileUnsyncedRows) > 0, len(fileSyncedRows) > 0)
@@ -796,7 +876,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 		createColumn("Files", filesSplit),
 	)
 
-	var cancelBtn, backBtn, syncBtn, scanBtn *widget.Button
+	var cancelBtn, backBtn, syncBtn, scanBtn, resolveBtn *widget.Button
 
 	refreshUI := func() {
 		switch phase {
@@ -807,6 +887,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			overallBarInf.Start()
 			syncBtn.Hide()
 			scanBtn.Hide()
+			resolveBtn.Hide()
 			cancelBtn.Show()
 			cancelBtn.Enable()
 			backBtn.Disable()
@@ -832,6 +913,29 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			} else {
 				syncBtn.Disable()
 			}
+			resolveBtn.Hide()
+			if extras.nway != nil {
+				// Sync stays unreachable until every conflict carries an
+				// explicit resolution — there is deliberately no default.
+				unresolved := extras.nway.unresolvedCount()
+				switch {
+				case unresolved > 0:
+					titleLabel.SetText(fmt.Sprintf("Scan complete — %d conflict(s) to resolve", unresolved))
+					syncBtn.Hide()
+					resolveBtn.SetText(fmt.Sprintf("Resolve %d conflict(s)…", unresolved))
+					resolveBtn.Show()
+				case extras.nway.conflictCount() > 0:
+					resolveBtn.SetText("Review conflict resolutions")
+					resolveBtn.Show()
+					fallthrough
+				default:
+					// Overwrite/rename/delete resolutions are real work even
+					// when the scan itself found nothing to copy.
+					if extras.nway.hasActionable() {
+						syncBtn.Enable()
+					}
+				}
+			}
 			cancelBtn.Hide()
 			backBtn.Enable()
 		case phaseScanCancelled:
@@ -840,6 +944,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			overallBarInf.Hide()
 			overallBar.Hide()
 			syncBtn.Hide()
+			resolveBtn.Hide()
 			scanBtn.Show()
 			scanBtn.Enable()
 			cancelBtn.Hide()
@@ -850,6 +955,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			overallBar.Show()
 			scanBtn.Hide()
 			syncBtn.Hide()
+			resolveBtn.Hide()
 			cancelBtn.Show()
 			cancelBtn.Enable()
 			backBtn.Disable()
@@ -871,6 +977,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			overallBar.SetValue(1.0)
 			scanBtn.Hide()
 			syncBtn.Hide()
+			resolveBtn.Hide()
 			cancelBtn.Hide()
 			backBtn.SetText("Done")
 			backBtn.Enable()
@@ -881,6 +988,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 			scanBtn.Hide()
 			syncBtn.Show()
 			syncBtn.Enable()
+			resolveBtn.Hide()
 			cancelBtn.Hide()
 			backBtn.Enable()
 		}
@@ -890,6 +998,7 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 		var totalBytesDone, totalBytes int64
 		var copyFilesDone, copyFilesTotal int
 		var copyBytesDone, copyBytesTotal int64
+		var totalConflicts int
 
 		totalExps = len(expStates)
 		for _, e := range expStates {
@@ -906,40 +1015,60 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					copyFilesDone += fold.copyFilesDone
 					copyBytesTotal += fold.copyTotalBytes
 					copyBytesDone += fold.copyBytesDone
+					for _, file := range fold.files {
+						if file.action == syncengine.ActionConflict {
+							totalConflicts++
+						}
+					}
 				}
 			} else {
 				for _, row := range e.tempFolders {
-					totalFiles += row.CopyCount + row.SkipCount
+					totalFiles += row.CopyCount + row.SkipCount + row.ConflictCount
 					totalFilesDone += row.SkipCount
 					totalBytes += row.CopyBytes
 					copyFilesTotal += row.CopyCount
 					copyBytesTotal += row.CopyBytes
+					totalConflicts += row.ConflictCount
 				}
 			}
 		}
 
 		if phase == phaseScanRunning {
 			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
-			filesValue.SetText(fmt.Sprintf("%d", totalFiles))
+			// Conflicts surface the moment the scan finds them — a burst of
+			// conflicts mid-scan is exactly the "picked the wrong location /
+			// stale recorder files" signal the user needs before syncing.
+			if totalConflicts > 0 {
+				filesValue.SetText(fmt.Sprintf("%d (⚠ %d conflicts)", totalFiles, totalConflicts))
+			} else {
+				filesValue.SetText(fmt.Sprintf("%d", totalFiles))
+			}
 			bytesValue.SetText(humanBytes(totalBytes))
 		} else if phase == phaseScanComplete || phase == phaseScanCancelled {
 			expValue.SetText(fmt.Sprintf("%d", totalExps))
-			var copyFiles, skipFiles int
+			var copyFiles, skipFiles, conflictFiles int
 			var copyBytes, skipBytes int64
 			for _, e := range expStates {
 				for _, f := range e.folders {
 					for _, file := range f.files {
-						if file.action == syncengine.ActionCopy {
+						switch file.action {
+						case syncengine.ActionCopy:
 							copyFiles++
 							copyBytes += file.size
-						} else {
+						case syncengine.ActionConflict:
+							conflictFiles++
+						default:
 							skipFiles++
 							skipBytes += file.size
 						}
 					}
 				}
 			}
-			filesValue.SetText(fmt.Sprintf("%d unsynced / %d synced", copyFiles, skipFiles))
+			if conflictFiles > 0 {
+				filesValue.SetText(fmt.Sprintf("%d unsynced / %d synced / %d conflicts", copyFiles, skipFiles, conflictFiles))
+			} else {
+				filesValue.SetText(fmt.Sprintf("%d unsynced / %d synced", copyFiles, skipFiles))
+			}
 			bytesValue.SetText(fmt.Sprintf("%s unsynced / %s synced", humanBytes(copyBytes), humanBytes(skipBytes)))
 		} else {
 			expValue.SetText(fmt.Sprintf("%d / %d", totalExpsDone, totalExps))
@@ -1206,9 +1335,27 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 		}()
 	}
 
-	syncBtn = widget.NewButton("Sync", runSync)
+	syncBtn = widget.NewButton("Sync", func() {
+		if extras.onNWaySync != nil {
+			extras.onNWaySync()
+			return
+		}
+		if conflicts := collectConflicts(tasks, scanResults); len(conflicts) > 0 {
+			showConflictsPrompt(s, conflicts, runSync)
+			return
+		}
+		runSync()
+	})
 	syncBtn.Importance = widget.HighImportance
 	syncBtn.Hide()
+
+	resolveBtn = widget.NewButton("Resolve conflicts…", func() {
+		if extras.nway != nil {
+			showNWayResolveDialog(s, extras.nway, nil)
+		}
+	})
+	resolveBtn.Importance = widget.WarningImportance
+	resolveBtn.Hide()
 
 	scanBtn = widget.NewButton("Scan", nil) // OnTapped set after runScan is defined
 	scanBtn.Importance = widget.MediumImportance
@@ -1226,10 +1373,19 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 
 	content := container.NewBorder(
 		header,
-		container.NewHBox(cancelBtn, scanBtn, syncBtn, backBtn),
+		container.NewHBox(cancelBtn, scanBtn, resolveBtn, syncBtn, backBtn),
 		nil, nil,
 		columns,
 	)
+
+	if extras.nway != nil {
+		// Any resolution change re-captions conflict rows and re-evaluates
+		// the Resolve/Sync gate.
+		extras.nway.onChange = func() {
+			refreshFiles()
+			refreshUI()
+		}
+	}
 
 	s.setContent(container.NewPadded(content))
 
@@ -1350,6 +1506,18 @@ func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
 					phase = phaseScanComplete
 				}
 				refreshUI()
+
+				if extras.autoSync && phase == phaseScanComplete {
+					// Pre-confirmed plan (see syncFlowExtras.autoSync): start
+					// copying without a second Sync press — but only if every
+					// task's instant "scan" replay actually succeeded.
+					for _, e := range expStates {
+						if e.status != statusDone {
+							return
+						}
+					}
+					runSync()
+				}
 			})
 		}()
 	}

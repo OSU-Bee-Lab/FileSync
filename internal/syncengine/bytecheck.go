@@ -57,14 +57,18 @@ func readPrefix(ctx context.Context, obj fs.Object, n int64) ([]byte, error) {
 // rather than the app guessing. When one prefix read is shorter than the
 // other (a file smaller than prefixCheckBytes), only the shared length is
 // compared; a length difference alone is not evidence of different content.
-func compareObjects(ctx context.Context, srcObj, dstObj fs.Object) (ScanAction, error) {
+//
+// The returned reason string is empty unless the action is ActionConflict,
+// in which case it's a short human-readable explanation for display
+// (e.g. in a conflict-resolution prompt).
+func compareObjects(ctx context.Context, srcObj, dstObj fs.Object) (ScanAction, string, error) {
 	srcPrefix, err := readPrefix(ctx, srcObj, prefixCheckBytes)
 	if err != nil {
-		return ActionConflict, err
+		return ActionConflict, "", err
 	}
 	dstPrefix, err := readPrefix(ctx, dstObj, prefixCheckBytes)
 	if err != nil {
-		return ActionConflict, err
+		return ActionConflict, "", err
 	}
 
 	shared := len(srcPrefix)
@@ -72,9 +76,65 @@ func compareObjects(ctx context.Context, srcObj, dstObj fs.Object) (ScanAction, 
 		shared = len(dstPrefix)
 	}
 	prefixMatch := bytes.Equal(srcPrefix[:shared], dstPrefix[:shared])
+	sizeMatch := srcObj.Size() == dstObj.Size()
 
-	if srcObj.Size() == dstObj.Size() && prefixMatch {
-		return ActionSkipIdentical, nil
+	if sizeMatch && prefixMatch {
+		return ActionSkipIdentical, "", nil
 	}
-	return ActionConflict, nil
+
+	switch {
+	case !sizeMatch && prefixMatch:
+		return ActionConflict, "different size, same start (possible partial upload)", nil
+	case sizeMatch && !prefixMatch:
+		return ActionConflict, "same size, different content", nil
+	default:
+		return ActionConflict, "different size and content", nil
+	}
+}
+
+// compareObjectsN generalizes compareObjects to more than two present
+// copies of the same relative path (see nway.go): every present copy must
+// agree with every other on both size and leading bytes for the whole set
+// to count as identical. Comparisons are all made against objs[0] — since
+// equality is transitive for both a size check and a byte-equality check,
+// this is equivalent to checking every pair without the O(n^2) reads.
+func compareObjectsN(ctx context.Context, objs []fs.Object) (bool, string, error) {
+	if len(objs) < 2 {
+		return true, "", nil
+	}
+
+	prefixes := make([][]byte, len(objs))
+	for i, obj := range objs {
+		p, err := readPrefix(ctx, obj, prefixCheckBytes)
+		if err != nil {
+			return false, "", err
+		}
+		prefixes[i] = p
+	}
+
+	sizeMismatch := false
+	prefixMismatch := false
+	for i := 1; i < len(objs); i++ {
+		if objs[i].Size() != objs[0].Size() {
+			sizeMismatch = true
+		}
+		shared := len(prefixes[0])
+		if len(prefixes[i]) < shared {
+			shared = len(prefixes[i])
+		}
+		if !bytes.Equal(prefixes[0][:shared], prefixes[i][:shared]) {
+			prefixMismatch = true
+		}
+	}
+
+	switch {
+	case !sizeMismatch && !prefixMismatch:
+		return true, "", nil
+	case sizeMismatch && !prefixMismatch:
+		return false, "different size, same start (possible partial upload)", nil
+	case !sizeMismatch && prefixMismatch:
+		return false, "same size, different content", nil
+	default:
+		return false, "different size and content", nil
+	}
 }

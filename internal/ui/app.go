@@ -38,11 +38,12 @@ type state struct {
 	win fyne.Window
 	cfg appconfig.Config
 
-	// syncExperimentsSrcName and syncExperimentsDstNames cache the
-	// last-selected From/To locations on the Sync Experiments screen so
+	// syncExperimentsLocationNames and syncExperimentsExpNames cache the
+	// last-selected locations and experiments on the Sync Experiments
+	// screen (N-way: two or more locations, no designated source) so
 	// they're still populated if the user navigates away and back.
-	syncExperimentsSrcName  string
-	syncExperimentsDstNames []string
+	syncExperimentsLocationNames []string
+	syncExperimentsExpNames      []string
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to
