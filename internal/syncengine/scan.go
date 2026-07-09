@@ -9,7 +9,6 @@ import (
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
-	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/walk"
 )
 
@@ -19,6 +18,10 @@ type ScanAction int
 const (
 	ActionCopy ScanAction = iota
 	ActionSkipIdentical
+	// ActionConflict is a colliding file whose size and/or leading bytes
+	// don't both match — see compareObjects. Never auto-copied or
+	// auto-skipped; needs user resolution.
+	ActionConflict
 )
 
 // ScanEntry is one file a scan inspected.
@@ -30,33 +33,36 @@ type ScanEntry struct {
 
 // ScanResult summarizes a scan: what a real copy would transfer.
 type ScanResult struct {
-	Entries    []ScanEntry
-	TotalBytes int64
-	CopyCount  int
-	SkipCount  int
+	Entries       []ScanEntry
+	TotalBytes    int64
+	CopyCount     int
+	SkipCount     int
+	ConflictCount int
 }
 
 // ScanDirProgress summarizes one directory seen during a scan.
 type ScanDirProgress struct {
-	Path       string
-	Files      int
-	CopyCount  int
-	SkipCount  int
-	CopyBytes  int64
-	UpdatedSeq int
+	Path          string
+	Files         int
+	CopyCount     int
+	SkipCount     int
+	ConflictCount int
+	CopyBytes     int64
+	UpdatedSeq    int
 }
 
 // ScanProgress is a lightweight live snapshot emitted while a scan is
 // walking and comparing files.
 type ScanProgress struct {
-	Label        string
-	CurrentDir   string
-	CurrentPath  string
-	FilesScanned int
-	DirsSeen     int
-	CopyCount    int
-	SkipCount    int
-	TotalBytes   int64
+	Label         string
+	CurrentDir    string
+	CurrentPath   string
+	FilesScanned  int
+	DirsSeen      int
+	CopyCount     int
+	SkipCount     int
+	ConflictCount int
+	TotalBytes    int64
 	// Recent is every entry inspected so far this scan (not just the
 	// last few), so the UI can render the full per-folder file list live.
 	Recent []ScanEntry
@@ -238,16 +244,17 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 		lastEmit = now
 		recentCopy := append([]ScanEntry(nil), recent...)
 		progress(ScanProgress{
-			Label:        label,
-			CurrentDir:   displayDir(currentDir),
-			CurrentPath:  currentPath,
-			FilesScanned: result.CopyCount + result.SkipCount,
-			DirsSeen:     dirsSeen,
-			CopyCount:    result.CopyCount,
-			SkipCount:    result.SkipCount,
-			TotalBytes:   result.TotalBytes,
-			Recent:       recentCopy,
-			Dirs:         snapshotDirs(),
+			Label:         label,
+			CurrentDir:    displayDir(currentDir),
+			CurrentPath:   currentPath,
+			FilesScanned:  result.CopyCount + result.SkipCount + result.ConflictCount,
+			DirsSeen:      dirsSeen,
+			CopyCount:     result.CopyCount,
+			SkipCount:     result.SkipCount,
+			ConflictCount: result.ConflictCount,
+			TotalBytes:    result.TotalBytes,
+			Recent:        recentCopy,
+			Dirs:          snapshotDirs(),
 		})
 	}
 
@@ -272,33 +279,44 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 		if err := ctx.Err(); err != nil {
 			return ScanResult{}, err
 		}
-		scanOneObject(ctx, dstObjs, srcObj, &result, &recent, ensureDir, &updateSeq)
+		if err := scanOneObject(ctx, dstObjs, srcObj, &result, &recent, ensureDir, &updateSeq); err != nil {
+			return ScanResult{}, err
+		}
 		emit(parentDir(srcObj.Remote()), srcObj.Remote(), false)
 	}
 
-	debugf("scan %s: done, %d to copy, %d identical", label, result.CopyCount, result.SkipCount)
+	debugf("scan %s: done, %d to copy, %d identical, %d conflicts", label, result.CopyCount, result.SkipCount, result.ConflictCount)
 	if progress != nil {
 		progress(ScanProgress{
-			Label:        label,
-			FilesScanned: result.CopyCount + result.SkipCount,
-			DirsSeen:     dirsSeen,
-			CopyCount:    result.CopyCount,
-			SkipCount:    result.SkipCount,
-			TotalBytes:   result.TotalBytes,
-			Recent:       append([]ScanEntry(nil), recent...),
-			Dirs:         snapshotDirs(),
-			Done:         true,
+			Label:         label,
+			FilesScanned:  result.CopyCount + result.SkipCount + result.ConflictCount,
+			DirsSeen:      dirsSeen,
+			CopyCount:     result.CopyCount,
+			SkipCount:     result.SkipCount,
+			ConflictCount: result.ConflictCount,
+			TotalBytes:    result.TotalBytes,
+			Recent:        append([]ScanEntry(nil), recent...),
+			Dirs:          snapshotDirs(),
+			Done:          true,
 		})
 	}
 	return result, nil
 }
 
-func scanOneObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) {
+// scanOneObject decides what a copy would do with srcObj: copy it fresh, skip
+// it as identical, or flag it as a conflict needing user resolution. See
+// compareObjects for the size+prefix comparison used when a same-path file
+// already exists at the destination.
+func scanOneObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.Object, result *ScanResult, recent *[]ScanEntry, ensureDir func(string) *ScanDirProgress, updateSeq *int) error {
 	relFile := srcObj.Remote()
 	action := ActionCopy
 
-	if dstObj, ok := dstObjs[relFile]; ok && operations.Equal(ctx, srcObj, dstObj) {
-		action = ActionSkipIdentical
+	if dstObj, ok := dstObjs[relFile]; ok {
+		a, err := compareObjects(ctx, srcObj, dstObj)
+		if err != nil {
+			return err
+		}
+		action = a
 	}
 
 	entry := ScanEntry{
@@ -313,15 +331,20 @@ func scanOneObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.
 	dir := ensureDir(parentDir(relFile))
 	dir.Files++
 	dir.UpdatedSeq = *updateSeq
-	if action == ActionCopy {
+	switch action {
+	case ActionCopy:
 		result.CopyCount++
 		result.TotalBytes += srcObj.Size()
 		dir.CopyCount++
 		dir.CopyBytes += srcObj.Size()
-	} else {
+	case ActionSkipIdentical:
 		result.SkipCount++
 		dir.SkipCount++
+	case ActionConflict:
+		result.ConflictCount++
+		dir.ConflictCount++
 	}
+	return nil
 }
 
 func parentDir(remote string) string {
