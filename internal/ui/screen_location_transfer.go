@@ -11,14 +11,11 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
-// backendDisplayNames mirrors kindBackends in reverse, for messaging the
-// user about which service they're about to be sent to sign in to.
-var backendDisplayNames = map[syncengine.BackendType]string{
-	syncengine.BackendOneDrive: "SharePoint / OneDrive",
-	syncengine.BackendDrive:    "Google Drive",
-	syncengine.BackendDropbox:  "Dropbox",
-	syncengine.BackendS3:       "S3-compatible storage",
-}
+// backendDisplayNames maps a backend to the name used when messaging the
+// user about which service they're about to be sent to sign in to. Derived
+// from remoteBackendKinds (see remote_backend_kinds.go), the single source
+// of truth for backend<->label mapping shared with screen_remote_wizard.go.
+var backendDisplayNames = backendSignInNames()
 
 // exportLocation writes loc's non-secret remote settings to a file the user
 // picks, so another collaborator can import it and stand up the same

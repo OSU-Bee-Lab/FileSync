@@ -16,20 +16,11 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
-var kindLabels = []string{
-	"Local folder",
-	"SharePoint / OneDrive",
-	"Google Drive",
-	"Dropbox",
-	"S3-compatible",
-}
-
-var kindBackends = map[string]syncengine.BackendType{
-	"SharePoint / OneDrive": syncengine.BackendOneDrive,
-	"Google Drive":          syncengine.BackendDrive,
-	"Dropbox":               syncengine.BackendDropbox,
-	"S3-compatible":         syncengine.BackendS3,
-}
+// kindLabels and kindBackends are derived from remoteBackendKinds (see
+// remote_backend_kinds.go), the single source of truth for backend<->label
+// mapping shared with screen_location_transfer.go.
+var kindLabels = remoteKindLabels()
+var kindBackends = remoteKindByLabel()
 
 // oauthBackends need a browser sign-in during CreateRemote, so their wizard
 // button reads "Authorize" rather than "Save" - clicking it doesn't just
@@ -69,9 +60,6 @@ func showAddLocation(s *state) {
 	})
 
 	// --- remote backend state ---
-	remotePathEntry := widget.NewEntry()
-	remotePathEntry.SetPlaceHolder("Path within the remote, e.g. \"Bee Lab Docs\" (leave blank for root)")
-
 	// remoteReady tracks whether the rclone remote backing this new location
 	// has already been created and authorized this session, so "Browse" and
 	// "Save" don't each trigger a separate sign-in.
@@ -83,23 +71,17 @@ func showAddLocation(s *state) {
 	// the remote) before the location is saved.
 	var capturedDrives []syncengine.DriveInfo
 	var driveConfirmed bool
-	// Assigned once ensureRemote exists (below); referenced by rebuild, which
-	// only runs it at click time, so the nil gap during setup is harmless.
-	var browseRemoteBtn *widget.Button
 
 	siteURLEntry := widget.NewEntry()
 	siteURLEntry.SetPlaceHolder("e.g. https://contoso.sharepoint.com/sites/mysite (leave blank for personal/business OneDrive)")
 
-	// fieldWidgets holds either a *widget.Entry or *widget.Select per key,
-	// so Save can read whichever one rebuildFields chose to render.
-	fieldWidgets := map[string]fyne.CanvasObject{}
-	remoteFieldsBox := container.NewVBox()
-	advancedFieldsBox := container.NewVBox()
-	advancedAccordion := widget.NewAccordion(widget.NewAccordionItem("Advanced options", advancedFieldsBox))
-
-	rebuildFields := func(bt syncengine.BackendType) {
-		populateRemoteFields(s, bt, nil, remoteFieldsBox, advancedFieldsBox, fieldWidgets)
-	}
+	// form is the shared "Path within remote" + per-backend fields scaffold
+	// (see remote_fields_form.go). It's built once here (seeded with the
+	// first remote kind) and updated in place via setBackend as the kind
+	// picker changes, so form.pathEntry keeps whatever path the user already
+	// typed across a kind switch, same as the old single remotePathEntry did.
+	form := newRemoteFieldsForm(s, kindBackends[kindLabels[1]], nil)
+	form.pathEntry.SetPlaceHolder("Path within the remote, e.g. \"Bee Lab Docs\" (leave blank for root)")
 
 	saveBtn := widget.NewButton("Save", nil)
 
@@ -115,19 +97,13 @@ func showAddLocation(s *state) {
 			// "Next" authorizes then opens the browser to pick the exact
 			// document library and folder - there's no path to type here.
 			dynamicArea.Add(widget.NewForm(&widget.FormItem{Text: "SharePoint site URL", Widget: siteURLEntry}))
-			dynamicArea.Add(remoteFieldsBox)
-			rebuildFields(kindBackends[kind])
-			if len(advancedFieldsBox.Objects) > 0 {
-				dynamicArea.Add(advancedAccordion)
-			}
+			form.setBackend(s, kindBackends[kind])
+			dynamicArea.Add(form.container)
 			saveBtn.SetText("Next")
 		} else {
-			dynamicArea.Add(widget.NewForm(&widget.FormItem{Text: "Path within remote", Widget: container.NewBorder(nil, nil, nil, browseRemoteBtn, remotePathEntry)}))
-			dynamicArea.Add(remoteFieldsBox)
-			rebuildFields(kindBackends[kind])
-			if len(advancedFieldsBox.Objects) > 0 {
-				dynamicArea.Add(advancedAccordion)
-			}
+			form.setBackend(s, kindBackends[kind])
+			dynamicArea.Add(form.pathRow())
+			dynamicArea.Add(form.container)
 			if oauthBackends[kindBackends[kind]] {
 				saveBtn.SetText("Authorize")
 			} else {
@@ -146,8 +122,7 @@ func showAddLocation(s *state) {
 	// once created, later calls reuse it instead of re-signing-in. onReady
 	// runs on the UI goroutine once the remote is ready.
 	ensureRemote := func(onReady func()) {
-		if strings.TrimSpace(nameEntry.Text) == "" {
-			dialog.ShowInformation("Name required", "Give this location a name first.", s.win)
+		if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
 			return
 		}
 		if remoteReady {
@@ -155,10 +130,12 @@ func showAddLocation(s *state) {
 			return
 		}
 		bt := kindBackends[kindSelect.Selected]
-		fields := map[string]string{}
-		for k, w := range fieldWidgets {
-			fields[k] = fieldText(w)
+		specs, err := syncengine.FieldsFor(bt)
+		if err != nil {
+			dialog.ShowError(err, s.win)
+			return
 		}
+		fields, _ := form.readFields(specs)
 		if bt == syncengine.BackendOneDrive {
 			// A pasted library URL may carry a folder; only the clean site URL
 			// steers rclone. The folder is handled separately (see Next).
@@ -221,26 +198,24 @@ func showAddLocation(s *state) {
 					}
 					driveConfirmed = true
 				}
-				remotePathEntry.SetText(relPath)
+				form.pathEntry.SetText(relPath)
 				if then != nil {
 					then()
 				}
 			})
 	}
 
-	browseRemoteBtn = widget.NewButton("Browse...", func() {
-		ensureRemote(func() { openBrowser(strings.TrimSpace(remotePathEntry.Text), nil) })
-	})
+	form.browseBtn.OnTapped = func() {
+		ensureRemote(func() { openBrowser(strings.TrimSpace(form.pathEntry.Text), nil) })
+	}
 
 	saveBtn.OnTapped = func() {
-		name := strings.TrimSpace(nameEntry.Text)
-		if name == "" {
-			dialog.ShowInformation("Name required", "Give this location a name first.", s.win)
+		if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
 			return
 		}
+		name := strings.TrimSpace(nameEntry.Text)
 		if kindSelect.Selected == kindLabels[0] {
-			if localPath == "" {
-				dialog.ShowInformation("Folder required", "Choose a local folder first.", s.win)
+			if !requireNonEmpty(s.win, localPath, "Folder required", "Choose a local folder first.") {
 				return
 			}
 			s.cfg.Locations = append(s.cfg.Locations, syncengine.Location{
@@ -262,7 +237,7 @@ func showAddLocation(s *state) {
 					Name:       strings.TrimSpace(nameEntry.Text),
 					Kind:       syncengine.LocationRemote,
 					RemoteName: createdRemoteName,
-					RootPath:   strings.TrimSpace(remotePathEntry.Text),
+					RootPath:   strings.TrimSpace(form.pathEntry.Text),
 				})
 				s.saveConfig()
 				showLocations(s)
@@ -278,7 +253,7 @@ func showAddLocation(s *state) {
 			// Other remotes: if several drives were offered and none picked,
 			// browse to one first; otherwise save straight away.
 			if !driveConfirmed && len(capturedDrives) > 1 {
-				openBrowser(strings.TrimSpace(remotePathEntry.Text), finalize)
+				openBrowser(strings.TrimSpace(form.pathEntry.Text), finalize)
 				return
 			}
 			finalize()
@@ -286,7 +261,7 @@ func showAddLocation(s *state) {
 	}
 	saveBtn.Importance = widget.HighImportance
 
-	form := container.NewVBox(
+	layout := container.NewVBox(
 		widget.NewForm(&widget.FormItem{Text: "Name", Widget: nameEntry}),
 		widget.NewForm(&widget.FormItem{Text: "Type", Widget: kindSelect}),
 		dynamicArea,
@@ -297,21 +272,9 @@ func showAddLocation(s *state) {
 		widget.NewLabelWithStyle("Add Location", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewHBox(saveBtn, backBtn),
 		nil, nil,
-		container.NewVScroll(form),
+		container.NewVScroll(layout),
 	)
 	s.setContent(container.NewPadded(content))
-}
-
-// fieldText reads back whichever widget type populateRemoteFields chose to
-// render for a given FieldSpec.
-func fieldText(w fyne.CanvasObject) string {
-	switch e := w.(type) {
-	case *widget.Entry:
-		return e.Text
-	case *widget.Select:
-		return e.Selected
-	}
-	return ""
 }
 
 // populateRemoteFields renders the FieldSpecs for bt into remoteFieldsBox /
@@ -320,8 +283,9 @@ func fieldText(w fyne.CanvasObject) string {
 // fieldText. prefill overrides a field's rclone-reported default when
 // present - used by the edit screen to show a remote's current values;
 // showAddLocation passes nil so every field starts at its backend default.
-// Shared between showAddLocation and showEditLocation so the two forms
-// never drift apart in how they build backend-specific fields.
+// Shared between showAddLocation and showEditLocation (via remoteFieldsForm,
+// see remote_fields_form.go) so the two forms never drift apart in how they
+// build backend-specific fields.
 func populateRemoteFields(s *state, bt syncengine.BackendType, prefill map[string]string, remoteFieldsBox, advancedFieldsBox *fyne.Container, fieldWidgets map[string]fyne.CanvasObject) {
 	remoteFieldsBox.Objects = nil
 	advancedFieldsBox.Objects = nil

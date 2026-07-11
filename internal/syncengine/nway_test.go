@@ -2,6 +2,7 @@ package syncengine
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -457,5 +458,53 @@ func TestScanNWayWithProgress_EmitsLiveEntriesAndDone(t *testing.T) {
 	}
 	if !foundDir {
 		t.Error("final Dirs missing the r directory")
+	}
+}
+
+// TestScanNWayWithProgress_EmptyDirectoryStillAppears is a regression test
+// for diffNWay silently dropping directories that hold no files needing
+// classification (an empty directory, or here one whose only file is
+// filtered out) from the live scan UI. The pairwise scan
+// (scanAgainstDest) pre-registers every source directory upfront via
+// tracker.noteDir before classifying any file; diffNWay must do the same
+// (across the union of every location's directory listing) so empty
+// directories show up immediately instead of never appearing at all.
+func TestScanNWayWithProgress_EmptyDirectoryStillAppears(t *testing.T) {
+	rootA, rootB := t.TempDir(), t.TempDir()
+	const exp = "exp"
+	writeFile(t, filepath.Join(rootA, exp, "r/f.mp3"), "bytes")
+	writeFile(t, filepath.Join(rootB, exp, "r/f.mp3"), "bytes")
+	// An empty subdirectory, present only at rootA, with no files at all -
+	// there is no ScanEntry that would ever cause tracker.ensureDir to be
+	// called for it via addEntry.
+	if err := os.MkdirAll(filepath.Join(rootA, exp, "r", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	locs := []Location{
+		{ID: "a", Name: "a", Kind: LocationLocal, RootPath: rootA},
+		{ID: "b", Name: "b", Kind: LocationLocal, RootPath: rootB},
+	}
+
+	var snaps []ScanProgress
+	_, err := ScanNWayWithProgress(context.Background(), locs, exp, DefaultFilterSettings(), func(p ScanProgress) {
+		snaps = append(snaps, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) == 0 {
+		t.Fatal("no progress snapshots emitted")
+	}
+
+	final := snaps[len(snaps)-1]
+	found := false
+	for _, d := range final.Dirs {
+		if d.Path == "r/empty" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("final Dirs missing the empty r/empty directory (dirs: %v)", final.Dirs)
 	}
 }

@@ -53,13 +53,11 @@ func showEditLocation(s *state, id int) {
 		})
 
 		saveBtn.OnTapped = func() {
-			name := strings.TrimSpace(nameEntry.Text)
-			if name == "" {
-				dialog.ShowInformation("Name required", "Give this location a name first.", s.win)
+			if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
 				return
 			}
-			if localPath == "" {
-				dialog.ShowInformation("Folder required", "Choose a local folder first.", s.win)
+			name := strings.TrimSpace(nameEntry.Text)
+			if !requireNonEmpty(s.win, localPath, "Folder required", "Choose a local folder first.") {
 				return
 			}
 			s.cfg.Locations[id].Name = name
@@ -80,57 +78,35 @@ func showEditLocation(s *state, id int) {
 			return
 		}
 
-		remotePathEntry := widget.NewEntry()
-		remotePathEntry.SetPlaceHolder("Path within remote (blank = root)")
-		remotePathEntry.SetText(loc.RootPath)
-		browseRemoteBtn := widget.NewButton("Browse...", func() {
-			browseRemoteSetup(s, loc.RemoteName, strings.TrimSpace(remotePathEntry.Text), nil, func(_ syncengine.DriveInfo, relPath string) {
-				remotePathEntry.SetText(relPath)
+		// form is the shared "Path within remote" + per-backend fields
+		// scaffold (see remote_fields_form.go), prefilled with the remote's
+		// current settings so readFields can tell an actual change from a
+		// pure rename.
+		form := newRemoteFieldsForm(s, bt, currentFields)
+		form.pathEntry.SetPlaceHolder("Path within remote (blank = root)")
+		form.pathEntry.SetText(loc.RootPath)
+		form.browseBtn.OnTapped = func() {
+			browseRemoteSetup(s, loc.RemoteName, strings.TrimSpace(form.pathEntry.Text), nil, func(_ syncengine.DriveInfo, relPath string) {
+				form.pathEntry.SetText(relPath)
 			})
-		})
-
-		fieldWidgets := map[string]fyne.CanvasObject{}
-		remoteFieldsBox := container.NewVBox()
-		advancedFieldsBox := container.NewVBox()
-		advancedAccordion := widget.NewAccordion(widget.NewAccordionItem("Advanced options", advancedFieldsBox))
-		populateRemoteFields(s, bt, currentFields, remoteFieldsBox, advancedFieldsBox, fieldWidgets)
+		}
 
 		if oauthBackends[bt] {
 			showReauth = true
 		}
 
 		saveBtn.OnTapped = func() {
-			name := strings.TrimSpace(nameEntry.Text)
-			if name == "" {
-				dialog.ShowInformation("Name required", "Give this location a name first.", s.win)
+			if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
 				return
 			}
+			name := strings.TrimSpace(nameEntry.Text)
 
 			specs, err := syncengine.FieldsFor(bt)
 			if err != nil {
 				dialog.ShowError(err, s.win)
 				return
 			}
-			fields := map[string]string{}
-			changed := false
-			for _, f := range specs {
-				w, ok := fieldWidgets[f.Key]
-				if !ok {
-					continue
-				}
-				v := fieldText(w)
-				if f.IsSecret && v == "" {
-					// Blank means "leave the existing credential alone" -
-					// UpdateRemote only touches keys present in the map.
-					continue
-				}
-				fields[f.Key] = v
-				if f.IsSecret || currentFields[f.Key] != v {
-					// A typed secret is always a change (there's nothing to
-					// compare it to - currentFields never holds secrets).
-					changed = true
-				}
-			}
+			fields, changed := form.readFields(specs)
 
 			if !changed {
 				// No backend settings actually changed, so there's no reason
@@ -138,7 +114,7 @@ func showEditLocation(s *state, id int) {
 				// save (even a pure rename) would force a needless browser
 				// round-trip.
 				s.cfg.Locations[id].Name = name
-				s.cfg.Locations[id].RootPath = strings.TrimSpace(remotePathEntry.Text)
+				s.cfg.Locations[id].RootPath = strings.TrimSpace(form.pathEntry.Text)
 				s.saveConfig()
 				showLocations(s)
 				return
@@ -155,19 +131,16 @@ func showEditLocation(s *state, id int) {
 					return
 				}
 				s.cfg.Locations[id].Name = name
-				s.cfg.Locations[id].RootPath = strings.TrimSpace(remotePathEntry.Text)
+				s.cfg.Locations[id].RootPath = strings.TrimSpace(form.pathEntry.Text)
 				s.saveConfig()
 				showLocations(s)
 			})
 		}
 
 		fieldsArea := container.NewVBox(
-			widget.NewForm(&widget.FormItem{Text: "Path within remote", Widget: container.NewBorder(nil, nil, nil, browseRemoteBtn, remotePathEntry)}),
-			remoteFieldsBox,
+			form.pathRow(),
+			form.container,
 		)
-		if len(advancedFieldsBox.Objects) > 0 {
-			fieldsArea.Add(advancedAccordion)
-		}
 		body = container.NewVBox(
 			widget.NewForm(&widget.FormItem{Text: "Name", Widget: nameEntry}),
 			fieldsArea,

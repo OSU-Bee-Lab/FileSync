@@ -3,15 +3,31 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
+
+// requireNonEmpty shows an info dialog and returns false when value is
+// blank (after trimming) - shared by the "Name required" / "Folder
+// required" guards in the remote-setup wizard and edit-location screens.
+// Takes a plain string rather than a *widget.Entry since not every check is
+// entry-backed (a chosen local folder path is a bare string, not text
+// typed into an Entry).
+func requireNonEmpty(win fyne.Window, value, title, msg string) bool {
+	if strings.TrimSpace(value) == "" {
+		dialog.ShowInformation(title, msg, win)
+		return false
+	}
+	return true
+}
 
 func humanBytes(n int64) string {
 	const unit = 1024
@@ -74,6 +90,49 @@ func findLocationByID(locs []syncengine.Location, id string) *syncengine.Locatio
 		}
 	}
 	return nil
+}
+
+// containsLocation reports whether loc appears in locs, by ID.
+func containsLocation(locs []syncengine.Location, loc syncengine.Location) bool {
+	for _, l := range locs {
+		if l.ID == loc.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// selectedFromIDs converts a set of persisted Location IDs into the
+// matching Location Names, for pre-populating a toggleGroup's selection
+// from RecorderSettings.
+func selectedFromIDs(locs []syncengine.Location, ids []string) []string {
+	var out []string
+	for _, id := range ids {
+		if loc := findLocationByID(locs, id); loc != nil {
+			out = append(out, loc.Name)
+		}
+	}
+	return out
+}
+
+// locationsFromNames resolves a CheckGroup's selected Names back into
+// Locations of the given kind.
+func locationsFromNames(locs []syncengine.Location, names []string, kind syncengine.LocationKind) []syncengine.Location {
+	var out []syncengine.Location
+	for _, name := range names {
+		if loc := findLocation(locs, name); loc != nil && loc.Kind == kind {
+			out = append(out, *loc)
+		}
+	}
+	return out
+}
+
+func idsFromLocations(locs []syncengine.Location) []string {
+	ids := make([]string, len(locs))
+	for i, l := range locs {
+		ids[i] = l.ID
+	}
+	return ids
 }
 
 // joinRel joins a browsing breadcrumb path with a child name, both always

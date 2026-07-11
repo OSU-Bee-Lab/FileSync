@@ -1,6 +1,7 @@
 package appconfig
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -67,7 +68,10 @@ func TestPathIsUnderFileSyncSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := path; len(got) == 0 {
-		t.Fatal("expected a non-empty path")
+	if filepath.Base(path) != "config.json" {
+		t.Fatalf("Path() = %q, want basename config.json", path)
+	}
+	if filepath.Base(filepath.Dir(path)) != "FileSync" {
+		t.Fatalf("Path() = %q, want parent dir FileSync", path)
 	}
 }

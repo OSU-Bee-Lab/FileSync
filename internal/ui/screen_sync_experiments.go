@@ -188,7 +188,6 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 
 	tasks := make([]scanTask, len(expNames))
 	for i, name := range expNames {
-		i, name := i, name
 		tasks[i] = scanTask{
 			Label: name,
 			Locs:  locs,
@@ -232,10 +231,8 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult) {
 	var tasks []scanTask
 	for i, name := range expNames {
-		name := name
 		pairs := syncengine.BuildNWayTransferPlan(results[i], syncengine.PreferLocalSource)
 		for _, pair := range pairs {
-			pair := pair
 			result := syncengine.ScanResultFromNWayTransfers(pair)
 			tasks = append(tasks, scanTask{
 				Label: fmt.Sprintf("%s: %s → %s", name, pair.Source.Name, pair.Dest.Name),

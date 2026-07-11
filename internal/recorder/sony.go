@@ -96,16 +96,7 @@ func (d SonyICDPX370) SourceFiles(v Volume) ([]SourceFile, error) {
 // own layout, matching filesync's list_files_relative.
 func walkRelative(dir string) ([]SourceFile, error) {
 	var files []SourceFile
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if info != nil && info.IsDir() && isHiddenEntry(info.Name()) {
-			return filepath.SkipDir
-		}
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
+	err := walkFiles(dir, func(path string, info os.FileInfo) error {
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err

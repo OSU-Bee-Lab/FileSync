@@ -52,16 +52,7 @@ func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {
 	var files []SourceFile
 	used := make(map[string]bool)
 
-	err := filepath.Walk(v.MountPoint, func(path string, info os.FileInfo, err error) error {
-		if info != nil && info.IsDir() && isHiddenEntry(info.Name()) {
-			return filepath.SkipDir
-		}
-		if err != nil {
-			return err
-		}
-		if info.IsDir() {
-			return nil
-		}
+	err := walkFiles(v.MountPoint, func(path string, info os.FileInfo) error {
 		if !strings.EqualFold(filepath.Ext(info.Name()), ".wma") {
 			return nil
 		}

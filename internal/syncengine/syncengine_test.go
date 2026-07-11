@@ -34,6 +34,24 @@ func seedExperiment(t *testing.T, root, name string) {
 	writeFile(t, filepath.Join(base, "2026-06-23", "RecorderA", "260623_0905.wav"), "not-mp3-should-be-filtered")
 }
 
+// mkEmptyExperimentDir pre-creates an empty experiment directory at a
+// destination root that otherwise has nothing synced to it yet. ScanNWay (via
+// listSource) errors on a genuinely nonexistent path — see
+// TestScanNWay_ListingErrorPropagates, which relies on exactly that so a
+// truly unreachable location's listing failure isn't silently misread as
+// "has none of the files" — so a brand-new local destination needs its
+// experiment directory to exist (even empty) before an N-way scan can list
+// it. The old pairwise scanAgainstDest tolerated this case itself (see its
+// fs.ErrorDirNotFound check); working around it here in the test setup
+// avoids relying on that now-unused behavior while keeping these tests'
+// original "everything is missing at a fresh destination" coverage intact.
+func mkEmptyExperimentDir(t *testing.T, root, name string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, name), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func localLoc(root string) Location {
 	return Location{ID: root, Name: root, Kind: LocationLocal, RootPath: root}
 }
@@ -112,27 +130,45 @@ func TestListChildren_AtEachDepth(t *testing.T) {
 	}
 }
 
+// scanAndCopyNWay runs the same N-way scan -> build transfer plan -> copy
+// pipeline screen_sync_experiments.go's runNWayScan/runNWayTransfers drive in
+// production (ScanNWay, then BuildNWayTransferPlan with PreferLocalSource,
+// then one StartSyncExperiments per (source, dest) pair via
+// ScanResultFromNWayTransfers), draining every resulting copy job to
+// completion. It's the live entry point that superseded the old
+// ScanSyncExperiments/StartSyncExperiments-only pairwise path this package's
+// tests used to exercise directly.
+func scanAndCopyNWay(t *testing.T, ctx context.Context, locs []Location, name string, fset FilterSettings) (NWayScanResult, ScanResult) {
+	t.Helper()
+	result, err := ScanNWay(ctx, locs, name, fset)
+	if err != nil {
+		t.Fatal(err)
+	}
+	display := NWayDisplayScanResult(result)
+
+	for _, pair := range BuildNWayTransferPlan(result, PreferLocalSource) {
+		expected := ScanResultFromNWayTransfers(pair)
+		_, progress := StartSyncExperiments(ctx, pair.Source, pair.Dest, name, expected)
+		final := drain(t, progress)
+		if final.Status != JobDone {
+			t.Fatalf("copy %s -> %s: final status = %v, want JobDone (err=%v)", pair.Source.Name, pair.Dest.Name, final.Status, final.Err)
+		}
+	}
+	return result, display
+}
+
 func TestScanAndStartSyncExperiments_WholeExperiment(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
 	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	mkEmptyExperimentDir(t, dstRoot, "Luke - Zucchini")
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	scan, err := ScanSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset)
-	if err != nil {
-		t.Fatal(err)
+	_, display := scanAndCopyNWay(t, ctx, []Location{src, dst}, "Luke - Zucchini", fset)
+	if display.CopyCount != 5 {
+		t.Fatalf("scan.CopyCount = %d, want 5", display.CopyCount)
 	}
-	if scan.CopyCount != 5 {
-		t.Fatalf("scan.CopyCount = %d, want 5", scan.CopyCount)
-	}
-
-	job, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
-	final := drain(t, progress)
-	if final.Status != JobDone {
-		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
-	}
-	_ = job
 
 	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0900.mp3"))
 	assertFileExists(t, filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.mp3"))
@@ -155,7 +191,7 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 	fset := DefaultFilterSettings()
 	relPath := "Luke - Zucchini/2026-06-23"
 
-	scan, err := ScanPullFiles(ctx, src, relPath, destFolder, fset)
+	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, destFolder, fset, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,15 +226,7 @@ func TestCopyPreserving_NeverDeletesDestinationOnlyFiles(t *testing.T) {
 	extraFile := filepath.Join(dstRoot, "Luke - Zucchini", "2026-06-23", "RecorderA", "extra_not_in_source.mp3")
 	writeFile(t, extraFile, "must survive the copy")
 
-	scan, err := ScanSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
-	final := drain(t, progress)
-	if final.Status != JobDone {
-		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
-	}
+	scanAndCopyNWay(t, ctx, []Location{src, dst}, "Luke - Zucchini", fset)
 
 	assertFileExists(t, extraFile)
 }
@@ -207,6 +235,7 @@ func TestExperimentNameWithSpecialCharacters(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
 	name := "O'Brien - Test #1 (draft)"
 	seedExperiment(t, srcRoot, name)
+	mkEmptyExperimentDir(t, dstRoot, name)
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
@@ -219,17 +248,9 @@ func TestExperimentNameWithSpecialCharacters(t *testing.T) {
 		t.Fatalf("ListExperiments = %v, want [%q]", exps, name)
 	}
 
-	scan, err := ScanSyncExperiments(ctx, src, dst, name, fset)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if scan.CopyCount != 5 {
-		t.Fatalf("scan.CopyCount = %d, want 5", scan.CopyCount)
-	}
-	_, progress := StartSyncExperiments(ctx, src, dst, name, scan)
-	final := drain(t, progress)
-	if final.Status != JobDone {
-		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	_, display := scanAndCopyNWay(t, ctx, []Location{src, dst}, name, fset)
+	if display.CopyCount != 5 {
+		t.Fatalf("scan.CopyCount = %d, want 5", display.CopyCount)
 	}
 	assertFileExists(t, filepath.Join(dstRoot, name, "2026-06-23", "RecorderA", "260623_0900.mp3"))
 }
@@ -237,15 +258,20 @@ func TestExperimentNameWithSpecialCharacters(t *testing.T) {
 func TestProgressReachesCompletion(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
 	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	mkEmptyExperimentDir(t, dstRoot, "Luke - Zucchini")
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	scan, err := ScanSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset)
+	result, err := ScanNWay(ctx, []Location{src, dst}, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
+	pairs := BuildNWayTransferPlan(result, PreferLocalSource)
+	if len(pairs) != 1 {
+		t.Fatalf("got %d transfer pairs, want 1", len(pairs))
+	}
+	_, progress := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(pairs[0]))
 	final := drain(t, progress)
 
 	if final.Status != JobDone {
@@ -259,19 +285,33 @@ func TestProgressReachesCompletion(t *testing.T) {
 	}
 }
 
+// TestCancelDoesNotHang exercises cancellation of a running Job via the live
+// path: Job has no Cancel method (a prior one was dead code with no
+// production caller — see git history); the real cancellation mechanism,
+// used by progress_run.go's runScan/runSync, is for the caller to derive the
+// ctx it passes into StartSyncExperiments from its own context.WithCancel
+// and call that cancel func directly. rclone's fs/sync and fs/operations
+// check ctx.Err() between file operations, so this stops a running copy
+// promptly rather than instantly.
 func TestCancelDoesNotHang(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
 	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	mkEmptyExperimentDir(t, dstRoot, "Luke - Zucchini")
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
-	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	scan, err := ScanSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset)
+	result, err := ScanNWay(context.Background(), []Location{src, dst}, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
-	job.Cancel()
+	pairs := BuildNWayTransferPlan(result, PreferLocalSource)
+	if len(pairs) != 1 {
+		t.Fatalf("got %d transfer pairs, want 1", len(pairs))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, progress := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(pairs[0]))
+	cancel()
 
 	final := drain(t, progress)
 	if final.Status != JobDone && final.Status != JobCanceled && final.Status != JobError {
@@ -369,34 +409,47 @@ func TestFilesFromFilter_NilWhenNoCopies(t *testing.T) {
 func TestSyncExperimentsAfterFullSync_NoCopyOptimization(t *testing.T) {
 	srcRoot, dstRoot := t.TempDir(), t.TempDir()
 	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	mkEmptyExperimentDir(t, dstRoot, "Luke - Zucchini")
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
+	locs := []Location{src, dst}
+
 	// First sync: everything should copy.
-	scan1, err := ScanSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset)
+	result1, err := ScanNWay(ctx, locs, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scan1.CopyCount != 5 {
-		t.Fatalf("first scan.CopyCount = %d, want 5", scan1.CopyCount)
+	display1 := NWayDisplayScanResult(result1)
+	if display1.CopyCount != 5 {
+		t.Fatalf("first scan.CopyCount = %d, want 5", display1.CopyCount)
 	}
-	_, progress1 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan1)
+	pairs := BuildNWayTransferPlan(result1, PreferLocalSource)
+	if len(pairs) != 1 {
+		t.Fatalf("got %d transfer pairs, want 1", len(pairs))
+	}
+	_, progress1 := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(pairs[0]))
 	if final := drain(t, progress1); final.Status != JobDone {
 		t.Fatalf("first backup status = %v, want JobDone (err=%v)", final.Status, final.Err)
 	}
 
 	// Second scan: everything should be identical.
-	scan2, err := ScanSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset)
+	result2, err := ScanNWay(ctx, locs, "Luke - Zucchini", fset)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scan2.CopyCount != 0 {
-		t.Fatalf("second scan.CopyCount = %d, want 0", scan2.CopyCount)
+	display2 := NWayDisplayScanResult(result2)
+	if display2.CopyCount != 0 {
+		t.Fatalf("second scan.CopyCount = %d, want 0", display2.CopyCount)
 	}
 
-	// Second backup with CopyCount=0 scan (no-cache fallback path).
-	_, progress2 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan2)
+	// Second backup with a CopyCount=0 scan result exercises
+	// startCopyPreserving's no-cached-filter fallback path directly (there's
+	// no transfer pair to build once nothing is missing, so this calls
+	// StartSyncExperiments itself, same as the first backup and as
+	// runNWayTransfers does per pair).
+	_, progress2 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", display2)
 	final := drain(t, progress2)
 	if final.Status != JobDone {
 		t.Fatalf("second backup status = %v, want JobDone (err=%v)", final.Status, final.Err)

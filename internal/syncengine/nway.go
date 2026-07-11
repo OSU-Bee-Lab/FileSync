@@ -173,6 +173,25 @@ func diffNWay(ctx context.Context, locs []Location, listings []SourceListing, la
 
 	tracker := newScanTracker(label, progress)
 
+	// Pre-register every directory seen at any location, same as the
+	// pairwise path (scanAgainstDest ranges over listing.dirs before
+	// classifying any file) — otherwise a directory with no files that
+	// differ (e.g. one that's entirely empty, or entirely in sync) never
+	// gets an addEntry call and silently vanishes from the live scan UI's
+	// folder list, which would also otherwise only grow incrementally as
+	// files are classified rather than appearing upfront.
+	seenDirs := make(map[string]bool)
+	for _, listing := range listings {
+		for _, dir := range listing.dirs {
+			if seenDirs[dir] {
+				continue
+			}
+			seenDirs[dir] = true
+			tracker.noteDir(dir)
+			tracker.emit(dir, dir, false)
+		}
+	}
+
 	result := NWayScanResult{Locations: locs}
 	for _, relPath := range order {
 		if err := ctx.Err(); err != nil {

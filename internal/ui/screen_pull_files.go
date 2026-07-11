@@ -31,7 +31,7 @@ func showPullFiles(s *state) {
 	var scopePath string // "" until the user picks a scope folder to pull
 
 	breadcrumb := widget.NewLabel("experiments/")
-	scopeLabel := widget.NewLabel("No scope chosen yet - tap \"Use this\" on a folder or file below.")
+	scopeLabel := widget.NewLabel("No scope chosen yet - tap \"Use this\" on a folder below.")
 	destLabel := widget.NewLabel("No destination chosen")
 	var destFolder string
 
@@ -148,7 +148,7 @@ func showPullFiles(s *state) {
 		srcLoc = findLocation(s.cfg.Locations, name)
 		relPath = ""
 		scopePath = ""
-		scopeLabel.SetText("No scope chosen yet - tap \"Use this\" on a folder or file below.")
+		scopeLabel.SetText("No scope chosen yet - tap \"Use this\" on a folder below.")
 		loadChildren()
 	}
 
@@ -184,17 +184,32 @@ func showPullFiles(s *state) {
 		if chosenRelPath == "" {
 			label = "experiments/ (entire root)"
 		}
-		tasks := []scanTask{{
-			Label: label,
-			Locs:  []syncengine.Location{src},
-			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-				return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
-			},
-			Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-				return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, result)
-			},
-		}}
-		showScanRunning(s, tasks, func() { showPullFiles(s) })
+
+		startScan := func() {
+			tasks := []scanTask{{
+				Label: label,
+				Locs:  []syncengine.Location{src},
+				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
+					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
+				},
+				Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+					return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, result)
+				},
+			}}
+			showSyncFlow(s, tasks, func() { showPullFiles(s) })
+		}
+
+		if missing := missingLocalLocations(src); len(missing) > 0 {
+			showLocationsNotFoundPrompt(s, missing, func() {
+				// User chose to deselect the missing source; ClearSelected
+				// fires srcSelect.OnChanged("") above, which resets srcLoc,
+				// scope, and the child listing - so the screen is left in
+				// the same state as a fresh visit, ready to retry.
+				srcSelect.ClearSelected()
+			}, startScan)
+			return
+		}
+		startScan()
 	})
 	scanBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })

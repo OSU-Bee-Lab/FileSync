@@ -1,6 +1,10 @@
 package recorder
 
-import "strings"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // isHiddenEntry reports whether name is a dotfile/dot-directory, e.g. macOS's
 // .Spotlight-V100, .Trashes, .fseventsd. These are OS-managed, sometimes
@@ -8,6 +12,25 @@ import "strings"
 // skip them rather than failing outright when the OS denies access to them.
 func isHiddenEntry(name string) bool {
 	return strings.HasPrefix(name, ".")
+}
+
+// walkFiles recursively walks root, skipping hidden directories (see
+// isHiddenEntry), and invokes fn for every regular file found. Both driver
+// implementations need this same skip-hidden-dirs preamble; only the
+// per-file handling (naming, filtering) differs between them.
+func walkFiles(root string, fn func(path string, info os.FileInfo) error) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if info != nil && info.IsDir() && isHiddenEntry(info.Name()) {
+			return filepath.SkipDir
+		}
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		return fn(path, info)
+	})
 }
 
 // Volume is a single mounted filesystem, as reported by the OS — the unit

@@ -64,17 +64,15 @@ type ProgressSnapshot struct {
 }
 
 // Job is a running (or finished) copy started by StartSyncExperiments/StartPullFiles.
+// cancel derives startCopyPreserving's working context from the ctx its
+// caller passed in; a caller cancels a running Job by canceling that same
+// ctx it originally passed to Start*, not through a method on Job (rclone's
+// fs/sync and fs/operations check ctx.Err() between file operations, so this
+// stops the copy promptly, leaving whatever already completed in place —
+// never a partial file, since rclone copies to a temp name and renames on
+// completion).
 type Job struct {
 	cancel context.CancelFunc
-}
-
-// Cancel stops a running Job. rclone's fs/sync and fs/operations check
-// ctx.Err() between file operations, so this stops the copy promptly
-// rather than instantly, leaving whatever has already completed in place
-// (never a partial file: rclone copies to a temp name and renames on
-// completion).
-func (j *Job) Cancel() {
-	j.cancel()
 }
 
 // StartSyncExperiments copies one whole experiment from src to dst (Location <->

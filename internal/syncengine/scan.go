@@ -130,32 +130,11 @@ func listSource(ctx context.Context, srcRoot, relPath string, fset FilterSetting
 	return listing, nil
 }
 
-// ScanSyncExperiments scans one whole experiment from src to dst
-// (Location <-> Location, mirrored under each side's own experiments/
-// root). Read-only, safe to call anytime.
-func ScanSyncExperiments(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings) (ScanResult, error) {
-	return ScanSyncExperimentsWithProgress(ctx, src, dst, experimentName, fset, nil)
-}
-
-// ScanSyncExperimentsWithProgress is ScanSyncExperiments with live progress updates.
-func ScanSyncExperimentsWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
-	listing, err := listSource(ctx, src.rcloneSpec(), experimentName, fset, progress)
-	if err != nil {
-		return ScanResult{}, err
-	}
-	return scanAgainstDest(ctx, listing, dst.rcloneSpec(), experimentName, experimentName, progress)
-}
-
-// ScanPullFiles scans an arbitrary sub-path (any depth: a
+// ScanPullFilesWithProgress scans an arbitrary sub-path (any depth: a
 // whole experiment, one deployment date, one recorder directory, even a
 // single file) from src into destFolder, preserving srcRelPath's structure
 // under destFolder rather than flattening. destFolder is a raw local path
 // (from an OS folder picker), never a saved Location.
-func ScanPullFiles(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings) (ScanResult, error) {
-	return ScanPullFilesWithProgress(ctx, src, srcRelPath, destFolder, fset, nil)
-}
-
-// ScanPullFilesWithProgress is ScanPullFiles with live progress updates.
 func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	label := srcRelPath
 	if label == "" {
@@ -296,9 +275,9 @@ func (t *scanTracker) finish() ScanResult {
 	return t.result
 }
 
-// scanAgainstDest is the shared scan implementation behind
-// ScanSyncExperiments and ScanPullFiles: it diffs a pre-walked source
-// listing against <dstRoot>/<relPath>, without transferring anything.
+// scanAgainstDest is the scan implementation behind ScanPullFilesWithProgress:
+// it diffs a pre-walked source listing against <dstRoot>/<relPath>, without
+// transferring anything.
 //
 // The destination is listed in bulk once (like the source) rather than
 // stat'd per file: a per-file fs.Fs.NewObject call is a network round trip
