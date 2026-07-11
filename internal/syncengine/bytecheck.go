@@ -8,13 +8,19 @@ import (
 	"github.com/rclone/rclone/fs"
 )
 
-// prefixCheckBytes is how many leading bytes of a colliding file we read to
+// PrefixCheckBytes is how many leading bytes of a colliding file we read to
 // tell same-content from different-content. See NOTES.md: a 256,000 byte
 // prefix clears the metadata headers of every recorder audio format we've
 // tested (MP3/ID3v2, WMA/ASF) with wide margin, and remote reads are
 // round-trip-latency-bound rather than byte-count-bound, so going well past
 // the minimum found in testing costs effectively nothing extra.
-const prefixCheckBytes int64 = 256000
+//
+// Exported so internal/recorder's offload verifier shares the exact same
+// prefix length instead of keeping its own. A shorter recorder-side value
+// (5000 bytes) once let a genuinely different recording that happened to
+// share a byte size and metadata-header prefix be mis-verified as an
+// identical copy — which, under auto-delete, could delete the source.
+const PrefixCheckBytes int64 = 256000
 
 // readPrefix reads up to n leading bytes of obj (local or remote — both are
 // rclone fs.Object, so this works uniformly via Object.Open + RangeOption,
@@ -55,18 +61,18 @@ func readPrefix(ctx context.Context, obj fs.Object, n int64) ([]byte, error) {
 // mismatch with a matching prefix, which looks like a partial upload of the
 // same recording — comes back as ActionConflict so the user confirms it
 // rather than the app guessing. When one prefix read is shorter than the
-// other (a file smaller than prefixCheckBytes), only the shared length is
+// other (a file smaller than PrefixCheckBytes), only the shared length is
 // compared; a length difference alone is not evidence of different content.
 //
 // The returned reason string is empty unless the action is ActionConflict,
 // in which case it's a short human-readable explanation for display
 // (e.g. in a conflict-resolution prompt).
 func compareObjects(ctx context.Context, srcObj, dstObj fs.Object) (ScanAction, string, error) {
-	srcPrefix, err := readPrefix(ctx, srcObj, prefixCheckBytes)
+	srcPrefix, err := readPrefix(ctx, srcObj, PrefixCheckBytes)
 	if err != nil {
 		return ActionConflict, "", err
 	}
-	dstPrefix, err := readPrefix(ctx, dstObj, prefixCheckBytes)
+	dstPrefix, err := readPrefix(ctx, dstObj, PrefixCheckBytes)
 	if err != nil {
 		return ActionConflict, "", err
 	}
@@ -105,7 +111,7 @@ func compareObjectsN(ctx context.Context, objs []fs.Object) (bool, string, error
 
 	prefixes := make([][]byte, len(objs))
 	for i, obj := range objs {
-		p, err := readPrefix(ctx, obj, prefixCheckBytes)
+		p, err := readPrefix(ctx, obj, PrefixCheckBytes)
 		if err != nil {
 			return false, "", err
 		}

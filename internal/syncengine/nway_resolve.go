@@ -98,6 +98,24 @@ func ApplyOverwriteResolutions(result NWayScanResult, resolutions []NWayConflict
 			continue
 		}
 
+		// The winner must actually hold the file. A resolution naming a
+		// location that doesn't have this path would otherwise zero out every
+		// state and produce a FileMissingSome with no present source —
+		// silently dropping the file while the counts claim it was resolved.
+		// Leave such a resolution unapplied (still FileConflict) so the
+		// conflict stays surfaced rather than vanishing.
+		winnerPresent := false
+		for _, st := range f.States {
+			if st.Location.ID == winnerID && st.Exists {
+				winnerPresent = true
+				break
+			}
+		}
+		if !winnerPresent {
+			resolved.Files[i] = f
+			continue
+		}
+
 		states := make([]FileLocationState, len(f.States))
 		copy(states, f.States)
 		for j := range states {

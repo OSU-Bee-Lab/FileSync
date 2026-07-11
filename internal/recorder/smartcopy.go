@@ -13,6 +13,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync/atomic"
+
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // FileState mirrors the states filesync's file_states() assigns to a
@@ -104,7 +107,11 @@ func nonidenticalSize(sourcePath string, destPaths []string) ([]string, error) {
 // don't match sourcePath's — enough to distinguish unrelated files sharing
 // a size without reading the whole thing.
 func nonidenticalStart(sourcePath string, destPaths []string) ([]string, error) {
-	const checkSize = 5000
+	// Share syncengine's byte-prefix length so the recorder-side verify and
+	// the cloud-side verify can never diverge (see PrefixCheckBytes): a
+	// too-short prefix sits inside the audio metadata header and can match
+	// across genuinely different recordings.
+	checkSize := int(syncengine.PrefixCheckBytes)
 
 	fileSource, err := os.Open(sourcePath)
 	if err != nil {
@@ -128,7 +135,16 @@ func nonidenticalStart(sourcePath string, destPaths []string) ([]string, error) 
 		if err != nil {
 			return nil, err
 		}
-		if !bytes.Equal(chunkDest, chunkSource) {
+		// Compare only the shared leading length: a destination shorter than
+		// the source is a partial copy (its size difference is caught
+		// separately by nonidenticalSize), not a different-content conflict,
+		// so a length difference alone must not count as a nonidentical start.
+		// Mirrors syncengine's readPrefix/compareObjects shared-length check.
+		shared := len(chunkSource)
+		if len(chunkDest) < shared {
+			shared = len(chunkDest)
+		}
+		if !bytes.Equal(chunkDest[:shared], chunkSource[:shared]) {
 			result = append(result, p)
 		}
 	}
@@ -209,14 +225,13 @@ func fileStates(sourcePath string, destPaths []string) (map[string]FileState, er
 	return states, nil
 }
 
-// CopyProgress is a mutable snapshot smartcopy updates as it works;
-// callers reading it concurrently (e.g. a UI) should only ever read
-// fields, and should tolerate torn reads since no locking is done here —
-// same trade-off filesync's Python made (a plain dict mutated from one
-// thread, read from another).
+// CopyProgress is a live snapshot smartcopy updates as it works, read
+// concurrently by a caller's progress ticker (see offload.go). The fields
+// are atomic so concurrent read/write is well-defined rather than a data
+// race — the copy goroutine Stores them while the ticker Loads them.
 type CopyProgress struct {
-	ByteCurrent int64
-	BytesTotal  int64
+	ByteCurrent atomic.Int64
+	BytesTotal  atomic.Int64
 }
 
 // smartcopy copies sourcePath to every path in destPaths, resuming from
@@ -257,7 +272,17 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 		}
 		filesDest[i] = f
 	}
+	// On any error path, close the destination files best-effort (the copy
+	// already failed, so a close error changes nothing). On the success path
+	// we instead fsync and close each one explicitly at the end, surfacing
+	// those errors: the caller may delete the source recorder file once
+	// smartcopy returns nil, so a swallowed flush/close failure must never
+	// pass a short or unflushed destination off as complete.
+	copyOK := false
 	defer func() {
+		if copyOK {
+			return
+		}
 		for _, f := range filesDest {
 			f.Close()
 		}
@@ -307,8 +332,8 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 	}
 
 	if progress != nil {
-		progress.ByteCurrent = pickupByte
-		progress.BytesTotal = sizeSource
+		progress.ByteCurrent.Store(pickupByte)
+		progress.BytesTotal.Store(sizeSource)
 	}
 
 	const checkSize = 1000
@@ -360,7 +385,9 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 				return err
 			}
 		}
-		if tries == attemptTolerance {
+		// Only irreconcilable if we exhausted the attempts without ever
+		// matching — a match found on the final window is still a match.
+		if !chunksMatch {
 			return &IrreconcilableError{Path: sourcePath}
 		}
 	}
@@ -382,7 +409,7 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 				if err != nil {
 					return err
 				}
-				progress.ByteCurrent = pos
+				progress.ByteCurrent.Store(pos)
 			}
 		}
 		if readErr == io.EOF {
@@ -393,5 +420,18 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 		}
 	}
 
+	// Flush and close every destination now, before returning success, so a
+	// caller that deletes the source recorder file on completion only does so
+	// once the copied bytes are durably on disk. A flush/close error fails the
+	// copy (the deferred best-effort close then still runs, harmlessly).
+	for _, f := range filesDest {
+		if err := f.Sync(); err != nil {
+			return err
+		}
+		if err := f.Close(); err != nil {
+			return err
+		}
+	}
+	copyOK = true
 	return nil
 }

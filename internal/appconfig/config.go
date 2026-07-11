@@ -32,7 +32,6 @@ type RecorderSettings struct {
 type Config struct {
 	Locations        []syncengine.Location     `json:"locations"`
 	DefaultFilter    syncengine.FilterSettings `json:"defaultFilter"`
-	PreserveModTime  bool                      `json:"preserveModTime"`
 	RecorderSettings RecorderSettings          `json:"recorderSettings"`
 	// DebugMode enables verbose console logging of scan/copy progress and
 	// rclone's own internal logging, for troubleshooting a stuck or slow
@@ -55,8 +54,7 @@ type Config struct {
 // machine, before any Locations have been added.
 func Default() Config {
 	return Config{
-		DefaultFilter:   syncengine.DefaultFilterSettings(),
-		PreserveModTime: true,
+		DefaultFilter: syncengine.DefaultFilterSettings(),
 		RecorderSettings: RecorderSettings{
 			AutoDeleteAfterVerify: true,
 		},
@@ -93,12 +91,6 @@ func Load() (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
-	}
-	if cfg.RecorderInactivityTimeoutMinutes == 0 {
-		// Config files saved before this setting existed unmarshal it to
-		// zero; treat that as "not yet configured" rather than "disabled"
-		// so upgrading doesn't make the timer fire instantly.
-		cfg.RecorderInactivityTimeoutMinutes = Default().RecorderInactivityTimeoutMinutes
 	}
 	return cfg, nil
 }

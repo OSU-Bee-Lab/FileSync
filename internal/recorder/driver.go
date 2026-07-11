@@ -17,8 +17,6 @@ func isHiddenEntry(name string) bool {
 // in.
 type Volume struct {
 	MountPoint string
-	Label      string
-	Device     string
 }
 
 // SourceFile is one file on a recorder that needs to land at DestRelPath

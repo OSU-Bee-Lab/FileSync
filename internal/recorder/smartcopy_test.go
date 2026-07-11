@@ -79,8 +79,8 @@ func TestSmartcopyFreshCopy(t *testing.T) {
 	if !bytes.Equal(got, sourceData) {
 		t.Fatal("dest content does not match source after fresh copy")
 	}
-	if progress.ByteCurrent != int64(len(sourceData)) {
-		t.Errorf("progress.ByteCurrent = %d, want %d", progress.ByteCurrent, len(sourceData))
+	if progress.ByteCurrent.Load() != int64(len(sourceData)) {
+		t.Errorf("progress.ByteCurrent = %d, want %d", progress.ByteCurrent.Load(), len(sourceData))
 	}
 }
 

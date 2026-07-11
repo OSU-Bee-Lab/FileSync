@@ -177,7 +177,7 @@ func showPullFiles(s *state) {
 		}
 		src := *srcLoc
 		chosenRelPath := scopePath
-		fset, preserveModTime := s.cfg.DefaultFilter, s.cfg.PreserveModTime
+		fset := s.cfg.DefaultFilter
 		dest := destFolder
 
 		label := "experiments/" + chosenRelPath
@@ -191,7 +191,7 @@ func showPullFiles(s *state) {
 				return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
 			},
 			Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-				return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, fset, preserveModTime, result)
+				return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, result)
 			},
 		}}
 		showScanRunning(s, tasks, func() { showPullFiles(s) })

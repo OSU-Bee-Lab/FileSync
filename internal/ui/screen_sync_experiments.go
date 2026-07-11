@@ -183,7 +183,6 @@ func showSyncExperiments(s *state) {
 // resulting transfer plan to runNWayTransfers.
 func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 	fset := s.cfg.DefaultFilter
-	preserveModTime := s.cfg.PreserveModTime
 
 	resolver := newNWayResolver(expNames)
 
@@ -211,7 +210,7 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 		resolutions := resolver.buildResolutions()
 		proceed := func() {
 			applyNWayResolutions(s, expNames, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
-				runNWayTransfers(s, expNames, resolved, fset, preserveModTime)
+				runNWayTransfers(s, expNames, resolved)
 			})
 		}
 		if resolver.hasDeletes() {
@@ -230,7 +229,7 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 // scan/progress UI. The plan was already reviewed and confirmed in the scan
 // session, so the transfer session auto-starts copying instead of asking
 // for a second Sync press.
-func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult, fset syncengine.FilterSettings, preserveModTime bool) {
+func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult) {
 	var tasks []scanTask
 	for i, name := range expNames {
 		name := name
@@ -245,7 +244,7 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 					return result, nil
 				},
 				Start: func(ctx context.Context, expected syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-					return syncengine.StartSyncExperiments(ctx, pair.Source, pair.Dest, name, fset, preserveModTime, expected)
+					return syncengine.StartSyncExperiments(ctx, pair.Source, pair.Dest, name, expected)
 				},
 			})
 		}

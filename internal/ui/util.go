@@ -33,13 +33,6 @@ func errString(err error) string {
 	return err.Error()
 }
 
-func plural(n int, singular string) string {
-	if n == 1 {
-		return fmt.Sprintf("1 %s", singular)
-	}
-	return fmt.Sprintf("%d %ss", n, singular)
-}
-
 // locationNames returns the names of every Location, for populating a
 // from/to picker. Local and cloud locations are offered the same way;
 // whether one is actually reachable is checked live at sync time (see

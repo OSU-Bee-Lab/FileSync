@@ -127,7 +127,7 @@ func TestScanAndStartSyncExperiments_WholeExperiment(t *testing.T) {
 		t.Fatalf("scan.CopyCount = %d, want 5", scan.CopyCount)
 	}
 
-	job, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
+	job, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -163,7 +163,7 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 		t.Fatalf("scan.CopyCount = %d, want 3", scan.CopyCount)
 	}
 
-	_, progress := StartPullFiles(ctx, src, relPath, destFolder, fset, true, scan)
+	_, progress := StartPullFiles(ctx, src, relPath, destFolder, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -194,7 +194,7 @@ func TestCopyPreserving_NeverDeletesDestinationOnlyFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
+	_, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -226,7 +226,7 @@ func TestExperimentNameWithSpecialCharacters(t *testing.T) {
 	if scan.CopyCount != 5 {
 		t.Fatalf("scan.CopyCount = %d, want 5", scan.CopyCount)
 	}
-	_, progress := StartSyncExperiments(ctx, src, dst, name, fset, true, scan)
+	_, progress := StartSyncExperiments(ctx, src, dst, name, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -245,7 +245,7 @@ func TestProgressReachesCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
+	_, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
 	final := drain(t, progress)
 
 	if final.Status != JobDone {
@@ -270,7 +270,7 @@ func TestCancelDoesNotHang(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset, true, scan)
+	job, progress := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan)
 	job.Cancel()
 
 	final := drain(t, progress)
@@ -381,7 +381,7 @@ func TestSyncExperimentsAfterFullSync_NoCopyOptimization(t *testing.T) {
 	if scan1.CopyCount != 5 {
 		t.Fatalf("first scan.CopyCount = %d, want 5", scan1.CopyCount)
 	}
-	_, progress1 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset, true, scan1)
+	_, progress1 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan1)
 	if final := drain(t, progress1); final.Status != JobDone {
 		t.Fatalf("first backup status = %v, want JobDone (err=%v)", final.Status, final.Err)
 	}
@@ -396,7 +396,7 @@ func TestSyncExperimentsAfterFullSync_NoCopyOptimization(t *testing.T) {
 	}
 
 	// Second backup with CopyCount=0 scan (no-cache fallback path).
-	_, progress2 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", fset, true, scan2)
+	_, progress2 := StartSyncExperiments(ctx, src, dst, "Luke - Zucchini", scan2)
 	final := drain(t, progress2)
 	if final.Status != JobDone {
 		t.Fatalf("second backup status = %v, want JobDone (err=%v)", final.Status, final.Err)

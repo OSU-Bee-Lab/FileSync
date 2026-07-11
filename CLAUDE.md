@@ -37,8 +37,9 @@ option to scan experiments).
 - Do not commit changes until the user has tested and verified them working.
 - Worktrees go in ./.claude/worktrees
 - **rclone must always use `copy`, never `sync`** — this is a core safety
-  invariant. `rclone sync` deletes destination-only files; this app is not
-  authorized to delete data from a synced destination ever. The UI
+  invariant. `rclone sync` deletes destination-only files; this app must
+  never delete data from a synced destination — with the single narrow,
+  user-gated exception of N-way conflict resolution (see below). The UI
   intentionally uses the word "sync" for end-user clarity (researchers
   understand "sync" intuitively), but the underlying rclone command is
   always `copy`. Never change this without an explicit, informed decision
@@ -49,3 +50,12 @@ option to scan experiments).
   verified byte-for-byte, deleting it from the recorder's own storage is
   intentional and user-toggleable (`RecorderSettings.AutoDeleteAfterVerify`)
   — it's how a recorder gets reset for reuse in the field, not data loss.
+- The one authorized deletion from a synced destination is N-way conflict
+  resolution (`syncengine.NWayDelete` / `DeleteConflictFile`): when two or
+  more locations hold genuinely different content at the same path, the user
+  may choose to delete a specific location's copy. It is gated — they see
+  every divergent copy with its size and location, pick deletion deliberately
+  per file, and confirm an irreversible-action prompt. It must never be
+  reachable as a default, automatically, or without that confirmation. All
+  other N-way propagation stays copy-only: it never deletes a file from a
+  location just because another location lacks it.

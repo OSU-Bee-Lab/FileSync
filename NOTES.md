@@ -1,11 +1,15 @@
-# smart-check notes
+# Smart-check decision record
 
-Goal: extend the smartcopy-style collision check (currently local-only,
-`internal/recorder/smartcopy.go`, 5KB prefix compare) to work across synced
-locations, including cloud remotes (SharePoint/OneDrive "Teams"), for a
-full experiments sync.
+Decision: extended the smartcopy-style collision check (previously
+local-only, `internal/recorder/smartcopy.go`, 5KB prefix compare) to work
+across synced locations, including cloud remotes (SharePoint/OneDrive
+"Teams"), for a full experiments sync. Landed as the size +
+256,000-byte-prefix comparison in `internal/syncengine/bytecheck.go`
+(`compareObjects`, `prefixCheckBytes`); N-way comparison
+(`internal/syncengine/nway.go`) uses the same check. The rest of this
+document is the rationale and benchmark data behind that decision.
 
-## Planned algorithm
+## Algorithm
 
 1. Build file lists for all locations, keyed by relative path
    (experiment/.../recorder-ID/filename.mp3 — see SCHEMA.md).

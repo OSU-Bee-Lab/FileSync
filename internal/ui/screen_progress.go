@@ -1148,10 +1148,14 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 			}
 		}
 
-		go func() {
-			ctx, cancel := context.WithCancel(context.Background())
-			activeCancel = cancel
+		// Create this run's context on the UI goroutine, before launching the
+		// worker, so the Cancel button (also on the UI goroutine) always
+		// observes the current run's cancel — never a stale one or nil in the
+		// window before the goroutine is scheduled, and never via a data race.
+		ctx, cancel := context.WithCancel(context.Background())
+		activeCancel = cancel
 
+		go func() {
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, maxConcurrentTasks)
 
@@ -1415,10 +1419,14 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 			expList.Select(0)
 		}
 
-		go func() {
-			ctx, cancel := context.WithCancel(context.Background())
-			activeCancel = cancel
+		// Create this run's context on the UI goroutine, before launching the
+		// worker, so the Cancel button (also on the UI goroutine) always
+		// observes the current run's cancel — never a stale one or nil in the
+		// window before the goroutine is scheduled, and never via a data race.
+		ctx, cancel := context.WithCancel(context.Background())
+		activeCancel = cancel
 
+		go func() {
 			var wg sync.WaitGroup
 			sem := make(chan struct{}, maxConcurrentTasks)
 

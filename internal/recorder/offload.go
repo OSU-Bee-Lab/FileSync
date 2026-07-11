@@ -139,6 +139,15 @@ func StartOffload(
 	go func() {
 		defer close(progressCh)
 
+		// Guard the delete path: with no destinations, every file would fall
+		// through to "complete" (copied nowhere) and, under autoDelete, its
+		// source would be deleted. The UI already prevents this, but the
+		// engine must not depend on that.
+		if len(destRoots) == 0 {
+			progressCh <- OffloadProgress{Status: OffloadError, Err: fmt.Errorf("offload: no destination roots given")}
+			return
+		}
+
 		sourceFiles, err := driver.SourceFiles(v)
 		if err != nil {
 			progressCh <- OffloadProgress{Status: OffloadError, Err: err}
@@ -153,21 +162,18 @@ func StartOffload(
 			destDirs[i] = filepath.Join(append(parts, recorderID)...)
 		}
 
-		// fileSize is stat'd upfront for every source file so the progress
-		// bar's denominator (bytesTotal, summed across files below) is known
-		// in full from the very first emit. Previously files only entered
-		// the `files` map (and so only contributed to bytesTotal) once their
-		// own copy started, so bytesTotal grew mid-run: the bar could reach
-		// 100% on file 1 alone, then drop back down the instant file 2's
-		// entry was added and inflated the denominator.
-		fileSize := make(map[string]int64, len(sourceFiles))
+		// Each source file's size is stat'd upfront so the progress bar's
+		// denominator (bytesTotal, summed across files below) is known in full
+		// from the very first emit. Otherwise files would only contribute to
+		// bytesTotal once their own copy started, so bytesTotal would grow
+		// mid-run: the bar could reach 100% on file 1 alone, then drop back
+		// down the instant file 2's entry inflated the denominator.
 		files := make(map[string]FileOffloadProgress, len(sourceFiles))
 		for _, sf := range sourceFiles {
 			var size int64
 			if info, err := os.Stat(sf.AbsPath); err == nil {
 				size = info.Size()
 			}
-			fileSize[sf.DestRelPath] = size
 			files[sf.DestRelPath] = FileOffloadProgress{BytesTotal: size}
 		}
 
@@ -281,7 +287,8 @@ func StartOffload(
 				return
 			}
 			if len(pending) == 0 {
-				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: fileSize[sf.DestRelPath], BytesTotal: fileSize[sf.DestRelPath]}
+				sz := files[sf.DestRelPath].BytesTotal
+				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: sz, BytesTotal: sz}
 				continue
 			}
 
@@ -302,7 +309,7 @@ func StartOffload(
 					}
 					break copyLoop
 				case <-ticker.C:
-					files[sf.DestRelPath] = FileOffloadProgress{BytesDone: cp.ByteCurrent, BytesTotal: cp.BytesTotal}
+					files[sf.DestRelPath] = FileOffloadProgress{BytesDone: cp.ByteCurrent.Load(), BytesTotal: cp.BytesTotal.Load()}
 					emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
 				case <-ctx.Done():
 					ticker.Stop()
@@ -311,10 +318,11 @@ func StartOffload(
 				}
 			}
 
-			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: cp.BytesTotal, BytesTotal: cp.BytesTotal}
+			total := cp.BytesTotal.Load()
+			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: total, BytesTotal: total}
 			emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
 
-			fileTotal := cp.BytesTotal
+			fileTotal := total
 			for _, uploadDest := range uploadDests {
 				dest := uploadDest
 				localPath := destPaths[0]

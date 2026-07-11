@@ -2,7 +2,6 @@ package recorder
 
 import (
 	"context"
-	"path/filepath"
 	"time"
 
 	"github.com/shirou/gopsutil/v4/disk"
@@ -48,11 +47,7 @@ func WatchVolumes(ctx context.Context, interval time.Duration) <-chan VolumeEven
 				if p.Mountpoint == "" {
 					continue
 				}
-				seen[p.Mountpoint] = Volume{
-					MountPoint: p.Mountpoint,
-					Label:      filepath.Base(p.Mountpoint),
-					Device:     p.Device,
-				}
+				seen[p.Mountpoint] = Volume{MountPoint: p.Mountpoint}
 			}
 
 			for mp, v := range seen {

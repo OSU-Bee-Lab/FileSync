@@ -81,10 +81,9 @@ type ScanProgress struct {
 type ScanProgressFunc func(ScanProgress)
 
 // SourceListing is a full recursive listing of one source subtree (an
-// experiment, or any relPath under a Location), captured once so it can be
-// diffed against multiple destinations without re-walking the source once
-// per destination. See ScanExperimentSource /
-// ScanSyncExperimentsAgainstSource.
+// experiment, or any relPath under a Location), captured once by listSource
+// so it can be diffed against multiple destinations (via scanAgainstDest)
+// without re-walking the source once per destination.
 type SourceListing struct {
 	objects []fs.Object
 	dirs    []string
@@ -144,21 +143,6 @@ func ScanSyncExperimentsWithProgress(ctx context.Context, src, dst Location, exp
 	if err != nil {
 		return ScanResult{}, err
 	}
-	return scanAgainstDest(ctx, listing, dst.rcloneSpec(), experimentName, experimentName, progress)
-}
-
-// ScanExperimentSource walks one experiment's full source file tree exactly
-// once. The returned listing can be fed into ScanSyncExperimentsAgainstSource
-// for as many destinations as needed, so syncing one experiment to N
-// destinations only ever walks the source once instead of N times.
-func ScanExperimentSource(ctx context.Context, src Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
-	return listSource(ctx, src.rcloneSpec(), experimentName, fset, progress)
-}
-
-// ScanSyncExperimentsAgainstSource diffs a previously-captured source
-// listing (see ScanExperimentSource) against dst, without re-walking the
-// source.
-func ScanSyncExperimentsAgainstSource(ctx context.Context, listing SourceListing, dst Location, experimentName string, progress ScanProgressFunc) (ScanResult, error) {
 	return scanAgainstDest(ctx, listing, dst.rcloneSpec(), experimentName, experimentName, progress)
 }
 

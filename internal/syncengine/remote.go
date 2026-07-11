@@ -345,25 +345,6 @@ func nonSecretRemoteFields(remoteName string) (BackendType, map[string]string, e
 	return bt, fields, nil
 }
 
-// RemoteInfo is one remote already present in rclone's config file,
-// whether or not FileSync created it - lets a power user adopt an existing
-// remote (e.g. one set up with the real rclone CLI) into a Location
-// instead of only ever creating new ones.
-type RemoteInfo struct {
-	Name string
-	Type string
-}
-
-// ListExistingRemotes enumerates every remote in rclone's config file.
-func ListExistingRemotes() []RemoteInfo {
-	var out []RemoteInfo
-	for _, name := range config.FileSections() {
-		typ, _ := config.FileGetValue(name, "type")
-		out = append(out, RemoteInfo{Name: name, Type: typ})
-	}
-	return out
-}
-
 // driveConfigSteps advances rclone's non-interactive backend config state
 // machine to completion. At each question (out.Option != nil) it uses
 // answers[out.Option.Name] if the caller supplied one for that option (e.g.
