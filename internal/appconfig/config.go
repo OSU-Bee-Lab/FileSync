@@ -20,12 +20,6 @@ type RecorderSettings struct {
 	DestinationLocationIDs []string `json:"destinationLocationIds,omitempty"`
 	UploadLocationIDs      []string `json:"uploadLocationIds,omitempty"`
 	AutoDeleteAfterVerify  bool     `json:"autoDeleteAfterVerify"`
-	// Subpaths is an optional path prepended under each destination's root
-	// (before experimentName/recorderID) - recorders are almost never
-	// synced straight to a destination's root folder. Keyed by experiment
-	// name, since different experiments commonly use different subpaths
-	// (e.g. different deployment dates/sites).
-	Subpaths map[string]string `json:"subpaths,omitempty"`
 }
 
 // Config is FileSync's entire persisted app state.

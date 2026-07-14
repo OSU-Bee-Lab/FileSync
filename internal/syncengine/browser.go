@@ -116,6 +116,35 @@ func listDir(ctx context.Context, spec string) (fs.DirEntries, error) {
 	return f.List(ctx, "")
 }
 
+// UnionChildDirNames lists the sub-directory names one shallow level under
+// relPath, across every one of locs, and returns the deduped/sorted union.
+// It backs the recorder-sync folder browser, whose destination is a set of
+// locations at once rather than a single source - a folder only has to
+// exist on one of them to show up as navigable. Locations that fail to
+// list (e.g. an unreachable remote) are silently skipped rather than
+// aborting the whole listing, matching the tolerance ListExperiments'
+// callers already relied on.
+func UnionChildDirNames(ctx context.Context, locs []Location, relPath string) []string {
+	seen := make(map[string]bool)
+	for _, loc := range locs {
+		entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if _, isDir := e.(fs.Directory); isDir {
+				seen[dirName(e)] = true
+			}
+		}
+	}
+	names := make([]string, 0, len(seen))
+	for n := range seen {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func dirName(e fs.DirEntry) string {
 	return path.Base(e.Remote())
 }
