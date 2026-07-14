@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -110,12 +111,50 @@ func Run() {
 	a := app.NewWithID("com.osubeelab.filesync")
 	w := a.NewWindow("FileSync")
 
+	startApp := func() {
+		cfg, err := appconfig.Load()
+		s := &state{win: w, cfg: cfg}
+		if err != nil {
+			// Not fatal - fall back to defaults and let the user fix it by
+			// re-saving from the Locations screen.
+			s.cfg = appconfig.Default()
+		}
+		syncengine.SetDebugLogging(s.cfg.DebugMode)
+		syncengine.SetCheckers(s.cfg.Checkers)
+		syncengine.SetBwLimitMiBPerSec(s.cfg.BwLimitMiBPerSec)
+
+		// Content must be set before Resize/CenterOnScreen - otherwise Fyne
+		// has no size hints yet and (at least on macOS with multiple
+		// displays) can compute a window spanning the whole virtual desktop
+		// instead of the requested size.
+		showHome(s)
+		w.SetFixedSize(false)
+		w.Resize(windowSize)
+		w.CenterOnScreen()
+	}
+
 	// Two instances copying to the same destination via rclone would race
-	// each other, so refuse to open a second window rather than risk that.
+	// each other, so warn before opening a second window rather than risk
+	// that silently.
 	lock, ok, err := appconfig.AcquireInstanceLock()
 	if err == nil && !ok {
-		w.Resize(fyne.NewSize(420, 160))
-		w.SetContent(widget.NewLabel("FileSync is already running.\nClose the other window before opening a new one."))
+		msg := widget.NewLabel("An instance of FileSync is already open. Running multiple instances of FileSync will cause issues if multiple syncs are run simultaneously. Running another instance is not recommended.")
+		msg.Wrapping = fyne.TextWrapWord
+
+		closeBtn := widget.NewButton("Close", func() { w.Close() })
+		closeBtn.Importance = widget.HighImportance
+
+		continueBtn := widget.NewButton("Continue", func() {
+			startApp()
+		})
+		continueBtn.Importance = widget.DangerImportance
+
+		content := container.NewVBox(
+			msg,
+			container.NewHBox(layout.NewSpacer(), closeBtn, continueBtn, layout.NewSpacer()),
+		)
+		w.Resize(fyne.NewSize(420, 200))
+		w.SetContent(content)
 		w.CenterOnScreen()
 		w.ShowAndRun()
 		return
@@ -124,25 +163,7 @@ func Run() {
 		defer lock.Release()
 	}
 
-	cfg, err := appconfig.Load()
-	s := &state{win: w, cfg: cfg}
-	if err != nil {
-		// Not fatal - fall back to defaults and let the user fix it by
-		// re-saving from the Locations screen.
-		s.cfg = appconfig.Default()
-	}
-	syncengine.SetDebugLogging(s.cfg.DebugMode)
-	syncengine.SetCheckers(s.cfg.Checkers)
-	syncengine.SetBwLimitMiBPerSec(s.cfg.BwLimitMiBPerSec)
-
-	// Content must be set before Resize/CenterOnScreen - otherwise Fyne has
-	// no size hints yet and (at least on macOS with multiple displays) can
-	// compute a window spanning the whole virtual desktop instead of the
-	// requested size.
-	showHome(s)
-	w.SetFixedSize(false)
-	w.Resize(windowSize)
-	w.CenterOnScreen()
+	startApp()
 	w.ShowAndRun()
 }
 
