@@ -339,6 +339,7 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 					row.status = jobDone
 					row.done = true
 					row.progress = 1
+					row.statusMsg = ""
 					if p.FilesTotal == 0 {
 						row.statusMsg = "Done (no files)"
 					}
