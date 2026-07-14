@@ -211,12 +211,14 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 				continue
 			}
 			filesDone, filesTotal := fold.filesDone, fold.totalFiles
+			bytesDone, bytesTotal := fold.bytesDone, fold.totalBytes
 			if ps.isSyncing() {
 				filesDone, filesTotal = fold.copyFilesDone, fold.copyTotalFiles
+				bytesDone, bytesTotal = fold.copyBytesDone, fold.copyTotalBytes
 			}
 			prog := 0.0
-			if filesTotal > 0 {
-				prog = float64(filesDone) / float64(filesTotal)
+			if bytesTotal > 0 {
+				prog = float64(bytesDone) / float64(bytesTotal)
 			}
 			summary := fmt.Sprintf("%d / %d files", filesDone, filesTotal)
 			conflicts := 0
