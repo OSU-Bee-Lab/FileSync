@@ -39,6 +39,15 @@ type syncFlowExtras struct {
 	// instant replay of an already-reviewed, already-confirmed plan — a
 	// second Sync press there would be pure ceremony.
 	autoSync bool
+	// syncingTitle overrides the phaseSyncing title text ("Syncing" by
+	// default) — e.g. "Quick Syncing"/"Full Syncing" for the N-way sync
+	// flows, so the header reflects which button the user pressed.
+	syncingTitle string
+	// quickScan marks a scan that never verified file content (see
+	// syncengine.NWayQuickScan): renderMetrics must not claim files are
+	// "already synced", since that was never checked — only that a path
+	// exists at every location.
+	quickScan bool
 }
 
 // progressScreen holds all state and widgets for the shared scan/sync
@@ -413,7 +422,11 @@ func (ps *progressScreen) applyPhaseChrome() {
 		ps.cancelBtn.Hide()
 		ps.backBtn.Enable()
 	case phaseSyncing:
-		ps.titleLabel.SetText("Syncing")
+		title := "Syncing"
+		if ps.extras.syncingTitle != "" {
+			title = ps.extras.syncingTitle
+		}
+		ps.titleLabel.SetText(title)
 		ps.overallBarInf.Hide()
 		ps.overallBar.Show()
 		ps.scanBtn.Hide()
@@ -477,18 +490,30 @@ func (ps *progressScreen) renderMetrics(m syncMetrics) {
 		ps.expValue.SetText(fmt.Sprintf("%d", m.totalExps))
 		copyFiles, skipFiles, conflictFiles := m.copyFilesTotal, m.totalFilesDone, m.totalConflicts
 		copyBytes, skipBytes := m.copyBytesTotal, m.totalBytesDone
-		if conflictFiles > 0 {
+		if ps.extras.quickScan {
+			// Quick scan never verified content — it only knows a path is
+			// missing somewhere or present everywhere — so it must not
+			// claim anything is "synced", only what's queued to copy.
+			ps.filesValue.SetText(fmt.Sprintf("%d to add", copyFiles))
+			ps.bytesValue.SetText(fmt.Sprintf("%s to add", humanBytes(copyBytes)))
+		} else if conflictFiles > 0 {
 			ps.filesValue.SetText(fmt.Sprintf("%d unsynced / %d synced / %d conflicts", copyFiles, skipFiles, conflictFiles))
+			ps.bytesValue.SetText(fmt.Sprintf("%s unsynced / %s synced", humanBytes(copyBytes), humanBytes(skipBytes)))
 		} else {
 			ps.filesValue.SetText(fmt.Sprintf("%d unsynced / %d synced", copyFiles, skipFiles))
+			ps.bytesValue.SetText(fmt.Sprintf("%s unsynced / %s synced", humanBytes(copyBytes), humanBytes(skipBytes)))
 		}
-		ps.bytesValue.SetText(fmt.Sprintf("%s unsynced / %s synced", humanBytes(copyBytes), humanBytes(skipBytes)))
 	default:
 		ps.expValue.SetText(fmt.Sprintf("%d / %d", m.totalExpsDone, m.totalExps))
-		skipFilesTotal := m.totalFiles - m.copyFilesTotal
-		skipBytesTotal := m.totalBytes - m.copyBytesTotal
-		ps.filesValue.SetText(fmt.Sprintf("%d / %d\n(%d already synced)", m.copyFilesDone, m.copyFilesTotal, skipFilesTotal))
-		ps.bytesValue.SetText(fmt.Sprintf("%s / %s\n(%s already synced)", humanBytes(m.copyBytesDone), humanBytes(m.copyBytesTotal), humanBytes(skipBytesTotal)))
+		if ps.extras.quickScan {
+			ps.filesValue.SetText(fmt.Sprintf("%d / %d", m.copyFilesDone, m.copyFilesTotal))
+			ps.bytesValue.SetText(fmt.Sprintf("%s / %s", humanBytes(m.copyBytesDone), humanBytes(m.copyBytesTotal)))
+		} else {
+			skipFilesTotal := m.totalFiles - m.copyFilesTotal
+			skipBytesTotal := m.totalBytes - m.copyBytesTotal
+			ps.filesValue.SetText(fmt.Sprintf("%d / %d\n(%d already synced)", m.copyFilesDone, m.copyFilesTotal, skipFilesTotal))
+			ps.bytesValue.SetText(fmt.Sprintf("%s / %s\n(%s already synced)", humanBytes(m.copyBytesDone), humanBytes(m.copyBytesTotal), humanBytes(skipBytesTotal)))
+		}
 		if m.copyBytesTotal > 0 {
 			ps.overallBar.SetValue(float64(m.copyBytesDone) / float64(m.copyBytesTotal))
 		} else {

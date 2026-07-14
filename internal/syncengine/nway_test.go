@@ -67,7 +67,7 @@ func TestScanNWay_LocationWithMostFilesIsNotTreatedAsEmpty(t *testing.T) {
 		{ID: "b", Name: "b", Kind: LocationLocal, RootPath: bRoot},
 	}
 
-	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings())
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestScanNWay_AllInSync(t *testing.T) {
 		locs[i] = Location{ID: r, Name: r, Kind: LocationLocal, RootPath: r}
 	}
 
-	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings())
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestScanNWay_ConflictAmongThree(t *testing.T) {
 		{ID: "c", Name: "c", Kind: LocationLocal, RootPath: rootC},
 	}
 
-	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings())
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +139,70 @@ func TestScanNWay_ConflictAmongThree(t *testing.T) {
 	}
 	if plan.ConflictReason == "" {
 		t.Error("expected a non-empty ConflictReason")
+	}
+}
+
+// TestScanNWay_QuickScanNeverConflicts mirrors TestScanNWay_ConflictAmongThree
+// exactly (same colliding-content setup that would be FileConflict under a
+// full scan) but runs under NWayQuickScan, which must never read file bytes:
+// a path present at every location is FileInSync regardless of whether the
+// present copies actually agree, and FileConflict must never appear.
+func TestScanNWay_QuickScanNeverConflicts(t *testing.T) {
+	rootA, rootB, rootC := t.TempDir(), t.TempDir(), t.TempDir()
+	const exp = "exp"
+	writeFileBytes(t, filepath.Join(rootA, exp, "r/f.mp3"), []byte("version-A-bytes"))
+	writeFileBytes(t, filepath.Join(rootB, exp, "r/f.mp3"), []byte("version-A-bytes")) // matches A
+	writeFileBytes(t, filepath.Join(rootC, exp, "r/f.mp3"), []byte("version-C-bytes")) // differs, ignored under quick scan
+
+	locs := []Location{
+		{ID: "a", Name: "a", Kind: LocationLocal, RootPath: rootA},
+		{ID: "b", Name: "b", Kind: LocationLocal, RootPath: rootB},
+		{ID: "c", Name: "c", Kind: LocationLocal, RootPath: rootC},
+	}
+
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayQuickScan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConflictCount != 0 {
+		t.Fatalf("ConflictCount = %d, want 0 — quick scan must never read bytes or detect conflicts", result.ConflictCount)
+	}
+	plan := planFor(t, result, "r/f.mp3")
+	if plan.Status != FileInSync {
+		t.Fatalf("status = %v, want FileInSync (present everywhere; quick scan never compares content)", plan.Status)
+	}
+	if plan.ConflictReason != "" {
+		t.Errorf("ConflictReason = %q, want empty", plan.ConflictReason)
+	}
+}
+
+// TestScanNWay_QuickScanMissingSome confirms the existing fast path — a path
+// present at only some locations needs no byte comparison under either mode
+// — still produces FileMissingSome (and correct per-location Exists flags)
+// under NWayQuickScan, so new files still get copied in.
+func TestScanNWay_QuickScanMissingSome(t *testing.T) {
+	rootA, rootB := t.TempDir(), t.TempDir()
+	const exp = "exp"
+	writeFileBytes(t, filepath.Join(rootA, exp, "r/new.mp3"), []byte("brand-new-recording"))
+	if err := os.MkdirAll(filepath.Join(rootB, exp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	locs := []Location{
+		{ID: "a", Name: "a", Kind: LocationLocal, RootPath: rootA},
+		{ID: "b", Name: "b", Kind: LocationLocal, RootPath: rootB},
+	}
+
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayQuickScan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := planFor(t, result, "r/new.mp3")
+	if plan.Status != FileMissingSome {
+		t.Fatalf("status = %v, want FileMissingSome", plan.Status)
+	}
+	if !plan.States[0].Exists || plan.States[1].Exists {
+		t.Errorf("States = %+v, want a.Exists=true, b.Exists=false", plan.States)
 	}
 }
 
@@ -169,7 +233,7 @@ func TestScanNWay_SizeCapCollision(t *testing.T) {
 		{ID: "c", Name: "c", Kind: LocationLocal, RootPath: rootC},
 	}
 
-	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings())
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +347,7 @@ func TestScanResultFromNWayTransfers(t *testing.T) {
 }
 
 func TestScanNWay_RejectsFewerThanTwoLocations(t *testing.T) {
-	if _, err := ScanNWay(context.Background(), []Location{{ID: "only"}}, "exp", DefaultFilterSettings()); err == nil {
+	if _, err := ScanNWay(context.Background(), []Location{{ID: "only"}}, "exp", DefaultFilterSettings(), NWayFullScan); err == nil {
 		t.Fatal("expected an error for fewer than 2 locations")
 	}
 }
@@ -300,7 +364,7 @@ func TestScanNWay_ListingErrorPropagates(t *testing.T) {
 	badLoc := Location{ID: "bad", Name: "bad", Kind: LocationLocal, RootPath: filepath.Join(t.TempDir(), "does-not-exist")}
 	goodLoc := Location{ID: "good", Name: "good", Kind: LocationLocal, RootPath: goodRoot}
 
-	_, err := ScanNWay(context.Background(), []Location{goodLoc, badLoc}, "exp", DefaultFilterSettings())
+	_, err := ScanNWay(context.Background(), []Location{goodLoc, badLoc}, "exp", DefaultFilterSettings(), NWayFullScan)
 	if err == nil {
 		t.Fatal("expected an error when one location's listing fails, got nil")
 	}
@@ -332,7 +396,7 @@ func TestScanNWay_DeterministicFileOrder(t *testing.T) {
 		{ID: "a", Name: "a", Kind: LocationLocal, RootPath: rootA},
 		{ID: "b", Name: "b", Kind: LocationLocal, RootPath: rootB},
 	}
-	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings())
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +422,7 @@ func TestScanNWay_PopulatesModTime(t *testing.T) {
 		{ID: "a", Name: "a", Kind: LocationLocal, RootPath: rootA},
 		{ID: "b", Name: "b", Kind: LocationLocal, RootPath: rootB},
 	}
-	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings())
+	result, err := ScanNWay(context.Background(), locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +493,7 @@ func TestScanNWayWithProgress_EmitsLiveEntriesAndDone(t *testing.T) {
 	var snaps []ScanProgress
 	_, err := ScanNWayWithProgress(context.Background(), locs, exp, DefaultFilterSettings(), func(p ScanProgress) {
 		snaps = append(snaps, p)
-	})
+	}, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +553,7 @@ func TestScanNWayWithProgress_EmptyDirectoryStillAppears(t *testing.T) {
 	var snaps []ScanProgress
 	_, err := ScanNWayWithProgress(context.Background(), locs, exp, DefaultFilterSettings(), func(p ScanProgress) {
 		snaps = append(snaps, p)
-	})
+	}, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}

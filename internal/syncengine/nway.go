@@ -33,7 +33,27 @@ const (
 	// FileConflict: two or more locations have the file but disagree on
 	// size and/or leading bytes. Never auto-resolved — needs an explicit
 	// per-file decision from the user, same as the pairwise ActionConflict.
+	// Only reachable under NWayFullScan — NWayQuickScan never reads bytes,
+	// so it can never detect (or produce) a conflict.
 	FileConflict
+)
+
+// NWayScanMode controls whether diffNWay reads file bytes for paths that
+// collide across locations.
+type NWayScanMode int
+
+const (
+	// NWayFullScan compares present copies of every colliding path via
+	// compareObjectsN (size + 256KB prefix), same as always. Can produce
+	// FileConflict.
+	NWayFullScan NWayScanMode = iota
+	// NWayQuickScan never reads file bytes: a path present everywhere is
+	// FileInSync, a path missing anywhere is FileMissingSome, regardless of
+	// whether present copies actually agree. Existence-only — meant for
+	// the common case of topping up a handful of new files into a large
+	// already-converged experiment without paying for a byte comparison on
+	// every already-present file. Never produces FileConflict.
+	NWayQuickScan
 )
 
 // FileLocationState is one location's view of one relative path.
@@ -82,8 +102,8 @@ type NWayScanResult struct {
 // list must never be silently treated as "has none of the files," which
 // would misclassify every file that location actually has as missing and
 // queue redundant/wrong-direction copies.
-func ScanNWay(ctx context.Context, locs []Location, relPath string, fset FilterSettings) (NWayScanResult, error) {
-	return ScanNWayWithProgress(ctx, locs, relPath, fset, nil)
+func ScanNWay(ctx context.Context, locs []Location, relPath string, fset FilterSettings, mode NWayScanMode) (NWayScanResult, error) {
+	return ScanNWayWithProgress(ctx, locs, relPath, fset, nil, mode)
 }
 
 // ScanNWayWithProgress is ScanNWay with live progress updates, in the same
@@ -91,7 +111,7 @@ func ScanNWay(ctx context.Context, locs []Location, relPath string, fset FilterS
 // renders an N-way scan identically: aggregate file/dir counts while the
 // per-location listings run, then per-file entries (mapped through
 // nwayDisplayEntry) with directory rollups as the diff classifies each path.
-func ScanNWayWithProgress(ctx context.Context, locs []Location, relPath string, fset FilterSettings, progress ScanProgressFunc) (NWayScanResult, error) {
+func ScanNWayWithProgress(ctx context.Context, locs []Location, relPath string, fset FilterSettings, progress ScanProgressFunc, mode NWayScanMode) (NWayScanResult, error) {
 	if len(locs) < 2 {
 		return NWayScanResult{}, fmt.Errorf("nway scan needs at least 2 locations, got %d", len(locs))
 	}
@@ -144,12 +164,13 @@ func ScanNWayWithProgress(ctx context.Context, locs []Location, relPath string, 
 		}
 	}
 
-	return diffNWay(ctx, locs, listings, relPath, progress)
+	return diffNWay(ctx, locs, listings, relPath, progress, mode)
 }
 
 // diffNWay computes, for every relative path seen at any of the listings,
-// which locations have it and whether every present copy agrees.
-func diffNWay(ctx context.Context, locs []Location, listings []SourceListing, label string, progress ScanProgressFunc) (NWayScanResult, error) {
+// which locations have it and (under NWayFullScan) whether every present
+// copy agrees.
+func diffNWay(ctx context.Context, locs []Location, listings []SourceListing, label string, progress ScanProgressFunc, mode NWayScanMode) (NWayScanResult, error) {
 	perLoc := make([]map[string]fs.Object, len(locs))
 	for i, listing := range listings {
 		m := make(map[string]fs.Object, len(listing.objects))
@@ -211,7 +232,7 @@ func diffNWay(ctx context.Context, locs []Location, listings []SourceListing, la
 		}
 
 		plan := FileConvergencePlan{RelPath: relPath, States: states}
-		if presentCount >= 2 {
+		if presentCount >= 2 && mode == NWayFullScan {
 			identical, reason, err := compareObjectsN(ctx, presentObjs)
 			if err != nil {
 				return NWayScanResult{}, err

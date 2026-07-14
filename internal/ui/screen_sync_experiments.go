@@ -30,15 +30,17 @@ func showSyncExperiments(s *state) {
 	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...))
 	expGroup := widget.NewCheckGroup(nil, nil)
 
-	var scanBtn *widget.Button
+	var quickScanBtn, fullScanBtn *widget.Button
 	updateScanBtn := func() {
-		if scanBtn == nil {
+		if quickScanBtn == nil || fullScanBtn == nil {
 			return
 		}
 		if len(locGroup.Selected()) >= 2 && len(expGroup.Selected) > 0 {
-			scanBtn.Enable()
+			quickScanBtn.Enable()
+			fullScanBtn.Enable()
 		} else {
-			scanBtn.Disable()
+			quickScanBtn.Disable()
+			fullScanBtn.Disable()
 		}
 	}
 	expGroup.OnChanged = func(sel []string) {
@@ -121,7 +123,7 @@ func showSyncExperiments(s *state) {
 		refresh()
 	}
 
-	scanBtn = widget.NewButton("Scan", func() {
+	startScanMode := func(mode syncengine.NWayScanMode) {
 		names := locGroup.Selected()
 		expNames := append([]string{}, expGroup.Selected...)
 		if len(names) < 2 {
@@ -135,7 +137,7 @@ func showSyncExperiments(s *state) {
 		locs := locationsFromNamesAny(s.cfg.Locations, names)
 
 		startScan := func() {
-			runNWayScan(s, locs, expNames)
+			runNWayScan(s, locs, expNames, mode)
 		}
 
 		if missing := missingLocalLocations(locs...); len(missing) > 0 {
@@ -153,8 +155,11 @@ func showSyncExperiments(s *state) {
 			return
 		}
 		startScan()
-	})
-	scanBtn.Importance = widget.HighImportance
+	}
+
+	quickScanBtn = widget.NewButton("Quick Scan", func() { startScanMode(syncengine.NWayQuickScan) })
+	quickScanBtn.Importance = widget.HighImportance
+	fullScanBtn = widget.NewButton("Full Scan", func() { startScanMode(syncengine.NWayFullScan) })
 	updateScanBtn()
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
@@ -166,7 +171,7 @@ func showSyncExperiments(s *state) {
 			statusLabel,
 			widget.NewSeparator(),
 		),
-		container.NewHBox(scanBtn, backBtn),
+		container.NewHBox(quickScanBtn, fullScanBtn, backBtn),
 		nil, nil,
 		container.NewVScroll(expGroup),
 	)
@@ -177,14 +182,25 @@ func showSyncExperiments(s *state) {
 // one task per experiment, each diffing that experiment across every
 // selected location (syncengine.ScanNWayWithProgress) with the same
 // three-column live progress as a pairwise scan — conflicts surface the
-// moment they're found, not in a blocking wait dialog at the end. Sync is
-// gated behind an explicit per-file resolution for every conflict (see
-// nwayResolver); pressing it applies the resolutions and hands the
-// resulting transfer plan to runNWayTransfers.
-func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
+// moment they're found, not in a blocking wait dialog at the end.
+//
+// Under NWayFullScan, Sync is gated behind an explicit per-file resolution
+// for every conflict (see nwayResolver); pressing it applies the
+// resolutions and hands the resulting transfer plan to runNWayTransfers.
+//
+// Under NWayQuickScan, diffNWay never reads bytes and so can never produce
+// a conflict (see syncengine.NWayQuickScan) — no resolver is constructed at
+// all, so the conflict-resolution UI never appears, and pressing Sync goes
+// straight to building the transfer plan and handing it to
+// runNWayTransfers.
+func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode syncengine.NWayScanMode) {
 	fset := s.cfg.DefaultFilter
 
-	resolver := newNWayResolver(expNames)
+	var resolver *nwayResolver
+	if mode == syncengine.NWayFullScan {
+		resolver = newNWayResolver(expNames)
+	}
+	results := make([]syncengine.NWayScanResult, len(expNames))
 
 	tasks := make([]scanTask, len(expNames))
 	for i, name := range expNames {
@@ -192,11 +208,14 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 			Label: name,
 			Locs:  locs,
 			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-				result, err := syncengine.ScanNWayWithProgress(ctx, locs, name, fset, progress)
+				result, err := syncengine.ScanNWayWithProgress(ctx, locs, name, fset, progress, mode)
 				if err != nil {
 					return syncengine.ScanResult{}, err
 				}
-				resolver.results[i] = result
+				results[i] = result
+				if resolver != nil {
+					resolver.results[i] = result
+				}
 				return syncengine.NWayDisplayScanResult(result), nil
 			},
 			// Start is deliberately nil: this session's Sync is replaced by
@@ -205,22 +224,36 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 		}
 	}
 
-	onSync := func() {
-		resolutions := resolver.buildResolutions()
-		proceed := func() {
-			applyNWayResolutions(s, expNames, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
-				runNWayTransfers(s, expNames, resolved)
-			})
-		}
-		if resolver.hasDeletes() {
-			showIrreversibleDeleteConfirm(s, proceed)
-			return
-		}
-		proceed()
+	syncingTitle := "Full Syncing"
+	if mode == syncengine.NWayQuickScan {
+		syncingTitle = "Quick Syncing"
 	}
 
-	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
-		syncFlowExtras{nway: resolver, onNWaySync: onSync})
+	var extras syncFlowExtras
+	if mode == syncengine.NWayQuickScan {
+		extras = syncFlowExtras{
+			onNWaySync:   func() { runNWayTransfers(s, expNames, results, mode) },
+			syncingTitle: syncingTitle,
+			quickScan:    true,
+		}
+	} else {
+		onSync := func() {
+			resolutions := resolver.buildResolutions()
+			proceed := func() {
+				applyNWayResolutions(s, expNames, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
+					runNWayTransfers(s, expNames, resolved, mode)
+				})
+			}
+			if resolver.hasDeletes() {
+				showIrreversibleDeleteConfirm(s, proceed)
+				return
+			}
+			proceed()
+		}
+		extras = syncFlowExtras{nway: resolver, onNWaySync: onSync, syncingTitle: syncingTitle}
+	}
+
+	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) }, extras)
 }
 
 // runNWayTransfers builds the minimal transfer plan for every experiment
@@ -228,7 +261,7 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string) {
 // scan/progress UI. The plan was already reviewed and confirmed in the scan
 // session, so the transfer session auto-starts copying instead of asking
 // for a second Sync press.
-func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult) {
+func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode) {
 	var tasks []scanTask
 	for i, name := range expNames {
 		pairs := syncengine.BuildNWayTransferPlan(results[i], syncengine.PreferLocalSource)
@@ -250,7 +283,12 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 		dialog.ShowInformation("Nothing to sync", "Every selected location already agrees on every file (excluding any files you chose not to sync).", s.win)
 		return
 	}
-	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) }, syncFlowExtras{autoSync: true})
+	syncingTitle := "Full Syncing"
+	if mode == syncengine.NWayQuickScan {
+		syncingTitle = "Quick Syncing"
+	}
+	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
+		syncFlowExtras{autoSync: true, syncingTitle: syncingTitle, quickScan: mode == syncengine.NWayQuickScan})
 }
 
 // applyNWayResolutions executes any real Rename/Delete resolutions
@@ -347,7 +385,7 @@ func applyNWayResolutions(s *state, expNames []string, results []syncengine.NWay
 		freshResults := make([]syncengine.NWayScanResult, len(expNames))
 		var scanErr error
 		for i, name := range expNames {
-			result, err := syncengine.ScanNWay(ctx, locs, name, fset)
+			result, err := syncengine.ScanNWay(ctx, locs, name, fset, syncengine.NWayFullScan)
 			if err != nil {
 				scanErr = fmt.Errorf("%s: %w", name, err)
 				break

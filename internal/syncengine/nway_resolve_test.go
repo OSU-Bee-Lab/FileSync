@@ -167,7 +167,7 @@ func TestRenameThenRescan_PropagatesAsOrdinaryMissingFile(t *testing.T) {
 	locs := []Location{locA, locB, locC}
 	ctx := context.Background()
 
-	before, err := ScanNWay(ctx, locs, exp, DefaultFilterSettings())
+	before, err := ScanNWay(ctx, locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestRenameThenRescan_PropagatesAsOrdinaryMissingFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	after, err := ScanNWay(ctx, locs, exp, DefaultFilterSettings())
+	after, err := ScanNWay(ctx, locs, exp, DefaultFilterSettings(), NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}

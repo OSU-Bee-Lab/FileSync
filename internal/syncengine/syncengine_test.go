@@ -140,7 +140,7 @@ func TestListChildren_AtEachDepth(t *testing.T) {
 // tests used to exercise directly.
 func scanAndCopyNWay(t *testing.T, ctx context.Context, locs []Location, name string, fset FilterSettings) (NWayScanResult, ScanResult) {
 	t.Helper()
-	result, err := ScanNWay(ctx, locs, name, fset)
+	result, err := ScanNWay(ctx, locs, name, fset, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestProgressReachesCompletion(t *testing.T) {
 	ctx := context.Background()
 	fset := DefaultFilterSettings()
 
-	result, err := ScanNWay(ctx, []Location{src, dst}, "Luke - Zucchini", fset)
+	result, err := ScanNWay(ctx, []Location{src, dst}, "Luke - Zucchini", fset, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,7 +300,7 @@ func TestCancelDoesNotHang(t *testing.T) {
 	src, dst := localLoc(srcRoot), localLoc(dstRoot)
 	fset := DefaultFilterSettings()
 
-	result, err := ScanNWay(context.Background(), []Location{src, dst}, "Luke - Zucchini", fset)
+	result, err := ScanNWay(context.Background(), []Location{src, dst}, "Luke - Zucchini", fset, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +417,7 @@ func TestSyncExperimentsAfterFullSync_NoCopyOptimization(t *testing.T) {
 	locs := []Location{src, dst}
 
 	// First sync: everything should copy.
-	result1, err := ScanNWay(ctx, locs, "Luke - Zucchini", fset)
+	result1, err := ScanNWay(ctx, locs, "Luke - Zucchini", fset, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func TestSyncExperimentsAfterFullSync_NoCopyOptimization(t *testing.T) {
 	}
 
 	// Second scan: everything should be identical.
-	result2, err := ScanNWay(ctx, locs, "Luke - Zucchini", fset)
+	result2, err := ScanNWay(ctx, locs, "Luke - Zucchini", fset, NWayFullScan)
 	if err != nil {
 		t.Fatal(err)
 	}
