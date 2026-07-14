@@ -258,13 +258,27 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	)
 
 	ps.cancelBtn = widget.NewButton("Cancel", func() {
-		// All running tasks' contexts (scan or sync) are children of the
-		// single context created for this run, so cancelling it cascades
-		// to every task/job currently in flight, however many are running
-		// concurrently.
-		if ps.activeCancel != nil {
-			ps.activeCancel()
+		cancelNow := func() {
+			// All running tasks' contexts (scan or sync) are children of
+			// the single context created for this run, so cancelling it
+			// cascades to every task/job currently in flight, however many
+			// are running concurrently.
+			if ps.activeCancel != nil {
+				ps.activeCancel()
+			}
 		}
+		if ps.phase != phaseSyncing {
+			cancelNow()
+			return
+		}
+		_, _ = showDangerConfirm("Sync still in progress",
+			"A sync is still in progress. Interrupting it now will leave partial files at the destination — these will not be restored by the next Quick Sync and will require a Full Sync to identify and resolve.",
+			"Cancel Sync", "Continue Syncing",
+			func(ok bool) {
+				if ok {
+					cancelNow()
+				}
+			}, s.win)
 	})
 
 	ps.backBtn = widget.NewButton("Back", ps.onBack)

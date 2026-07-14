@@ -11,7 +11,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -55,6 +54,13 @@ type recorderSyncScreen struct {
 
 	uploads    *recorderUploadPanel
 	inactivity *recorderInactivityWatcher
+
+	// endSyncMsgLabel and endSyncConfirmBtn, while non-nil, belong to an
+	// open confirmEndSync dialog; the blink ticker and rebuildRows keep its
+	// text and button styling current as rows finish syncing (see
+	// refreshEndSyncDialog).
+	endSyncMsgLabel   *widget.Label
+	endSyncConfirmBtn *widget.Button
 }
 
 // showRecorderSync builds and shows Screen 2 for params, then launches its
@@ -140,6 +146,7 @@ func (sc *recorderSyncScreen) runBlinkTicker() {
 						sc.refreshRow(rr)
 					}
 				}
+				sc.refreshEndSyncDialog()
 			})
 		}
 	}
@@ -302,6 +309,7 @@ func (sc *recorderSyncScreen) rebuildRows() {
 	}
 	sc.rowsBox.Objects = objs
 	sc.rowsBox.Refresh()
+	sc.refreshEndSyncDialog()
 }
 
 func (sc *recorderSyncScreen) refreshAllRows() {
@@ -310,6 +318,7 @@ func (sc *recorderSyncScreen) refreshAllRows() {
 	}
 	sc.updateRecordersIdle()
 	sc.reorderRowsBox()
+	sc.refreshEndSyncDialog()
 }
 
 func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
@@ -445,27 +454,68 @@ func (sc *recorderSyncScreen) endSync() {
 	showHome(sc.s)
 }
 
+// syncingCount returns how many rows are actively mid-transfer.
+func (sc *recorderSyncScreen) syncingCount() int {
+	n := 0
+	for _, r := range sc.rows {
+		if r.status == jobSyncing {
+			n++
+		}
+	}
+	return n
+}
+
+// endSyncMessage describes the current syncing state for the confirmEndSync
+// dialog, so it can be recomputed live as rows finish.
+func endSyncMessage(n int) string {
+	if n == 0 {
+		return "No syncs are active; you may now exit without issue."
+	}
+	if n == 1 {
+		return "1 recorder is still syncing. Ending now will interrupt its transfer."
+	}
+	return fmt.Sprintf("%d recorders are still syncing. Ending now will interrupt their transfers.", n)
+}
+
+// refreshEndSyncDialog keeps an open confirmEndSync dialog's message and
+// button styling current as rows transition in and out of jobSyncing; a
+// no-op when no such dialog is open. Once nothing is syncing, ending the
+// session is no longer destructive, so the confirm button drops its danger
+// (red) styling back to the default.
+func (sc *recorderSyncScreen) refreshEndSyncDialog() {
+	if sc.endSyncMsgLabel == nil {
+		return
+	}
+	n := sc.syncingCount()
+	sc.endSyncMsgLabel.SetText(endSyncMessage(n))
+	if sc.endSyncConfirmBtn != nil {
+		if n == 0 {
+			sc.endSyncConfirmBtn.Importance = widget.HighImportance
+		} else {
+			sc.endSyncConfirmBtn.Importance = widget.DangerImportance
+		}
+		sc.endSyncConfirmBtn.Refresh()
+	}
+}
+
 // confirmEndSync warns before ending the session if any row is actively
 // mid-transfer (jobSyncing), since ending the sync cancels that job in
 // progress rather than merely closing the screen. Other states (idle,
-// done, error, disconnected) end silently, as before.
+// done, error, disconnected) end silently, as before. While the dialog is
+// open, its message updates live (see refreshEndSyncDialog) as syncing
+// recorders finish.
 func (sc *recorderSyncScreen) confirmEndSync() {
-	syncing := false
-	for _, r := range sc.rows {
-		if r.status == jobSyncing {
-			syncing = true
-			break
-		}
-	}
-	if !syncing {
+	if sc.syncingCount() == 0 {
 		sc.endSync()
 		return
 	}
-	dialog.NewConfirm("Recorder still syncing",
-		"At least one recorder is still syncing. Ending now will cancel its transfer.\n\nEnd sync anyway?",
+	sc.endSyncMsgLabel, sc.endSyncConfirmBtn = showDangerConfirm("Recorder still syncing",
+		endSyncMessage(sc.syncingCount()), "End Sync", "Return to Sync Screen",
 		func(ok bool) {
+			sc.endSyncMsgLabel = nil
+			sc.endSyncConfirmBtn = nil
 			if ok {
 				sc.endSync()
 			}
-		}, sc.s.win).Show()
+		}, sc.s.win)
 }

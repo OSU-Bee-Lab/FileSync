@@ -15,6 +15,33 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
+// showDangerConfirm shows a Yes/No confirmation with plain text buttons (no
+// check/cancel glyphs) whose confirm button is styled DangerImportance
+// (red), for confirming an irreversible or disruptive action rather than a
+// neutral one. Wraps dialog.NewCustomWithoutButtons + SetButtons since
+// dialog.NewCustomConfirm always adds theme icons to its buttons. Returns
+// the message label and confirm button so callers that need to keep the
+// dialog current (e.g. a syncing count that changes while it's open, and
+// the confirm button's danger styling along with it) can update them live.
+func showDangerConfirm(title, message, confirmText, dismissText string, callback func(bool), parent fyne.Window) (*widget.Label, *widget.Button) {
+	msgLabel := widget.NewLabel(message)
+	msgLabel.Wrapping = fyne.TextWrapWord
+	d := dialog.NewCustomWithoutButtons(title, msgLabel, parent)
+
+	dismissBtn := widget.NewButton(dismissText, func() {
+		d.Hide()
+		callback(false)
+	})
+	confirmBtn := widget.NewButton(confirmText, func() {
+		d.Hide()
+		callback(true)
+	})
+	confirmBtn.Importance = widget.DangerImportance
+	d.SetButtons([]fyne.CanvasObject{dismissBtn, confirmBtn})
+	d.Show()
+	return msgLabel, confirmBtn
+}
+
 // requireNonEmpty shows an info dialog and returns false when value is
 // blank (after trimming) - shared by the "Name required" / "Folder
 // required" guards in the remote-setup wizard and edit-location screens.
