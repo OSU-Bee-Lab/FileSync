@@ -174,7 +174,7 @@ func splitDriveLabel(label string) (name, driveType string) {
 }
 
 // flattenHelp joins rclone's (often multi-paragraph) option help text into a
-// single line - the wizard renders HelpText as a Fyne form hint, which
+// single line - the wizard renders HelpText as a wrapped hint label, which
 // doesn't handle embedded newlines and shows missing-glyph boxes instead.
 func flattenHelp(help string) string {
 	return strings.Join(strings.Fields(help), " ")

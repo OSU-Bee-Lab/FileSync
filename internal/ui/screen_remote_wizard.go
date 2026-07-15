@@ -339,7 +339,19 @@ func populateRemoteFields(s *state, bt syncengine.BackendType, prefill map[strin
 			w = e
 		}
 		fieldWidgets[f.Key] = w
-		item := widget.NewForm(&widget.FormItem{Text: label, Widget: w, HintText: f.HelpText})
+		item := fyne.CanvasObject(widget.NewForm(&widget.FormItem{Text: label, Widget: w}))
+		if f.HelpText != "" {
+			// widget.Form's own HintText renders as an unwrapped canvas.Text,
+			// whose MinSize tracks the full (sometimes 200+ char) rclone help
+			// string - and even inside a collapsed "Advanced options"
+			// accordion item, that width still counts toward the whole
+			// screen's MinSize, stretching the window. A wrapped Label avoids
+			// that: its min width is just its widest word.
+			hint := widget.NewLabel(f.HelpText)
+			hint.Wrapping = fyne.TextWrapWord
+			hint.TextStyle = fyne.TextStyle{Italic: true}
+			item = container.NewVBox(item, hint)
+		}
 		if f.Advanced || backendsWithHiddenBasicFields[bt] {
 			advancedFieldsBox.Add(item)
 		} else {
