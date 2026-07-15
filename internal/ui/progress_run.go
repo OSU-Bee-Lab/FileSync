@@ -172,6 +172,8 @@ func (ps *progressScreen) runSync() {
 	ps.selectedFoldIdx = 0
 	ps.phase = phaseSyncing
 	ps.cancelling = false
+	ps.speedLabel.SetText("Speed: ---")
+	ps.speedLabel.Show()
 	ps.refreshUI()
 
 	jobs := make([]scanJob, len(ps.tasks))
@@ -227,9 +229,8 @@ func (ps *progressScreen) runSync() {
 
 					if snap.Speed > 0 {
 						ps.speedLabel.SetText(fmt.Sprintf("Speed: %s/s", humanSpeed(snap.Speed)))
-						ps.speedLabel.Show()
 					} else {
-						ps.speedLabel.Hide()
+						ps.speedLabel.SetText("Speed: ---")
 					}
 
 					// Force refreshing the active folders/files list during sync

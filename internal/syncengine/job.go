@@ -220,7 +220,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 
 		go func() { done <- copyDirWithRetry(ctx, fdst, fsrc, onRetry) }()
 
-		ticker := time.NewTicker(300 * time.Millisecond)
+		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
 		stats := accounting.Stats(ctx)
 
