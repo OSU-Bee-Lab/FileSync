@@ -88,6 +88,18 @@ func locationNames(locs []syncengine.Location) []string {
 	return out
 }
 
+// locationNamesByKind is locationNames filtered to one Kind, for pickers
+// that split local from cloud destinations (e.g. Sync Recorders).
+func locationNamesByKind(locs []syncengine.Location, kind syncengine.LocationKind) []string {
+	var out []string
+	for _, l := range locs {
+		if l.Kind == kind {
+			out = append(out, l.Name)
+		}
+	}
+	return out
+}
+
 // locationsFromNamesAny resolves a set of selected Names back into
 // Locations regardless of Kind, for pickers that don't separate local from
 // cloud (e.g. Sync Experiments' "To").

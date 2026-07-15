@@ -20,6 +20,10 @@ type RecorderSettings struct {
 	DestinationLocationIDs []string `json:"destinationLocationIds,omitempty"`
 	UploadLocationIDs      []string `json:"uploadLocationIds,omitempty"`
 	AutoDeleteAfterVerify  bool     `json:"autoDeleteAfterVerify"`
+	// BatchUpload, when set, defers cloud upload of recorder-synced files
+	// until the user explicitly presses Batch Upload on the active-sync
+	// screen, instead of uploading each file as soon as it lands locally.
+	BatchUpload bool `json:"batchUpload"`
 }
 
 // Config is FileSync's entire persisted app state.
@@ -51,6 +55,7 @@ func Default() Config {
 		DefaultFilter: syncengine.DefaultFilterSettings(),
 		RecorderSettings: RecorderSettings{
 			AutoDeleteAfterVerify: true,
+			BatchUpload:           true,
 		},
 		RecorderInactivityTimeoutMinutes: 5,
 	}

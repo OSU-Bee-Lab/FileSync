@@ -50,6 +50,10 @@ type recorderUploadPanel struct {
 	uploading, uploaded         []uploadFileEntry
 	uploadingList, uploadedList *widget.List
 	win                         fyne.Window
+	// onChange, if set, is called after every event once uploading/uploaded
+	// are updated, so a caller tracking "is anything actively transferring"
+	// (e.g. recorderSyncScreen.refreshCancelBtn) stays current.
+	onChange func()
 }
 
 func newRecorderUploadPanel(win fyne.Window) *recorderUploadPanel {
@@ -126,6 +130,9 @@ func (p *recorderUploadPanel) onUploadEvent(u recorder.UploadUpdate) {
 		if p.uploadingList != nil {
 			p.uploadingList.Refresh()
 			p.uploadedList.Refresh()
+		}
+		if p.onChange != nil {
+			p.onChange()
 		}
 	})
 }

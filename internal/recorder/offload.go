@@ -112,7 +112,10 @@ type UploadUpdate struct {
 // lets cloud upload start well before a whole recorder or session
 // finishes, rather than waiting for a separate scan+sync pass afterward.
 // onUpload, if non-nil, is called from those upload goroutines with each
-// upload's lifecycle events.
+// upload's lifecycle events. If batchUpload is set, this per-file queueing
+// is skipped entirely — files land locally only, and it's the caller's
+// responsibility to push them to uploadDests later (see the Batch Upload
+// button on Sync Recorders' active-sync screen).
 //
 // Once every file is verified complete, source files on the recorder are
 // deleted if autoDelete is set. This is the one place in FileSync that
@@ -130,6 +133,7 @@ func StartOffload(
 	experimentName string,
 	uploadDests []syncengine.Location,
 	autoDelete bool,
+	batchUpload bool,
 	onUpload func(UploadUpdate),
 ) (*OffloadJob, <-chan OffloadProgress) {
 	ctx, cancel := context.WithCancel(ctx)
@@ -321,6 +325,10 @@ func StartOffload(
 			total := cp.BytesTotal.Load()
 			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: total, BytesTotal: total}
 			emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
+
+			if batchUpload {
+				continue
+			}
 
 			fileTotal := total
 			for _, uploadDest := range uploadDests {

@@ -97,20 +97,24 @@ type recorderSyncParams struct {
 	subpath        string                // optional intermediate directories within the experiment, before recorderID (see SCHEMA.md)
 	experimentName string
 	autoDelete     bool
+	// batchUpload, when true and uploads is non-empty, defers cloud upload
+	// until the user presses Batch Upload on Screen 2 instead of uploading
+	// each file as soon as it's verified complete locally.
+	batchUpload bool
 }
 
 // showSyncRecorders is the entry point for the Sync Recorders feature: the
 // settings screen (Screen 1) shown before any sync activity starts.
 func showSyncRecorders(s *state) {
-	// destGroup offers every configured Location - local and cloud alike -
-	// as one combined destination picker. At sync time the selection is
-	// split back out by Kind: local ones are copied to directly, cloud
-	// ones (see recorderSyncParams.uploads) are uploaded to after the
-	// local copy completes (internal/recorder.StartOffload always needs
-	// at least one local destination to stage from).
-	preselected := append(append([]string{}, selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs)...),
-		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs)...)
-	destGroup := newToggleGroup(locationNames(s.cfg.Locations), preselected)
+	// destGroup offers local Locations only - files are always copied off
+	// the recorder to at least one of these directly
+	// (internal/recorder.StartOffload always needs a local destination to
+	// stage from). uploadGroup offers cloud Locations, uploaded to only
+	// after the local copy completes.
+	destGroup := newToggleGroup(locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal),
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs))
+	uploadGroup := newToggleGroup(locationNamesByKind(s.cfg.Locations, syncengine.LocationRemote),
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs))
 
 	// browser replaces free-typed experiment name + subpath entry: its
 	// root level *is* the experiment picker (each top-level folder is an
@@ -131,6 +135,18 @@ func showSyncRecorders(s *state) {
 	autoDeleteCheck := widget.NewCheck("Delete from recorder after verified copy", nil)
 	autoDeleteCheck.SetChecked(s.cfg.RecorderSettings.AutoDeleteAfterVerify)
 
+	// batchUploadCheck only makes sense once a cloud destination is picked;
+	// see uploadGroup.OnChanged below. Defaults on: batching is the faster
+	// choice whenever there are many files, and per-file upload-as-it-lands
+	// is the exception a user opts into by unchecking it.
+	batchUploadCheck := widget.NewCheck("Batch upload after local sync", nil)
+	batchUploadCheck.SetChecked(s.cfg.RecorderSettings.BatchUpload)
+	batchUploadCheck.Hide()
+	batchUploadHint := widget.NewLabel("Faster when syncing many files - uploads everything at once instead of as each file lands.")
+	batchUploadHint.Importance = widget.LowImportance
+	batchUploadHint.Wrapping = fyne.TextWrapWord
+	batchUploadHint.Hide()
+
 	startBtn := widget.NewButton("Sync Here", nil)
 	startBtn.Importance = widget.HighImportance
 
@@ -145,19 +161,32 @@ func showSyncRecorders(s *state) {
 
 	browser.OnPathChanged = func(string) { updateStartEnabled(); updateSyncingTo() }
 
+	// The browser shows the union of destination and upload locations'
+	// existing folder structure (see dest_folder_browser.go), so it needs
+	// refreshing whenever either group's selection changes.
 	refreshBrowserLocations := func() {
-		browser.SetLocations(locationsFromNamesAny(s.cfg.Locations, destGroup.Selected()))
+		names := append(append([]string{}, destGroup.Selected()...), uploadGroup.Selected()...)
+		browser.SetLocations(locationsFromNamesAny(s.cfg.Locations, names))
 	}
 
 	destGroup.OnChanged = func([]string) { updateStartEnabled(); refreshBrowserLocations() }
+	uploadGroup.OnChanged = func(sel []string) {
+		refreshBrowserLocations()
+		if len(sel) > 0 {
+			batchUploadCheck.Show()
+			batchUploadHint.Show()
+		} else {
+			batchUploadCheck.Hide()
+			batchUploadHint.Hide()
+		}
+	}
 	updateStartEnabled()
 	updateSyncingTo()
-	refreshBrowserLocations()
+	uploadGroup.OnChanged(uploadGroup.Selected())
 
 	startBtn.OnTapped = func() {
-		selected := destGroup.Selected()
-		destinations := locationsFromNames(s.cfg.Locations, selected, syncengine.LocationLocal)
-		uploads := locationsFromNames(s.cfg.Locations, selected, syncengine.LocationRemote)
+		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
+		uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected(), syncengine.LocationRemote)
 
 		if missing := missingLocalLocations(destinations...); len(missing) > 0 {
 			showLocationsNotFoundPrompt(s, missing, func() {
@@ -165,8 +194,8 @@ func showSyncRecorders(s *state) {
 				// them from the current selection and let them retry from
 				// this same screen rather than persistently disabling
 				// anything.
-				keep := make([]string, 0, len(selected))
-				for _, name := range selected {
+				keep := make([]string, 0, len(destGroup.Selected()))
+				for _, name := range destGroup.Selected() {
 					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(missing, *loc) {
 						keep = append(keep, name)
 					}
@@ -174,11 +203,11 @@ func showSyncRecorders(s *state) {
 				destGroup.SetSelected(keep)
 				updateStartEnabled()
 			}, func() {
-				startRecorderSync(s, browser.RelPath(), autoDeleteCheck, destinations, uploads)
+				startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
 			})
 			return
 		}
-		startRecorderSync(s, browser.RelPath(), autoDeleteCheck, destinations, uploads)
+		startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
 	}
 
 	backBtn := widget.NewButton("Cancel", func() { showHome(s) })
@@ -188,6 +217,9 @@ func showSyncRecorders(s *state) {
 		widget.NewForm(
 			&widget.FormItem{Text: "Destination(s)", Widget: destGroup.CanvasObject()},
 			&widget.FormItem{Text: "", Widget: autoDeleteCheck},
+			&widget.FormItem{Text: "Cloud upload(s)", Widget: uploadGroup.CanvasObject()},
+			&widget.FormItem{Text: "", Widget: batchUploadCheck},
+			&widget.FormItem{Text: "", Widget: batchUploadHint},
 		),
 		widget.NewLabelWithStyle("Sync Destination", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 	)
@@ -204,7 +236,7 @@ func showSyncRecorders(s *state) {
 // to the active-sync screen with destinations/uploads already resolved.
 // relPath is the folder chosen in the destination browser; its first
 // segment is the experiment name and everything after it is the subpath.
-func startRecorderSync(s *state, relPath string, autoDeleteCheck *widget.Check, destinations, uploads []syncengine.Location) {
+func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadCheck *widget.Check, destinations, uploads []syncengine.Location) {
 	segments := splitSubpathUI(relPath)
 	expName := ""
 	var subpathParts []string
@@ -217,6 +249,7 @@ func startRecorderSync(s *state, relPath string, autoDeleteCheck *widget.Check, 
 	s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)
 	s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(uploads)
 	s.cfg.RecorderSettings.AutoDeleteAfterVerify = autoDeleteCheck.Checked
+	s.cfg.RecorderSettings.BatchUpload = batchUploadCheck.Checked
 	s.saveConfig()
 
 	showRecorderSync(s, recorderSyncParams{
@@ -225,5 +258,6 @@ func startRecorderSync(s *state, relPath string, autoDeleteCheck *widget.Check, 
 		subpath:        subpath,
 		experimentName: expName,
 		autoDelete:     autoDeleteCheck.Checked,
+		batchUpload:    batchUploadCheck.Checked && len(uploads) > 0,
 	})
 }
