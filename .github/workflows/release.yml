@@ -48,7 +48,11 @@ jobs:
 
       - name: Install MinGW (cgo compiler for Windows)
         if: matrix.os == 'windows'
-        uses: egor-tensin/setup-mingw@v2
+        # Pinned to a commit past the v2 tag: v2 still has a "static
+        # workaround" step that deletes libpthread.dll.a, which the current
+        # chocolatey mingw package no longer ships, failing the job. Fixed
+        # upstream on the default branch but never re-tagged as v2.
+        uses: egor-tensin/setup-mingw@0ea9f5370e9405e1b4cc436a2668226b02450eb2
         with:
           platform: x64
 
