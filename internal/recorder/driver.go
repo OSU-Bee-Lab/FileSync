@@ -1,6 +1,7 @@
 package recorder
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,6 +42,12 @@ func WalkFiles(root string, fn func(path string, info os.FileInfo) error) error 
 // in.
 type Volume struct {
 	MountPoint string
+
+	// FSType is the volume's filesystem type as reported by the OS (e.g.
+	// "msdos", "exfat", "apfs" on macOS) - a passthrough of gopsutil's
+	// PartitionStat.Fstype, fetched during the same poll that discovers the
+	// volume, so drivers can use it in QuickReject with no extra I/O.
+	FSType string
 }
 
 // SourceFile is one file on a recorder that needs to land at DestRelPath
@@ -62,6 +69,14 @@ type SourceFile struct {
 type Driver interface {
 	// Name identifies the driver, e.g. "sony-icd-px370".
 	Name() string
+
+	// QuickReject reports whether v can be ruled out as this driver's
+	// recorder model using only metadata already known from the volume poll
+	// (currently FSType) - no disk I/O. Detect calls this first and skips
+	// its own (I/O-performing) check when QuickReject returns true. A
+	// driver that has no cheap signal for its hardware can always return
+	// false here to opt out of the optimization.
+	QuickReject(v Volume) bool
 
 	// Detect reports whether v looks like this driver's recorder model.
 	Detect(v Volume) bool
@@ -93,13 +108,33 @@ func Register(d Driver) {
 	Drivers = append(Drivers, d)
 }
 
-// Detect returns the first driver in Drivers that claims v, or nil if none
-// do.
-func Detect(v Volume) Driver {
+// Detect returns the driver in Drivers that claims v via its Detect method
+// (skipping the I/O-performing check for drivers whose QuickReject rules v
+// out first), or nil if none do. If more than one driver claims the same
+// volume, that's a driver-implementation conflict rather than a legitimate
+// ambiguity in the hardware, so Detect returns an error naming the
+// conflicting drivers instead of silently picking one.
+func Detect(v Volume) (Driver, error) {
+	var matches []Driver
 	for _, d := range Drivers {
+		if d.QuickReject(v) {
+			continue
+		}
 		if d.Detect(v) {
-			return d
+			matches = append(matches, d)
 		}
 	}
-	return nil
+
+	switch len(matches) {
+	case 0:
+		return nil, nil
+	case 1:
+		return matches[0], nil
+	default:
+		names := make([]string, len(matches))
+		for i, d := range matches {
+			names[i] = d.Name()
+		}
+		return nil, fmt.Errorf("volume %s matches multiple recorder drivers: %s", v.MountPoint, strings.Join(names, ", "))
+	}
 }

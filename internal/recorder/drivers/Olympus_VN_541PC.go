@@ -23,6 +23,12 @@ func init() {
 
 func (OlympusVN541PC) Name() string { return "olympus-vn-541pc" }
 
+// QuickReject rules out volumes that aren't FAT-formatted flash storage
+// without touching the disk - see isFATFamily.
+func (OlympusVN541PC) QuickReject(v recorder.Volume) bool {
+	return !isFATFamily(v.FSType)
+}
+
 // olympusSignatureDirs are the directory names an Olympus VN-541PC always
 // has at its mount root, ported from recorder_core.py's SIGNATURE_DIRS.
 var olympusSignatureDirs = []string{"RECORDER", "SYSTEM"}

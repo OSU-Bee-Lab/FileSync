@@ -431,20 +431,31 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 // onVolumeAttached handles a newly attached volume: detects its driver and
 // resolves its recorder ID, then either resumes a previously disconnected
 // row matched by device identity (see findDisconnectedRow) or starts a new
-// row. Unrecognized volumes are ignored entirely - never shown as a row.
+// row. Unrecognized volumes are ignored entirely - never shown as a row. A
+// volume that matches more than one registered driver (recorder.Detect
+// returns an error) is a driver-implementation conflict, not something the
+// user can fix by replugging, so it's still shown as a row - red, with the
+// conflict named - rather than silently dropped or silently resolved by
+// picking one driver.
 func (sc *recorderSyncScreen) onVolumeAttached(vol recorder.Volume) {
 	sc.inactivity.signalActivity()
-	driver := recorder.Detect(vol)
-	if driver == nil {
+	driver, err := recorder.Detect(vol)
+	if driver == nil && err == nil {
 		return
 	}
 	row := &recorderRow{volume: vol, driver: driver, status: jobIdle}
-	id, err := driver.RecorderID(vol)
+	var id string
 	if err != nil {
 		row.status = jobError
 		row.statusMsg = errString(err)
 	} else {
-		row.id = id
+		id, err = driver.RecorderID(vol)
+		if err != nil {
+			row.status = jobError
+			row.statusMsg = errString(err)
+		} else {
+			row.id = id
+		}
 	}
 	fyne.Do(func() {
 		if err == nil {

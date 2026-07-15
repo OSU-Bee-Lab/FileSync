@@ -47,7 +47,7 @@ func WatchVolumes(ctx context.Context, interval time.Duration) <-chan VolumeEven
 				if p.Mountpoint == "" {
 					continue
 				}
-				seen[p.Mountpoint] = Volume{MountPoint: p.Mountpoint}
+				seen[p.Mountpoint] = Volume{MountPoint: p.Mountpoint, FSType: p.Fstype}
 			}
 
 			for mp, v := range seen {
