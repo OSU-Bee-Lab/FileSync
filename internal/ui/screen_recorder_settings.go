@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -35,55 +36,70 @@ func missingLocalLocations(locs ...syncengine.Location) []syncengine.Location {
 	return missing
 }
 
-// showLocationsNotFoundPrompt is shown when a recorder offload's chosen
-// destination (or another local location it depends on) can't be found on
-// disk - e.g. an external drive that's unplugged. In practice this is
-// local-drive-only: its only caller resolves missing via
-// missingLocalLocations, which explicitly skips remotes. "Cancel" (the
-// dialog's built-in dismiss button) simply aborts the offload attempt.
-// "Deselect and continue" drops the missing location(s) from the current
-// selection (via onDeselect) and dismisses the prompt, leaving the location
-// itself untouched - it's still offered next time, since accessibility is
-// checked fresh at sync time rather than baked into the location's config.
-// "Reconnect" re-runs the same presence check (for after the drive has been
-// plugged back in): if everything now resolves it dismisses the prompt and
-// runs onFound; if something's still missing it updates the message in
-// place naming what's still absent, rather than closing.
-func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDeselect func(), onFound func()) {
+// showLocationsNotFoundPrompt is shown when a chosen local location (or
+// another local location an operation depends on) can't be found on disk -
+// e.g. an external drive that's unplugged. In practice this is
+// local-drive-only: every caller resolves missing via missingLocalLocations,
+// which explicitly skips remotes. It walks missing one location at a time,
+// naming each one individually, since every caller now catches "not found"
+// per-location rather than batching a scan/offload's whole selection into
+// one message. There is no Cancel: each location must be either deselected
+// or reconnected before this returns control to the caller.
+// "Deselect and continue" drops that one location and moves to the next
+// missing one (or finishes). "Reconnect" re-runs the presence check for
+// that location (for after the drive has been plugged back in): if it now
+// resolves, this moves to the next missing one (or finishes); otherwise the
+// prompt stays up for the same location.
+// Once every missing location has been resolved, onFound runs if none were
+// deselected (everything reconnected); otherwise onDeselect runs with the
+// locations the user chose to deselect, so the caller can drop them from its
+// selection - it does not also run onFound, mirroring the original
+// deselect-then-let-the-user-retry behavior.
+func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDeselect func(deselected []syncengine.Location), onFound func()) {
+	queue := append([]syncengine.Location{}, missing...)
+	var deselected []syncengine.Location
+
 	msgLabel := widget.NewLabel("")
 	msgLabel.Wrapping = fyne.TextWrapWord
-	setMsg := func(missing []syncengine.Location) {
-		names := make([]string, len(missing))
-		for i, l := range missing {
-			names[i] = l.Name
-		}
-		msgLabel.SetText("Location(s) not found:\n\n" + strings.Join(names, "\n") +
-			"\n\nPlug in the missing drive(s) and press Reconnect, deselect them to continue without them, or cancel.")
-	}
-	setMsg(missing)
 
 	var d dialog.Dialog
-	deselectBtn := widget.NewButton("Deselect and continue", func() {
+	var showNext func()
+
+	finish := func() {
 		d.Hide()
-		if onDeselect != nil {
-			onDeselect()
-		}
-	})
-	reconnectBtn := widget.NewButton("Reconnect", func() {
-		stillMissing := missingLocalLocations(missing...)
-		if len(stillMissing) == 0 {
-			d.Hide()
-			onFound()
+		if len(deselected) > 0 {
+			if onDeselect != nil {
+				onDeselect(deselected)
+			}
 			return
 		}
-		missing = stillMissing
-		setMsg(missing)
+		onFound()
+	}
+
+	showNext = func() {
+		if len(queue) == 0 {
+			finish()
+			return
+		}
+		msgLabel.SetText(fmt.Sprintf("Location %q not found.\n\nPlug in the missing drive and press Reconnect, or deselect it to continue without it.", queue[0].Name))
+	}
+
+	deselectBtn := widget.NewButton("Deselect and continue", func() {
+		deselected = append(deselected, queue[0])
+		queue = queue[1:]
+		showNext()
+	})
+	reconnectBtn := widget.NewButton("Reconnect", func() {
+		if stillMissing := missingLocalLocations(queue[0]); len(stillMissing) == 0 {
+			queue = queue[1:]
+			showNext()
+		}
 	})
 	reconnectBtn.Importance = widget.HighImportance
-	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
 	d = dialog.NewCustomWithoutButtons("Location not found",
-		container.NewVBox(msgLabel, container.NewCenter(container.NewHBox(deselectBtn, reconnectBtn, cancelBtn))), s.win)
+		container.NewVBox(msgLabel, container.NewCenter(container.NewHBox(deselectBtn, reconnectBtn))), s.win)
+	showNext()
 	d.Show()
 }
 
@@ -176,7 +192,37 @@ func showSyncRecorders(s *state) {
 		browser.SetLocations(locationsFromNamesAny(s.cfg.Locations, names))
 	}
 
-	destGroup.OnChanged = func([]string) { updateStartEnabled(); refreshBrowserLocations() }
+	// checkMissingDestinations pops the not-found prompt immediately for any
+	// currently-selected destination that isn't present on disk (e.g. an
+	// unplugged external drive), rather than waiting for Start to be
+	// pressed. onOK runs once every destination is confirmed present
+	// (nothing was missing, or every missing one got reconnected); if any
+	// were deselected instead, this drops them from destGroup itself and
+	// does not call onOK, matching showLocationsNotFoundPrompt's contract.
+	checkMissingDestinations := func(onOK func()) {
+		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
+		if missing := missingLocalLocations(destinations...); len(missing) > 0 {
+			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
+				keep := make([]string, 0, len(destGroup.Selected()))
+				for _, name := range destGroup.Selected() {
+					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
+						keep = append(keep, name)
+					}
+				}
+				destGroup.SetSelected(keep)
+				updateStartEnabled()
+				refreshBrowserLocations()
+			}, onOK)
+			return
+		}
+		onOK()
+	}
+
+	destGroup.OnChanged = func([]string) {
+		updateStartEnabled()
+		refreshBrowserLocations()
+		checkMissingDestinations(func() {})
+	}
 	uploadGroup.OnChanged = func(sel []string) {
 		refreshBrowserLocations()
 		if len(sel) > 0 {
@@ -188,31 +234,22 @@ func showSyncRecorders(s *state) {
 	updateStartEnabled()
 	updateSyncingTo()
 	uploadGroup.OnChanged(uploadGroup.Selected())
+	// Catch a destination that's already missing when the screen opens
+	// (e.g. persisted from RecorderSettings but its drive is unplugged
+	// right now), not just once the user touches destGroup or presses Start.
+	if len(destGroup.Selected()) > 0 {
+		checkMissingDestinations(func() {})
+	}
 
 	startBtn.OnTapped = func() {
-		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
-		uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected(), syncengine.LocationRemote)
-
-		if missing := missingLocalLocations(destinations...); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func() {
-				// User chose to deselect the missing destination(s); drop
-				// them from the current selection and let them retry from
-				// this same screen rather than persistently disabling
-				// anything.
-				keep := make([]string, 0, len(destGroup.Selected()))
-				for _, name := range destGroup.Selected() {
-					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(missing, *loc) {
-						keep = append(keep, name)
-					}
-				}
-				destGroup.SetSelected(keep)
-				updateStartEnabled()
-			}, func() {
-				startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
-			})
-			return
-		}
-		startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
+		// checkMissingDestinations is also run on every destGroup change and
+		// at screen load, so this is a safety net for a drive that goes
+		// missing in between rather than the primary catch.
+		checkMissingDestinations(func() {
+			destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
+			uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected(), syncengine.LocationRemote)
+			startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
+		})
 	}
 
 	backBtn := widget.NewButton("Back", func() { showHome(s) })

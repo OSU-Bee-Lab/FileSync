@@ -144,12 +144,36 @@ func showPullFiles(s *state) {
 		}
 	})
 
+	// checkSrcMissing pops the not-found prompt immediately if srcLoc is a
+	// local location that isn't present on disk (e.g. an unplugged external
+	// drive), rather than waiting for Scan to be pressed. onOK runs once
+	// srcLoc is confirmed present (nil, remote, or reconnected); if the user
+	// deselects instead, this clears srcSelect (which re-enters here with a
+	// nil srcLoc) and does not call onOK.
+	checkSrcMissing := func(onOK func()) {
+		if srcLoc == nil {
+			onOK()
+			return
+		}
+		if missing := missingLocalLocations(*srcLoc); len(missing) > 0 {
+			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
+				// User chose to deselect the missing source; ClearSelected
+				// fires srcSelect.OnChanged("") above, which resets srcLoc,
+				// scope, and the child listing - so the screen is left in
+				// the same state as a fresh visit, ready to retry.
+				srcSelect.ClearSelected()
+			}, onOK)
+			return
+		}
+		onOK()
+	}
+
 	srcSelect.OnChanged = func(name string) {
 		srcLoc = findLocation(s.cfg.Locations, name)
 		relPath = ""
 		scopePath = ""
 		scopeLabel.SetText("No scope chosen yet - tap \"Use this\" on a folder below.")
-		loadChildren()
+		checkSrcMissing(loadChildren)
 	}
 
 	chooseDestBtn := widget.NewButton("Choose destination folder...", func() {
@@ -185,7 +209,10 @@ func showPullFiles(s *state) {
 			label = "experiments/ (entire root)"
 		}
 
-		startScan := func() {
+		// checkSrcMissing is also run on every srcSelect change, so this is a
+		// safety net for a drive that goes missing in between rather than
+		// the primary catch.
+		checkSrcMissing(func() {
 			tasks := []scanTask{{
 				Label: label,
 				Locs:  []syncengine.Location{src},
@@ -197,19 +224,7 @@ func showPullFiles(s *state) {
 				},
 			}}
 			showSyncFlow(s, tasks, func() { showPullFiles(s) })
-		}
-
-		if missing := missingLocalLocations(src); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func() {
-				// User chose to deselect the missing source; ClearSelected
-				// fires srcSelect.OnChanged("") above, which resets srcLoc,
-				// scope, and the child listing - so the screen is left in
-				// the same state as a fresh visit, ready to retry.
-				srcSelect.ClearSelected()
-			}, startScan)
-			return
-		}
-		startScan()
+		})
 	})
 	scanBtn.Importance = widget.HighImportance
 	backBtn := widget.NewButton("Back", func() { showHome(s) })

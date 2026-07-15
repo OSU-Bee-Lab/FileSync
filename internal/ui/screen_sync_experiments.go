@@ -78,7 +78,8 @@ func showSyncExperiments(s *state) {
 	// visible from any of the currently-selected locations — a location
 	// missing an experiment entirely is exactly the "hasn't arrived there
 	// yet" case this flow exists to fill in, so it must still be offered.
-	refresh := func() {
+	var refresh func()
+	refresh = func() {
 		names := locGroup.Selected()
 		if len(names) == 0 {
 			setExpGroup(nil, nil)
@@ -87,6 +88,27 @@ func showSyncExperiments(s *state) {
 			return
 		}
 		locs := locationsFromNamesAny(s.cfg.Locations, names)
+
+		// Catch an unplugged local drive right away, at selection time,
+		// rather than letting it surface as an opaque listing error below or
+		// waiting until Quick/Full Scan is pressed (startScanMode's own
+		// missingLocalLocations check further down stays as a safety net for
+		// a drive that goes missing between here and then).
+		if missing := missingLocalLocations(locs...); len(missing) > 0 {
+			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
+				keep := make([]string, 0, len(names))
+				for _, name := range names {
+					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
+						keep = append(keep, name)
+					}
+				}
+				locGroup.SetSelected(keep)
+				s.syncExperimentsLocationNames = keep
+				refresh()
+			}, refresh)
+			return
+		}
+
 		statusLabel.SetText("")
 		loading.Show()
 		updateScanBtn()
@@ -210,10 +232,10 @@ func showSyncExperiments(s *state) {
 		}
 
 		if missing := missingLocalLocations(locs...); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func() {
+			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
 				keep := make([]string, 0, len(names))
 				for _, name := range names {
-					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(missing, *loc) {
+					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
 						keep = append(keep, name)
 					}
 				}
