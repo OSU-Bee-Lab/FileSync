@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// readIDFile returns the ID tag stored at idPath. This app never writes a
+// ReadIDFile returns the ID tag stored at idPath. This app never writes a
 // recorder ID — assignment is done by an out-of-band process — so a
 // missing or empty tag file is an error, not something to fill in.
-func readIDFile(idPath string) (string, error) {
+func ReadIDFile(idPath string) (string, error) {
 	data, err := os.ReadFile(idPath)
 	if err != nil {
 		return "", fmt.Errorf("no recorder ID found at %s: %w", idPath, err)

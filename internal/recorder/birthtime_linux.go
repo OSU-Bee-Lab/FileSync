@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// bestCreationTime returns the earliest of mtime/ctime, ported from
+// BestCreationTime returns the earliest of mtime/ctime, ported from
 // offload.py's best_creation_time: Linux doesn't expose a real birthtime
 // via stat(), so ctime is the closest available proxy.
-func bestCreationTime(info os.FileInfo) time.Time {
+func BestCreationTime(info os.FileInfo) time.Time {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return info.ModTime()

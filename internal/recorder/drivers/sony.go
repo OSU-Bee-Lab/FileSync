@@ -1,10 +1,17 @@
-package recorder
+// Package drivers holds recorder.Driver implementations for each supported
+// recorder model. Adding a new model is a matter of dropping in a new file
+// here that registers itself via recorder.Register from an init() — no
+// other package needs to change. This package is imported (blank) once from
+// main so those init()s run.
+package drivers
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+
+	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 )
 
 // SonyICDPX370 detects and offloads Sony ICD-PX370 recorders. Ported from
@@ -13,12 +20,16 @@ import (
 // physical port position.
 type SonyICDPX370 struct{}
 
+func init() {
+	recorder.Register(SonyICDPX370{})
+}
+
 func (SonyICDPX370) Name() string { return "sony-icd-px370" }
 
 // recFileDir returns the REC_FILE directory for v, checking both the
 // internal-memory layout (<mount>/REC_FILE) and the SD-card layout
 // (<mount>/PRIVATE/SONY/REC_FILE), or "" if neither is present.
-func (SonyICDPX370) recFileDir(v Volume) string {
+func (SonyICDPX370) recFileDir(v recorder.Volume) string {
 	internal := filepath.Join(v.MountPoint, "REC_FILE")
 	if fi, err := os.Stat(internal); err == nil && fi.IsDir() {
 		return internal
@@ -30,7 +41,7 @@ func (SonyICDPX370) recFileDir(v Volume) string {
 	return ""
 }
 
-func (d SonyICDPX370) Detect(v Volume) bool {
+func (d SonyICDPX370) Detect(v recorder.Volume) bool {
 	return d.recFileDir(v) != ""
 }
 
@@ -39,7 +50,7 @@ func (d SonyICDPX370) Detect(v Volume) bool {
 // stable identity, ported from filesync's get_identity/recorder_number.
 // Unlike Olympus, nothing is ever written to a Sony recorder for identity
 // purposes - do not add a tag-file scheme here.
-func (d SonyICDPX370) RecorderID(v Volume) (string, error) {
+func (d SonyICDPX370) RecorderID(v recorder.Volume) (string, error) {
 	dir, err := d.recordingsDir(v)
 	if err != nil {
 		return "", err
@@ -51,7 +62,7 @@ var sonyFolderPattern = regexp.MustCompile(`^FOLDER\d`)
 
 // recordingsDir returns the single non-FOLDER* subdirectory of REC_FILE
 // that holds the actual recordings, matching filesync's get_recorder_dir.
-func (d SonyICDPX370) recordingsDir(v Volume) (string, error) {
+func (d SonyICDPX370) recordingsDir(v recorder.Volume) (string, error) {
 	recFile := d.recFileDir(v)
 	if recFile == "" {
 		return "", fmt.Errorf("sony-icd-px370: %s does not look like a recorder", v.MountPoint)
@@ -83,7 +94,7 @@ func (d SonyICDPX370) recordingsDir(v Volume) (string, error) {
 	return filepath.Join(recFile, candidates[0]), nil
 }
 
-func (d SonyICDPX370) SourceFiles(v Volume) ([]SourceFile, error) {
+func (d SonyICDPX370) SourceFiles(v recorder.Volume) ([]recorder.SourceFile, error) {
 	dir, err := d.recordingsDir(v)
 	if err != nil {
 		return nil, err
@@ -94,14 +105,14 @@ func (d SonyICDPX370) SourceFiles(v Volume) ([]SourceFile, error) {
 // walkRelative lists every regular file under dir, recursively, with
 // DestRelPath set to its path relative to dir — preserving the recorder's
 // own layout, matching filesync's list_files_relative.
-func walkRelative(dir string) ([]SourceFile, error) {
-	var files []SourceFile
-	err := walkFiles(dir, func(path string, info os.FileInfo) error {
+func walkRelative(dir string) ([]recorder.SourceFile, error) {
+	var files []recorder.SourceFile
+	err := recorder.WalkFiles(dir, func(path string, info os.FileInfo) error {
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
-		files = append(files, SourceFile{AbsPath: path, DestRelPath: rel})
+		files = append(files, recorder.SourceFile{AbsPath: path, DestRelPath: rel})
 		return nil
 	})
 	if err != nil {

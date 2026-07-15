@@ -6,9 +6,9 @@ import (
 	"time"
 )
 
-// bestCreationTime returns the earliest of mtime/birthtime, ported from
+// BestCreationTime returns the earliest of mtime/birthtime, ported from
 // offload.py's best_creation_time: macOS exposes a real st_birthtime.
-func bestCreationTime(info os.FileInfo) time.Time {
+func BestCreationTime(info os.FileInfo) time.Time {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
 		return info.ModTime()

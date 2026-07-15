@@ -1,10 +1,12 @@
-package recorder
+package drivers
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 )
 
 // OlympusVN541PC detects and offloads Olympus VN-541PC recorders. Ported
@@ -15,13 +17,17 @@ import (
 // original names.
 type OlympusVN541PC struct{}
 
+func init() {
+	recorder.Register(OlympusVN541PC{})
+}
+
 func (OlympusVN541PC) Name() string { return "olympus-vn-541pc" }
 
 // olympusSignatureDirs are the directory names an Olympus VN-541PC always
 // has at its mount root, ported from recorder_core.py's SIGNATURE_DIRS.
 var olympusSignatureDirs = []string{"RECORDER", "SYSTEM"}
 
-func (OlympusVN541PC) Detect(v Volume) bool {
+func (OlympusVN541PC) Detect(v recorder.Volume) bool {
 	entries, err := os.ReadDir(v.MountPoint)
 	if err != nil {
 		return false
@@ -40,19 +46,19 @@ func (OlympusVN541PC) Detect(v Volume) bool {
 	return true
 }
 
-func (OlympusVN541PC) idFilePath(v Volume) string {
+func (OlympusVN541PC) idFilePath(v recorder.Volume) string {
 	return filepath.Join(v.MountPoint, "ID.txt")
 }
 
-func (d OlympusVN541PC) RecorderID(v Volume) (string, error) {
-	return readIDFile(d.idFilePath(v))
+func (d OlympusVN541PC) RecorderID(v recorder.Volume) (string, error) {
+	return recorder.ReadIDFile(d.idFilePath(v))
 }
 
-func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {
-	var files []SourceFile
+func (d OlympusVN541PC) SourceFiles(v recorder.Volume) ([]recorder.SourceFile, error) {
+	var files []recorder.SourceFile
 	used := make(map[string]bool)
 
-	err := walkFiles(v.MountPoint, func(path string, info os.FileInfo) error {
+	err := recorder.WalkFiles(v.MountPoint, func(path string, info os.FileInfo) error {
 		if !strings.EqualFold(filepath.Ext(info.Name()), ".wma") {
 			return nil
 		}
@@ -63,11 +69,11 @@ func (d OlympusVN541PC) SourceFiles(v Volume) ([]SourceFile, error) {
 		}
 		relDir = stripRecorderPrefix(relDir)
 
-		ts := bestCreationTime(info)
+		ts := recorder.BestCreationTime(info)
 		base := ts.Format("20060102_150405") + ".wma"
 		destRel := uniqueDestRel(used, relDir, base)
 
-		files = append(files, SourceFile{AbsPath: path, DestRelPath: destRel})
+		files = append(files, recorder.SourceFile{AbsPath: path, DestRelPath: destRel})
 		return nil
 	})
 	if err != nil {

@@ -14,11 +14,12 @@ func isHiddenEntry(name string) bool {
 	return strings.HasPrefix(name, ".")
 }
 
-// walkFiles recursively walks root, skipping hidden directories (see
-// isHiddenEntry), and invokes fn for every regular file found. Both driver
-// implementations need this same skip-hidden-dirs preamble; only the
-// per-file handling (naming, filtering) differs between them.
-func walkFiles(root string, fn func(path string, info os.FileInfo) error) error {
+// WalkFiles recursively walks root, skipping hidden directories (see
+// isHiddenEntry), and invokes fn for every regular file found. Driver
+// implementations in internal/recorder/drivers need this same
+// skip-hidden-dirs preamble; only the per-file handling (naming, filtering)
+// differs between them.
+func WalkFiles(root string, fn func(path string, info os.FileInfo) error) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if info != nil && info.IsDir() && isHiddenEntry(info.Name()) {
 			return filepath.SkipDir
@@ -53,8 +54,11 @@ type SourceFile struct {
 
 // Driver implements recorder-model-specific detection and file layout.
 // Storage layouts vary too much between recorder hardware to have one
-// generic implementation (see sony.go vs olympus.go), so each supported
-// model gets its own Driver.
+// generic implementation, so each supported model gets its own Driver,
+// living in its own file under internal/recorder/drivers and registered
+// with Register from an init() there. Adding a new recorder model is a
+// matter of dropping in a new file in that package — nothing here needs to
+// change.
 type Driver interface {
 	// Name identifies the driver, e.g. "sony-icd-px370".
 	Name() string
@@ -79,9 +83,14 @@ type Driver interface {
 // Drivers is the registry of supported recorder models, checked in order
 // against each newly attached volume. A volume matching none of them is
 // surfaced in the UI as an unrecognized device; no action is taken on it.
-var Drivers = []Driver{
-	SonyICDPX370{},
-	OlympusVN541PC{},
+// Populated by Register, not listed directly here — see internal/recorder/drivers.
+var Drivers []Driver
+
+// Register adds d to Drivers. Driver implementations call this from an
+// init() in their own file (see internal/recorder/drivers), so adding a new
+// recorder model never requires touching this package.
+func Register(d Driver) {
+	Drivers = append(Drivers, d)
 }
 
 // Detect returns the first driver in Drivers that claims v, or nil if none

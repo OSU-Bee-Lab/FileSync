@@ -4,6 +4,7 @@ package main
 
 import (
 	_ "github.com/OSU-Bee-Lab/filesync/internal/rcbackends"
+	_ "github.com/OSU-Bee-Lab/filesync/internal/recorder/drivers"
 	"github.com/OSU-Bee-Lab/filesync/internal/ui"
 	"github.com/rclone/rclone/fs/config/configfile"
 )
