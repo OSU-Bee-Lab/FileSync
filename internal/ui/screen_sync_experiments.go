@@ -30,9 +30,9 @@ func showSyncExperiments(s *state) {
 	loading := newLoadingBar()
 
 	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...))
-	expGroup := widget.NewCheckGroup(nil, nil)
 
 	var quickScanBtn, fullScanBtn *widget.Button
+	var expGroup *widget.CheckGroup
 	updateScanBtn := func() {
 		if quickScanBtn == nil || fullScanBtn == nil {
 			return
@@ -45,10 +45,34 @@ func showSyncExperiments(s *state) {
 			fullScanBtn.Disable()
 		}
 	}
-	expGroup.OnChanged = func(sel []string) {
-		s.syncExperimentsExpNames = sel
-		updateScanBtn()
+
+	// setExpGroup replaces expGroup wholesale rather than mutating its
+	// Options/Selected fields in place. Fyne's widget.CheckGroup renderer
+	// (checkGroupRenderer.updateItems, checked_group.go) has a bug: when
+	// reused across an Options change, it reads a reused Check item's stale
+	// Text (from the option that used to live at that index) to decide
+	// Checked *before* overwriting Text with the new option — so a row can
+	// render checked for whatever option happens to land at an index that
+	// previously held a selected one. We rebuild the union incrementally as
+	// locations report in (see refresh below), which reorders/inserts
+	// options on essentially every update and reliably tripped this. A
+	// brand-new CheckGroup always starts with zero items, so every Check is
+	// constructed fresh with its correct name baked in — no stale index to
+	// misread.
+	expScroll := container.NewVScroll(widget.NewCheckGroup(nil, nil))
+	setExpGroup := func(options, selected []string) {
+		g := widget.NewCheckGroup(options, nil)
+		g.Selected = selected
+		g.OnChanged = func(sel []string) {
+			s.syncExperimentsExpNames = sel
+			updateScanBtn()
+		}
+		g.Refresh()
+		expGroup = g
+		expScroll.Content = g
+		expScroll.Refresh()
 	}
+	setExpGroup(nil, nil)
 
 	// refresh reloads the experiment list as the union of every experiment
 	// visible from any of the currently-selected locations — a location
@@ -57,9 +81,7 @@ func showSyncExperiments(s *state) {
 	refresh := func() {
 		names := locGroup.Selected()
 		if len(names) < 2 {
-			expGroup.Options = nil
-			expGroup.Selected = nil
-			expGroup.Refresh()
+			setExpGroup(nil, nil)
 			updateScanBtn()
 			statusLabel.SetText("Pick two or more locations and at least one experiment.")
 			return
@@ -67,9 +89,7 @@ func showSyncExperiments(s *state) {
 		locs := locationsFromNamesAny(s.cfg.Locations, names)
 		statusLabel.SetText("")
 		loading.Show()
-		expGroup.Options = nil
-		expGroup.Selected = nil
-		expGroup.Refresh()
+		setExpGroup(nil, nil)
 		updateScanBtn()
 
 		// applyUnion re-renders expGroup from the current union/seen state -
@@ -77,16 +97,14 @@ func showSyncExperiments(s *state) {
 		// fast location's experiments show right away instead of waiting on
 		// a slow one) and once more at the end for the final status text.
 		applyUnion := func(union []string, seen map[string]bool) {
-			expGroup.Options = union
 			keep := make([]string, 0, len(s.syncExperimentsExpNames))
 			for _, name := range s.syncExperimentsExpNames {
 				if seen[name] {
 					keep = append(keep, name)
 				}
 			}
-			expGroup.Selected = keep
 			s.syncExperimentsExpNames = keep
-			expGroup.Refresh()
+			setExpGroup(union, keep)
 			updateScanBtn()
 		}
 
@@ -211,7 +229,7 @@ func showSyncExperiments(s *state) {
 		),
 		container.NewHBox(quickScanBtn, fullScanBtn, backBtn),
 		nil, nil,
-		container.NewVScroll(expGroup),
+		expScroll,
 	)
 	s.setContent(container.NewPadded(content))
 }
