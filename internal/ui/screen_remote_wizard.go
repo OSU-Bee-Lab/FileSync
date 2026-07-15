@@ -33,6 +33,19 @@ var oauthBackends = map[syncengine.BackendType]bool{
 
 var remoteNameSanitizer = regexp.MustCompile(`[^A-Za-z0-9_-]+`)
 
+// backendsWithHiddenBasicFields are backends where every FieldSpec is tucked
+// into the "Advanced options" accordion, regardless of rclone's own Advanced
+// flag on each option. These backends already give the user a top-level way
+// to point at the right place - SharePoint/OneDrive's site URL entry, and
+// Google Drive/Dropbox's "Path within remote" + Browse row - so the
+// remaining rclone options (client IDs, chunk sizes, etc.) are things almost
+// no one needs to touch and would otherwise clutter the form.
+var backendsWithHiddenBasicFields = map[syncengine.BackendType]bool{
+	syncengine.BackendOneDrive: true,
+	syncengine.BackendDrive:    true,
+	syncengine.BackendDropbox:  true,
+}
+
 func showAddLocation(s *state) {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetPlaceHolder("e.g. Lab Server, OSU SharePoint")
@@ -100,15 +113,18 @@ func showAddLocation(s *state) {
 			form.setBackend(s, kindBackends[kind])
 			dynamicArea.Add(form.container)
 			saveBtn.SetText("Next")
+		} else if oauthBackends[kindBackends[kind]] {
+			// Google Drive/Dropbox: no free-typed path row either - "Next"
+			// authorizes then opens the same folder browser OneDrive uses,
+			// so there's never a hand-typed path to get wrong.
+			form.setBackend(s, kindBackends[kind])
+			dynamicArea.Add(form.container)
+			saveBtn.SetText("Next")
 		} else {
 			form.setBackend(s, kindBackends[kind])
 			dynamicArea.Add(form.pathRow())
 			dynamicArea.Add(form.container)
-			if oauthBackends[kindBackends[kind]] {
-				saveBtn.SetText("Authorize")
-			} else {
-				saveBtn.SetText("Save")
-			}
+			saveBtn.SetText("Save")
 		}
 		dynamicArea.Refresh()
 	}
@@ -155,7 +171,7 @@ func showAddLocation(s *state) {
 		}
 
 		saveBtn.Disable()
-		runRemoteOAuth(s, "Connecting...", "Setting up "+kindSelect.Selected+"...",
+		runRemoteOAuth(s, bt, "Connecting...", "Setting up "+kindSelect.Selected+"...",
 			func(ctx context.Context, onAuthURL func(url string)) error {
 				return syncengine.CreateRemote(ctx, remoteName, bt, fields, onAuthURL, chooseDrive)
 			},
@@ -229,7 +245,7 @@ func showAddLocation(s *state) {
 			return
 		}
 
-		isOneDrive := kindBackends[kindSelect.Selected] == syncengine.BackendOneDrive
+		bt := kindBackends[kindSelect.Selected]
 		ensureRemote(func() {
 			finalize := func() {
 				s.cfg.Locations = append(s.cfg.Locations, syncengine.Location{
@@ -242,18 +258,17 @@ func showAddLocation(s *state) {
 				s.saveConfig()
 				showLocations(s)
 			}
-			// OneDrive/SharePoint: "Next" always opens the browser to choose
-			// the document library and folder (pre-positioned at any folder
-			// parsed out of the pasted URL), then saves on confirm.
-			if isOneDrive {
-				_, bakedPath := syncengine.ParseSharePointURL(siteURLEntry.Text)
-				openBrowser(bakedPath, finalize)
-				return
-			}
-			// Other remotes: if several drives were offered and none picked,
-			// browse to one first; otherwise save straight away.
-			if !driveConfirmed && len(capturedDrives) > 1 {
-				openBrowser(strings.TrimSpace(form.pathEntry.Text), finalize)
+			// OAuth backends (OneDrive/SharePoint, Google Drive, Dropbox):
+			// "Next" always opens the browser to choose the exact folder
+			// (pre-positioned at any folder parsed out of a pasted
+			// SharePoint URL), then saves on confirm - there's no hand-typed
+			// path row for these.
+			if oauthBackends[bt] {
+				start := ""
+				if bt == syncengine.BackendOneDrive {
+					_, start = syncengine.ParseSharePointURL(siteURLEntry.Text)
+				}
+				openBrowser(start, finalize)
 				return
 			}
 			finalize()
@@ -325,7 +340,7 @@ func populateRemoteFields(s *state, bt syncengine.BackendType, prefill map[strin
 		}
 		fieldWidgets[f.Key] = w
 		item := widget.NewForm(&widget.FormItem{Text: label, Widget: w, HintText: f.HelpText})
-		if f.Advanced {
+		if f.Advanced || backendsWithHiddenBasicFields[bt] {
 			advancedFieldsBox.Add(item)
 		} else {
 			remoteFieldsBox.Add(item)

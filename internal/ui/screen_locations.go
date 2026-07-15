@@ -111,9 +111,11 @@ func removeLocation(s *state, id int, loc syncengine.Location) {
 		unlistLocation(s, id)
 	})
 	deleteBtn.Importance = widget.DangerImportance
+	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
-	d = dialog.NewCustom("Remove location", "Cancel",
-		container.NewVBox(msg, container.NewHBox(unlistBtn, deleteBtn)), s.win)
+	d = dialog.NewCustomWithoutButtons("Remove location",
+		container.NewVBox(msg, container.NewCenter(container.NewHBox(unlistBtn, deleteBtn, cancelBtn))), s.win)
+	d.Resize(fyne.NewSize(420, 0))
 	d.Show()
 }
 
@@ -187,7 +189,8 @@ func showReconnectWindow(s *state, err error, remoteName, displayName string) {
 // confirms to their default ("yes, refresh token"), so this forces the
 // browser sign-in flow the same way editing-and-saving an OAuth remote does.
 func reconnectRemote(s *state, remoteName, displayName string) {
-	runRemoteOAuthUpdate(s, "Reconnecting...", "Reconnecting "+displayName+"...", remoteName, map[string]string{}, func(err error) {
+	bt, _, _ := syncengine.RemoteConfig(remoteName)
+	runRemoteOAuthUpdate(s, bt, "Reconnecting...", "Reconnecting "+displayName+"...", remoteName, map[string]string{}, func(err error) {
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
@@ -203,8 +206,8 @@ func reconnectRemote(s *state, remoteName, displayName string) {
 // showing the shared sign-in dialog (see runRemoteOAuth), reused by the
 // Reconnect action above and the "Save & Re-authorize" edit flow
 // (screen_remote_edit.go) so the three flows don't drift apart.
-func runRemoteOAuthUpdate(s *state, dialogTitle, progressText, remoteName string, fields map[string]string, onDone func(err error)) {
-	runRemoteOAuth(s, dialogTitle, progressText, func(ctx context.Context, onAuthURL func(url string)) error {
+func runRemoteOAuthUpdate(s *state, bt syncengine.BackendType, dialogTitle, progressText, remoteName string, fields map[string]string, onDone func(err error)) {
+	runRemoteOAuth(s, bt, dialogTitle, progressText, func(ctx context.Context, onAuthURL func(url string)) error {
 		return syncengine.UpdateRemote(ctx, remoteName, fields, onAuthURL)
 	}, onDone)
 }
@@ -220,7 +223,7 @@ func runRemoteOAuthUpdate(s *state, dialogTitle, progressText, remoteName string
 // account their default browser is signed into). Cancel really cancels ctx.
 // onDone runs on the Fyne UI goroutine; a user-initiated cancel reports
 // context.Canceled so callers can tell it apart from a real failure.
-func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx context.Context, onAuthURL func(url string)) error, onDone func(err error)) {
+func runRemoteOAuth(s *state, bt syncengine.BackendType, dialogTitle, progressText string, run func(ctx context.Context, onAuthURL func(url string)) error, onDone func(err error)) {
 	progressLabel := widget.NewLabel(progressText)
 	progressLabel.Wrapping = fyne.TextWrapWord
 
@@ -264,10 +267,18 @@ func runRemoteOAuth(s *state, dialogTitle, progressText string, run func(ctx con
 				openBtn.Show()
 				copyBtn.Show()
 				progressDialog.Resize(fyne.NewSize(460, 200))
-				progressLabel.SetText("Click Open in Browser to sign in.\n\n" +
-					"To sign in as a different account than the one your browser " +
-					"is already logged into, use Copy Link and open it in a " +
-					"private/incognito window.")
+				text := "Click Open in Browser to sign in."
+				if bt == syncengine.BackendOneDrive {
+					// OneDrive/SharePoint sign-in reuses whichever Microsoft
+					// account the browser is already logged into and won't
+					// re-prompt for a different one - Google Drive/Dropbox
+					// don't have this quirk, they prompt for account choice
+					// every time.
+					text += "\n\nTo sign in as a different account than the one your browser " +
+						"is already logged into, use Copy Link and open it in a " +
+						"private/incognito window."
+				}
+				progressLabel.SetText(text)
 			})
 		})
 		fyne.Do(func() {

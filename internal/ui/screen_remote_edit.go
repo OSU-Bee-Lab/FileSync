@@ -121,7 +121,7 @@ func showEditLocation(s *state, id int) {
 			}
 
 			saveBtn.Disable()
-			runRemoteOAuthUpdate(s, "Saving...", "Updating "+name+"...", loc.RemoteName, fields, func(err error) {
+			runRemoteOAuthUpdate(s, bt, "Saving...", "Updating "+name+"...", loc.RemoteName, fields, func(err error) {
 				saveBtn.Enable()
 				if err != nil {
 					if errors.Is(err, context.Canceled) {

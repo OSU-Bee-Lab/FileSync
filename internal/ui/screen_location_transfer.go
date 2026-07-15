@@ -95,7 +95,7 @@ func confirmImportLocation(s *state, imported syncengine.ExportedLocation) {
 func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 	remoteName := remoteNameSanitizer.ReplaceAllString(imported.Name, "-")
 
-	runRemoteOAuth(s, "Connecting...", "Setting up "+imported.Name+"...",
+	runRemoteOAuth(s, imported.BackendType, "Connecting...", "Setting up "+imported.Name+"...",
 		func(ctx context.Context, onAuthURL func(url string)) error {
 			// Pass a nil drive chooser: an exported location already carries its
 			// drive_id in Fields, so driveConfigSteps preserves that rather than

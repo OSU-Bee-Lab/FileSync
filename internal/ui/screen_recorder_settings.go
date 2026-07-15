@@ -80,9 +80,10 @@ func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDese
 		setMsg(missing)
 	})
 	reconnectBtn.Importance = widget.HighImportance
+	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
-	d = dialog.NewCustom("Location not found", "Cancel",
-		container.NewVBox(msgLabel, container.NewHBox(deselectBtn, reconnectBtn)), s.win)
+	d = dialog.NewCustomWithoutButtons("Location not found",
+		container.NewVBox(msgLabel, container.NewCenter(container.NewHBox(deselectBtn, reconnectBtn, cancelBtn))), s.win)
 	d.Show()
 }
 

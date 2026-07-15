@@ -8,6 +8,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -49,50 +50,77 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 
 	pathLabel := widget.NewLabel("")
 	pathLabel.Wrapping = fyne.TextWrapWord
-	upBtn := widget.NewButton("⬆ Up", nil)
+	backBtn := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), nil)
+	statusLbl := widget.NewLabel("")
+	statusLbl.Wrapping = fyne.TextWrapWord
 
-	itemsBox := container.NewVBox()
-	scroll := container.NewVScroll(itemsBox)
-	scroll.SetMinSize(fyne.NewSize(400, 320))
-
+	// rows mirrors destFolderBrowser's row model: drive/folder names to
+	// browse into, one row per name, rendered via a widget.List so this
+	// browser looks and behaves like the recorder-sync destination browser
+	// (dest_folder_browser.go) rather than a bespoke stack of buttons.
+	var rows []string
 	var d dialog.Dialog
 	useBtn := widget.NewButton("Use this folder", nil)
 	useBtn.Importance = widget.HighImportance
 
 	var refresh func()
 
+	list := widget.NewList(
+		func() int { return len(rows) },
+		func() fyne.CanvasObject {
+			b := widget.NewButton("", nil)
+			b.Alignment = widget.ButtonAlignLeading
+			return b
+		},
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			b := obj.(*widget.Button)
+			name := rows[id]
+			if atDrives {
+				dr := drives[id]
+				label := dr.Name
+				if dr.Type != "" {
+					label += "  (" + dr.Type + ")"
+				}
+				b.SetText("\U0001F5C2  " + label)
+				b.OnTapped = func() {
+					drive = dr
+					atDrives = false
+					current = startPath
+					startPath = ""
+					refresh()
+				}
+				return
+			}
+			b.SetText("\U0001F4C1 " + name)
+			b.OnTapped = func() {
+				current = path.Join(current, name)
+				refresh()
+			}
+		},
+	)
+	scroll := container.NewVScroll(list)
+	scroll.SetMinSize(fyne.NewSize(400, 320))
+
 	showDriveList := func() {
 		pathLabel.SetText("Choose a drive / document library:")
-		upBtn.Disable()
+		backBtn.Disable()
 		useBtn.Disable()
-		itemsBox.Objects = nil
-		for _, dr := range drives {
-			dr := dr
-			label := dr.Name
-			if dr.Type != "" {
-				label += "  (" + dr.Type + ")"
-			}
-			b := widget.NewButton("🗂  "+label, func() {
-				drive = dr
-				atDrives = false
-				current = startPath
-				startPath = ""
-				refresh()
-			})
-			b.Alignment = widget.ButtonAlignLeading
-			itemsBox.Add(b)
+		statusLbl.SetText("")
+		rows = make([]string, len(drives))
+		for i, dr := range drives {
+			rows[i] = dr.Name
 		}
-		itemsBox.Refresh()
+		list.Refresh()
 	}
 
 	showFolder := func() {
 		useBtn.Enable()
-		// Up returns to the drive list from a drive's root (when there is a
-		// list to return to), otherwise climbs one path level.
+		// Back returns to the drive list from a drive's root (when there is
+		// a list to return to), otherwise climbs one path level.
 		if current == "" && len(drives) <= 1 {
-			upBtn.Disable()
+			backBtn.Disable()
 		} else {
-			upBtn.Enable()
+			backBtn.Enable()
 		}
 		loc := current
 		if drive.Name != "" {
@@ -103,17 +131,17 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 		}
 		pathLabel.SetText("📁 " + strings.TrimRight(loc, "/"))
 
-		itemsBox.Objects = nil
-		itemsBox.Add(widget.NewLabel("Loading..."))
-		itemsBox.Refresh()
+		rows = nil
+		list.Refresh()
+		statusLbl.SetText("Loading...")
 		go func() {
 			dirs, err := syncengine.ListRemoteDirsOnDrive(context.Background(), remoteName, drive, current)
 			fyne.Do(func() {
 				if err != nil {
 					// Auth failures need the shared Reconnect window; other
 					// errors (e.g. a pre-filled path that doesn't resolve in
-					// this drive) shouldn't kill the browse - show them inline
-					// and let the user navigate with Up/back.
+					// this drive) shouldn't kill the browse - show them
+					// inline and let the user navigate with Back.
 					if isAuthError(err) {
 						d.Hide()
 						showLocationError(s, err, syncengine.Location{
@@ -123,27 +151,18 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 						})
 						return
 					}
-					itemsBox.Objects = nil
-					msg := widget.NewLabel("Couldn't open this folder:\n" + err.Error())
-					msg.Wrapping = fyne.TextWrapWord
-					itemsBox.Add(msg)
-					itemsBox.Refresh()
+					statusLbl.SetText("Couldn't open this folder:\n" + err.Error())
+					rows = nil
+					list.Refresh()
 					return
 				}
-				itemsBox.Objects = nil
 				if len(dirs) == 0 {
-					itemsBox.Add(widget.NewLabel("(no sub-folders here)"))
+					statusLbl.SetText("(no sub-folders here)")
+				} else {
+					statusLbl.SetText("")
 				}
-				for _, name := range dirs {
-					name := name
-					b := widget.NewButton("📁 "+name, func() {
-						current = path.Join(current, name)
-						refresh()
-					})
-					b.Alignment = widget.ButtonAlignLeading
-					itemsBox.Add(b)
-				}
-				itemsBox.Refresh()
+				rows = dirs
+				list.Refresh()
 			})
 		}()
 	}
@@ -156,7 +175,7 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 		}
 	}
 
-	upBtn.OnTapped = func() {
+	backBtn.OnTapped = func() {
 		if current == "" {
 			if len(drives) > 1 {
 				atDrives = true
@@ -175,11 +194,13 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 		onConfirm(drive, current)
 		d.Hide()
 	}
+	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
-	header := container.NewBorder(nil, nil, upBtn, nil, pathLabel)
-	body := container.NewBorder(header, useBtn, nil, nil, scroll)
+	header := container.NewBorder(nil, nil, backBtn, nil, pathLabel)
+	footer := container.NewVBox(statusLbl, container.NewCenter(container.NewHBox(useBtn, cancelBtn)))
+	body := container.NewBorder(header, footer, nil, nil, scroll)
 
-	d = dialog.NewCustom("Browse "+remoteName, "Cancel", body, s.win)
+	d = dialog.NewCustomWithoutButtons("Browse "+remoteName, body, s.win)
 	d.Resize(fyne.NewSize(480, 500))
 	d.Show()
 	refresh()

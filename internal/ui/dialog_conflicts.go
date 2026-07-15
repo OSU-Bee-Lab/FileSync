@@ -102,16 +102,16 @@ func showConflictsPrompt(s *state, conflicts []conflictRow, onProceed func()) {
 		len(conflicts)))
 	header.Wrapping = fyne.TextWrapWord
 
-	content := container.NewBorder(header, nil, nil, nil, scroll)
-
 	var d dialog.Dialog
 	proceedBtn := widget.NewButton("Sync anyway (skip conflicts)", func() {
 		d.Hide()
 		onProceed()
 	})
 	proceedBtn.Importance = widget.WarningImportance
+	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
-	d = dialog.NewCustom("Conflicts found", "Cancel", container.NewBorder(nil, proceedBtn, nil, nil, content), s.win)
+	footer := container.NewCenter(container.NewHBox(proceedBtn, cancelBtn))
+	d = dialog.NewCustomWithoutButtons("Conflicts found", container.NewBorder(header, footer, nil, nil, scroll), s.win)
 	d.Resize(fyne.NewSize(560, 420))
 	d.Show()
 }

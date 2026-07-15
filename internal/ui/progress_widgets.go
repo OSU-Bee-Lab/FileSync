@@ -287,13 +287,16 @@ func showErrorModal(win fyne.Window, errText string) {
 		win.Clipboard().SetContent(errText)
 	})
 
+	var d dialog.Dialog
+	closeBtn := widget.NewButton("Close", func() { d.Hide() })
+
 	content := container.NewBorder(
 		nil,
-		container.NewPadded(copyBtn),
+		container.NewCenter(container.NewHBox(copyBtn, closeBtn)),
 		nil, nil,
 		scroll,
 	)
 
-	d := dialog.NewCustom("Error Details", "Close", content, win)
+	d = dialog.NewCustomWithoutButtons("Error Details", content, win)
 	d.Show()
 }
