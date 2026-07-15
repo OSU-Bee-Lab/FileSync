@@ -124,6 +124,19 @@ func listSource(ctx context.Context, srcRoot, relPath string, fset FilterSetting
 		}
 		return nil
 	})
+	// A missing <srcRoot>/<relPath> is only benign when srcRoot itself is
+	// reachable and relPath is the piece that's missing - e.g. a
+	// destination location whose experiment folder rclone hasn't created
+	// yet, same treatment as scanAgainstDest below: an empty listing, not
+	// an error, since the folder will simply be created on copy. If
+	// srcRoot itself doesn't exist or can't be reached, that's a real
+	// failure (an unreachable/misconfigured location) and must still
+	// surface as an error rather than being silently treated as empty.
+	if err != nil && errors.Is(err, fs.ErrorDirNotFound) && relPath != "" {
+		if _, rootErr := listDir(ctx, srcRoot); rootErr == nil {
+			err = nil
+		}
+	}
 	if err != nil {
 		return SourceListing{}, err
 	}

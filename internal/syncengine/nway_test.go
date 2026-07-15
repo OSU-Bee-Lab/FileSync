@@ -370,6 +370,29 @@ func TestScanNWay_ListingErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestScanNWay_MissingExperimentFolderIsNotAnError guards the other half of
+// the same bug: a location whose root exists but whose experiment subfolder
+// hasn't been created yet (e.g. first sync to a fresh local destination)
+// must be treated as "has none of these files," not as a listing failure -
+// rclone creates the folder on copy, same as it would for a cloud remote.
+func TestScanNWay_MissingExperimentFolderIsNotAnError(t *testing.T) {
+	srcRoot := t.TempDir()
+	writeFile(t, filepath.Join(srcRoot, "exp", "r/f.mp3"), "bytes")
+
+	dstRoot := t.TempDir() // exists, but "exp" under it does not
+
+	srcLoc := Location{ID: "src", Name: "src", Kind: LocationLocal, RootPath: srcRoot}
+	dstLoc := Location{ID: "dst", Name: "dst", Kind: LocationLocal, RootPath: dstRoot}
+
+	result, err := ScanNWay(context.Background(), []Location{srcLoc, dstLoc}, "exp", DefaultFilterSettings(), NWayFullScan)
+	if err != nil {
+		t.Fatalf("expected no error for a missing-but-creatable experiment folder, got: %v", err)
+	}
+	if result.MissingSomeCount != 1 {
+		t.Errorf("MissingSomeCount = %d, want 1 (the file missing at dst)", result.MissingSomeCount)
+	}
+}
+
 func TestPreferLocalSource(t *testing.T) {
 	remote := Location{Kind: LocationRemote}
 	local := Location{Kind: LocationLocal}
