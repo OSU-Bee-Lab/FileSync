@@ -15,7 +15,7 @@ Nothing about a storage location (path, remote type, `experiments/` folder name,
 
 ## Install
 
-[![Download for macOS](https://img.shields.io/badge/Download-macOS-000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest/download/FileSync-macOS.zip) [![Download for Windows](https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest/download/FileSync-Windows.exe) [![Download for Linux](https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest/download/FileSync-Linux.tar.xz)
+[![Download for macOS](https://img.shields.io/badge/Download-macOS-000?style=for-the-badge&logo=apple&logoColor=white)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest/download/FileSync-macOS.zip) [![Download for Windows](https://img.shields.io/badge/Download-Windows-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest/download/FileSync-Windows.exe) [![Download for Linux](https://img.shields.io/badge/Download-Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest/download/FileSync-Linux.deb)
 
 macOS users will have to fight against Gatekeeper to open FileSync. More on that [below](#macos--windows-woes).
 
