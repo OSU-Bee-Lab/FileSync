@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strconv"
 
 	"fyne.io/fyne/v2"
@@ -43,7 +44,8 @@ func showSettings(s *state) {
 	checkersEntry.SetText(strconv.Itoa(s.cfg.Checkers))
 	checkersEntry.OnChanged = func(text string) {
 		n, err := strconv.Atoi(text)
-		if err != nil || n < 0 {
+		if err != nil || n < 1 {
+			checkersEntry.SetText(strconv.Itoa(s.cfg.Checkers))
 			return
 		}
 		s.cfg.Checkers = n
@@ -51,8 +53,9 @@ func showSettings(s *state) {
 		s.saveConfig()
 	}
 	checkersHint := widget.NewLabel("Number of files checked concurrently during a scan/copy (rclone's " +
-		"--checkers). 0 uses rclone's own default (8). Raising this can speed up scans over a fast, " +
-		"low-latency connection; lowering it can help on slow or rate-limited remotes.")
+		fmt.Sprintf("--checkers). Default is %d. ", syncengine.DefaultCheckers) +
+		"Raising this can speed up scans over a fast, low-latency connection; lowering it can help on slow " +
+		"or rate-limited remotes.")
 	checkersHint.Wrapping = fyne.TextWrapWord
 
 	bwLimitEntry := widget.NewEntry()
@@ -70,6 +73,24 @@ func showSettings(s *state) {
 		"saturate the network. 0 means unlimited.")
 	bwLimitHint.Wrapping = fyne.TextWrapWord
 
+	transfersEntry := widget.NewEntry()
+	transfersEntry.SetText(strconv.Itoa(s.cfg.Transfers))
+	transfersEntry.OnChanged = func(text string) {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 1 {
+			transfersEntry.SetText(strconv.Itoa(s.cfg.Transfers))
+			return
+		}
+		s.cfg.Transfers = n
+		syncengine.SetTransfers(n)
+		s.saveConfig()
+	}
+	transfersHint := widget.NewLabel("Number of files copied concurrently within a single scan/copy job " +
+		fmt.Sprintf("(rclone's --transfers). Default is %d. ", syncengine.DefaultTransfers) +
+		"Raising this can speed up an N-way sync with many small files over a fast connection; lowering it " +
+		"can help on slow or rate-limited remotes.")
+	transfersHint.Wrapping = fyne.TextWrapWord
+
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
@@ -84,6 +105,8 @@ func showSettings(s *state) {
 			widget.NewLabel("Checkers"), checkersEntry, checkersHint,
 			widget.NewSeparator(),
 			widget.NewLabel("Bandwidth limit (MiB/s)"), bwLimitEntry, bwLimitHint,
+			widget.NewSeparator(),
+			widget.NewLabel("Transfers"), transfersEntry, transfersHint,
 		),
 	)
 	s.setContent(container.NewPadded(content))

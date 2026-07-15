@@ -40,12 +40,14 @@ type Config struct {
 	// Recorder Sync session. See internal/ui.recorderInactivityTimeout.
 	RecorderInactivityTimeoutMinutes int `json:"recorderInactivityTimeoutMinutes"`
 	// Checkers is rclone's --checkers value: how many file-comparison
-	// checks run concurrently during a scan/copy. 0 means "use rclone's
-	// own default" (currently 8).
+	// checks run concurrently during a scan/copy. Must be >= 1.
 	Checkers int `json:"checkers"`
 	// BwLimitMiBPerSec caps rclone's transfer bandwidth in MiB/s. 0 means
 	// unlimited.
 	BwLimitMiBPerSec int `json:"bwLimitMiBPerSec"`
+	// Transfers is rclone's --transfers value: how many files are copied
+	// concurrently within a single scan/copy job. Must be >= 1.
+	Transfers int `json:"transfers"`
 }
 
 // Default returns the config used the first time FileSync runs on a
@@ -58,6 +60,8 @@ func Default() Config {
 			BatchUpload:           true,
 		},
 		RecorderInactivityTimeoutMinutes: 5,
+		Checkers:                         syncengine.DefaultCheckers,
+		Transfers:                        syncengine.DefaultTransfers,
 	}
 }
 
@@ -90,6 +94,15 @@ func Load() (Config, error) {
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Config{}, err
+	}
+	// Configs saved before Checkers/Transfers required >= 1 (or corrupted by
+	// hand-editing) may hold 0 - restore rclone's defaults rather than
+	// passing 0 through to rclone.
+	if cfg.Checkers <= 0 {
+		cfg.Checkers = syncengine.DefaultCheckers
+	}
+	if cfg.Transfers <= 0 {
+		cfg.Transfers = syncengine.DefaultTransfers
 	}
 	return cfg, nil
 }

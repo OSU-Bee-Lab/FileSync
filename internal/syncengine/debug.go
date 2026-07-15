@@ -43,20 +43,21 @@ func debugf(format string, args ...any) {
 	}
 }
 
-// defaultCheckers mirrors rclone's own --checkers default (rclone doesn't
+// DefaultCheckers mirrors rclone's own --checkers default (rclone doesn't
 // export its default as a constant), used when the user hasn't overridden
 // it in Settings.
-const defaultCheckers = 8
+const DefaultCheckers = 8
 
 // SetCheckers sets rclone's --checkers value (how many file-comparison
-// checks run concurrently during a scan/copy). n <= 0 restores rclone's own
-// default. Like SetDebugLogging, this mutates rclone's process-global
-// config rather than a per-operation context, since every scan/copy in this
-// app already shares one rclone process and this is a single user
-// preference, not a per-call option.
+// checks run concurrently during a scan/copy). n must be >= 1; n <= 0 is a
+// caller bug and falls back to DefaultCheckers rather than passing a bogus
+// value to rclone. Like SetDebugLogging, this mutates rclone's
+// process-global config rather than a per-operation context, since every
+// scan/copy in this app already shares one rclone process and this is a
+// single user preference, not a per-call option.
 func SetCheckers(n int) {
 	if n <= 0 {
-		n = defaultCheckers
+		n = DefaultCheckers
 	}
 	fs.GetConfig(context.Background()).Checkers = n
 }
@@ -71,4 +72,22 @@ func SetBwLimitMiBPerSec(mib int) {
 		_ = tt.Set(fmt.Sprintf("%dMi", mib))
 	}
 	fs.GetConfig(context.Background()).BwLimit = tt
+}
+
+// DefaultTransfers mirrors rclone's own --transfers default (rclone doesn't
+// export its default as a constant), used when the user hasn't overridden
+// it in Settings.
+const DefaultTransfers = 4
+
+// SetTransfers sets rclone's --transfers value (how many files are copied
+// concurrently within a single scan/copy job). n must be >= 1; n <= 0 is a
+// caller bug and falls back to DefaultTransfers rather than passing a bogus
+// value to rclone. Like SetCheckers, this mutates rclone's process-global
+// config, which each job's context then clones via fs.AddConfig (see
+// startCopyPreserving in job.go).
+func SetTransfers(n int) {
+	if n <= 0 {
+		n = DefaultTransfers
+	}
+	fs.GetConfig(context.Background()).Transfers = n
 }

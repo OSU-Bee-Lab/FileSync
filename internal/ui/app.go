@@ -123,6 +123,7 @@ func Run() {
 		syncengine.SetDebugLogging(s.cfg.DebugMode)
 		syncengine.SetCheckers(s.cfg.Checkers)
 		syncengine.SetBwLimitMiBPerSec(s.cfg.BwLimitMiBPerSec)
+		syncengine.SetTransfers(s.cfg.Transfers)
 
 		// Content must be set before Resize/CenterOnScreen - otherwise Fyne
 		// has no size hints yet and (at least on macOS with multiple
