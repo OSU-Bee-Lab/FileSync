@@ -270,7 +270,14 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 	var extras syncFlowExtras
 	if mode == syncengine.NWayQuickScan {
 		extras = syncFlowExtras{
-			onNWaySync:   func() { runNWayTransfers(s, expNames, results, mode) },
+			// Happy path: once the diff completes cleanly, jump straight
+			// into the per-direction transfer-plan session so the user
+			// reviews the actual source → dest split before committing.
+			onScanDone: func() { runNWayTransfers(s, expNames, results, mode, false) },
+			// Fallback: if some experiment's scan errored, onScanDone is
+			// skipped and this screen renders normally so the user can see
+			// the error — Sync still needs to work if pressed manually.
+			onNWaySync:   func() { runNWayTransfers(s, expNames, results, mode, true) },
 			syncingTitle: syncingTitle,
 			quickScan:    true,
 		}
@@ -279,7 +286,7 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 			resolutions := resolver.buildResolutions()
 			proceed := func() {
 				applyNWayResolutions(s, expNames, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
-					runNWayTransfers(s, expNames, resolved, mode)
+					runNWayTransfers(s, expNames, resolved, mode, true)
 				})
 			}
 			if resolver.hasDeletes() {
@@ -294,12 +301,14 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) }, extras)
 }
 
-// runNWayTransfers builds the minimal transfer plan for every experiment
-// and hands the resulting (source, dest, files) jobs to the existing
-// scan/progress UI. The plan was already reviewed and confirmed in the scan
-// session, so the transfer session auto-starts copying instead of asking
-// for a second Sync press.
-func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode) {
+// runNWayTransfers builds the minimal transfer plan for every experiment and
+// hands the resulting (source, dest, files) jobs to the existing scan/
+// progress UI, one task per (experiment, direction) pair so its Experiments
+// column shows exactly which files move which way. autoSync starts the copy
+// immediately (used when the plan was already reviewed and confirmed, e.g.
+// after Full Scan's conflict resolution) rather than stopping at "Ready to
+// Sync" for the user to review the split first.
+func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
 	var tasks []scanTask
 	for i, name := range expNames {
 		pairs := syncengine.BuildNWayTransferPlan(results[i], syncengine.PreferLocalSource)
@@ -326,7 +335,7 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 		syncingTitle = "Quick Syncing"
 	}
 	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
-		syncFlowExtras{autoSync: true, syncingTitle: syncingTitle, quickScan: mode == syncengine.NWayQuickScan})
+		syncFlowExtras{autoSync: autoSync, syncingTitle: syncingTitle, quickScan: mode == syncengine.NWayQuickScan})
 }
 
 // applyNWayResolutions executes any real Rename/Delete resolutions

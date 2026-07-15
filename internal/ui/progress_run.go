@@ -132,20 +132,29 @@ func (ps *progressScreen) runScan() {
 			mu.Unlock()
 			if wasCancelled {
 				ps.phase = phaseScanCancelled
-			} else {
-				ps.phase = phaseScanComplete
+				ps.refreshUI()
+				return
 			}
+			ps.phase = phaseScanComplete
+
+			allDone := true
+			for _, e := range ps.expStates {
+				if e.status != statusDone {
+					allDone = false
+					break
+				}
+			}
+
+			if allDone && ps.extras.onScanDone != nil {
+				ps.extras.onScanDone()
+				return
+			}
+
 			ps.refreshUI()
 
-			if ps.extras.autoSync && ps.phase == phaseScanComplete {
+			if allDone && ps.extras.autoSync {
 				// Pre-confirmed plan (see syncFlowExtras.autoSync): start
-				// copying without a second Sync press — but only if every
-				// task's instant "scan" replay actually succeeded.
-				for _, e := range ps.expStates {
-					if e.status != statusDone {
-						return
-					}
-				}
+				// copying without a second Sync press.
 				ps.runSync()
 			}
 		})

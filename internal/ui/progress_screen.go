@@ -48,6 +48,15 @@ type syncFlowExtras struct {
 	// "already synced", since that was never checked — only that a path
 	// exists at every location.
 	quickScan bool
+	// onScanDone, if set, is called once every task's scan has finished
+	// cleanly (no cancellation, no per-experiment error) instead of the
+	// default "Ready to Sync" render. Used by N-way's quick-sync scan to
+	// jump straight into the per-(source, dest) transfer-plan session —
+	// direction isn't known until the diff completes, so this is the
+	// earliest point the split can be shown. If any experiment errored,
+	// this is skipped and the aggregate scan screen renders as usual so
+	// the user can see what went wrong.
+	onScanDone func()
 }
 
 // progressScreen holds all state and widgets for the shared scan/sync
