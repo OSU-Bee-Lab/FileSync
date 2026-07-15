@@ -53,7 +53,7 @@ func showEditLocation(s *state, id int) {
 		})
 
 		saveBtn.OnTapped = func() {
-			if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
+			if !requireNonEmpty(s.win, nameEntry.Text, "Nickname required", "Give this location a nickname first.") {
 				return
 			}
 			name := strings.TrimSpace(nameEntry.Text)
@@ -67,7 +67,7 @@ func showEditLocation(s *state, id int) {
 		}
 
 		body = container.NewVBox(
-			widget.NewForm(&widget.FormItem{Text: "Name", Widget: nameEntry}),
+			widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
 			widget.NewForm(&widget.FormItem{Text: "Folder", Widget: container.NewBorder(nil, nil, chooseFolderBtn, nil, pathLabel)}),
 		)
 	} else {
@@ -96,7 +96,7 @@ func showEditLocation(s *state, id int) {
 		}
 
 		saveBtn.OnTapped = func() {
-			if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
+			if !requireNonEmpty(s.win, nameEntry.Text, "Nickname required", "Give this location a nickname first.") {
 				return
 			}
 			name := strings.TrimSpace(nameEntry.Text)
@@ -142,7 +142,7 @@ func showEditLocation(s *state, id int) {
 			form.container,
 		)
 		body = container.NewVBox(
-			widget.NewForm(&widget.FormItem{Text: "Name", Widget: nameEntry}),
+			widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
 			fieldsArea,
 		)
 	}

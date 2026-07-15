@@ -48,7 +48,7 @@ var backendsWithHiddenBasicFields = map[syncengine.BackendType]bool{
 
 func showAddLocation(s *state) {
 	nameEntry := widget.NewEntry()
-	nameEntry.SetPlaceHolder("e.g. Lab Server, OSU SharePoint")
+	nameEntry.SetPlaceHolder("Something you'll recognize later, e.g. \"Lab Desktop\"")
 
 	kindSelect := widget.NewSelect(kindLabels, nil)
 	kindSelect.SetSelected(kindLabels[0])
@@ -138,7 +138,7 @@ func showAddLocation(s *state) {
 	// once created, later calls reuse it instead of re-signing-in. onReady
 	// runs on the UI goroutine once the remote is ready.
 	ensureRemote := func(onReady func()) {
-		if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
+		if !requireNonEmpty(s.win, nameEntry.Text, "Nickname required", "Give this location a nickname first.") {
 			return
 		}
 		if remoteReady {
@@ -226,7 +226,7 @@ func showAddLocation(s *state) {
 	}
 
 	saveBtn.OnTapped = func() {
-		if !requireNonEmpty(s.win, nameEntry.Text, "Name required", "Give this location a name first.") {
+		if !requireNonEmpty(s.win, nameEntry.Text, "Nickname required", "Give this location a nickname first.") {
 			return
 		}
 		name := strings.TrimSpace(nameEntry.Text)
@@ -277,7 +277,7 @@ func showAddLocation(s *state) {
 	saveBtn.Importance = widget.HighImportance
 
 	layout := container.NewVBox(
-		widget.NewForm(&widget.FormItem{Text: "Name", Widget: nameEntry}),
+		widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
 		widget.NewForm(&widget.FormItem{Text: "Type", Widget: kindSelect}),
 		dynamicArea,
 	)
