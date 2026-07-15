@@ -132,20 +132,27 @@ func showSyncRecorders(s *state) {
 		syncingToLabel.SetText("Syncing to: " + browser.RelPath())
 	}
 
-	autoDeleteCheck := widget.NewCheck("Delete from recorder after verified copy", nil)
+	autoDeleteCheck := widget.NewCheck("Remove files from recorders after sync", nil)
 	autoDeleteCheck.SetChecked(s.cfg.RecorderSettings.AutoDeleteAfterVerify)
 
 	// batchUploadCheck only makes sense once a cloud destination is picked;
-	// see uploadGroup.OnChanged below. Defaults on: batching is the faster
-	// choice whenever there are many files, and per-file upload-as-it-lands
-	// is the exception a user opts into by unchecking it.
+	// see uploadGroup.OnChanged below, which enables/disables it rather than
+	// hiding it - the hint stays visible either way so its explanation isn't
+	// popping in and out as the user picks a cloud upload. Defaults on:
+	// batching is the faster choice whenever there are many files, and
+	// per-file upload-as-it-lands is the exception a user opts into by
+	// unchecking it.
 	batchUploadCheck := widget.NewCheck("Batch upload after local sync", nil)
 	batchUploadCheck.SetChecked(s.cfg.RecorderSettings.BatchUpload)
-	batchUploadCheck.Hide()
-	batchUploadHint := widget.NewLabel("Faster when syncing many files - uploads everything at once instead of as each file lands.")
-	batchUploadHint.Importance = widget.LowImportance
+	batchUploadCheck.Disable()
+	// Hint rides in parens directly under the checkbox's own label rather
+	// than a separate form row - widget.Check's label is a single-line
+	// canvas.Text that can't wrap itself, so the wrapping continuation
+	// lives in this adjacent Label instead (see the VBox pairing them
+	// below - an HBox here would leave the Label with no bound width to
+	// wrap against, breaking it into one character per line).
+	batchUploadHint := widget.NewLabel("(faster when syncing many files - uploads everything at once instead of as each file lands.)")
 	batchUploadHint.Wrapping = fyne.TextWrapWord
-	batchUploadHint.Hide()
 
 	startBtn := widget.NewButton("Sync Here", nil)
 	startBtn.Importance = widget.HighImportance
@@ -173,11 +180,9 @@ func showSyncRecorders(s *state) {
 	uploadGroup.OnChanged = func(sel []string) {
 		refreshBrowserLocations()
 		if len(sel) > 0 {
-			batchUploadCheck.Show()
-			batchUploadHint.Show()
+			batchUploadCheck.Enable()
 		} else {
-			batchUploadCheck.Hide()
-			batchUploadHint.Hide()
+			batchUploadCheck.Disable()
 		}
 	}
 	updateStartEnabled()
@@ -212,23 +217,30 @@ func showSyncRecorders(s *state) {
 
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
-	top := container.NewVBox(
-		widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+	optionsCol := container.NewVBox(
+		sectionHeader("Sync Locations"),
 		widget.NewForm(
-			&widget.FormItem{Text: "Destination(s)", Widget: destGroup.CanvasObject()},
+			&widget.FormItem{Text: "Local", Widget: destGroup.CanvasObject()},
+			&widget.FormItem{Text: "Remote", Widget: uploadGroup.CanvasObject()},
+			&widget.FormItem{Text: "", Widget: container.NewVBox(batchUploadCheck, batchUploadHint)},
 			&widget.FormItem{Text: "", Widget: autoDeleteCheck},
-			&widget.FormItem{Text: "Cloud upload(s)", Widget: uploadGroup.CanvasObject()},
-			&widget.FormItem{Text: "", Widget: batchUploadCheck},
-			&widget.FormItem{Text: "", Widget: batchUploadHint},
 		),
-		widget.NewLabelWithStyle("Sync Destination", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 	)
+	destCol := container.NewBorder(
+		sectionHeader("Sync Destination"),
+		nil, nil, nil,
+		browser.CanvasObject(),
+	)
+	columns := container.NewHSplit(optionsCol, destCol)
+	columns.SetOffset(0.35)
+
+	top := widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	bottom := container.NewVBox(
 		syncingToLabel,
 		widget.NewSeparator(),
 		container.NewHBox(backBtn, startBtn),
 	)
-	content := container.NewBorder(top, bottom, nil, nil, browser.CanvasObject())
+	content := container.NewBorder(top, bottom, nil, nil, columns)
 	s.setContent(container.NewPadded(content))
 }
 

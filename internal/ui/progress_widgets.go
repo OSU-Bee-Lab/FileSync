@@ -332,7 +332,7 @@ func showErrorModal(win fyne.Window, errText string) {
 	scroll := container.NewScroll(errLabel)
 	scroll.SetMinSize(fyne.NewSize(420, 220))
 
-	copyBtn := widget.NewButton("Copy", func() {
+	copyBtn := widget.NewButton("Copy Error", func() {
 		win.Clipboard().SetContent(errText)
 	})
 

@@ -330,6 +330,11 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 		backLabel = "Exit Sync"
 	}
 	ps.backBtn = widget.NewButton(backLabel, ps.onBack)
+	if backLabel == "Exit Sync" {
+		ps.backBtn.Importance = widget.DangerImportance
+	} else {
+		ps.backBtn.Importance = widget.MediumImportance
+	}
 
 	ps.syncBtn = widget.NewButton("Sync", func() {
 		if ps.extras.onNWaySync != nil {
@@ -543,6 +548,8 @@ func (ps *progressScreen) applyPhaseChrome() {
 		ps.resolveBtn.Hide()
 		ps.cancelBtn.Hide()
 		ps.backBtn.SetText("Done")
+		ps.backBtn.Importance = widget.MediumImportance
+		ps.backBtn.Refresh()
 		ps.backBtn.Enable()
 	case phaseSyncCancelled:
 		ps.titleLabel.SetText("Sync Cancelled")

@@ -109,6 +109,7 @@ func (s *state) saveConfig() {
 // Run builds and shows the FileSync window. Blocks until the window closes.
 func Run() {
 	a := app.NewWithID("com.osubeelab.filesync")
+	a.Settings().SetTheme(newLightenedTheme())
 	w := a.NewWindow("FileSync")
 
 	startApp := func() {

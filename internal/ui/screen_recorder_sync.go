@@ -107,6 +107,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	sc.cancelBtn = widget.NewButton("End Sync", sc.confirmEndSync)
 	sc.exitBtn = widget.NewButton("Exit Sync", sc.confirmEndSync)
+	sc.exitBtn.Importance = widget.DangerImportance
 	sc.exitBtn.Hide()
 	sc.refreshCancelBtn()
 
@@ -315,16 +316,20 @@ func (sc *recorderSyncScreen) refreshCancelBtn() {
 	case sc.hasActiveTransfer():
 		sc.cancelBtn.SetText("Cancel Sync")
 		sc.cancelBtn.OnTapped = sc.confirmEndSync
+		sc.cancelBtn.Importance = widget.MediumImportance
 		sc.exitBtn.Hide()
 	case sc.params.batchUpload && len(sc.params.uploads) > 0:
 		sc.cancelBtn.SetText("Batch Upload")
 		sc.cancelBtn.OnTapped = sc.confirmBatchUpload
+		sc.cancelBtn.Importance = widget.HighImportance
 		sc.exitBtn.Show()
 	default:
 		sc.cancelBtn.SetText("End Sync")
 		sc.cancelBtn.OnTapped = sc.confirmEndSync
+		sc.cancelBtn.Importance = widget.MediumImportance
 		sc.exitBtn.Hide()
 	}
+	sc.cancelBtn.Refresh()
 }
 
 func (sc *recorderSyncScreen) rebuildRows() {

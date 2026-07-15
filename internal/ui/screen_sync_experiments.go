@@ -26,7 +26,7 @@ import (
 // diffing degenerates cleanly to a two-way diff.
 func showSyncExperiments(s *state) {
 	allNames := locationNames(s.cfg.Locations)
-	statusLabel := widget.NewLabel("Pick two or more locations and at least one experiment.")
+	statusLabel := widget.NewLabel("")
 	loading := newLoadingBar()
 
 	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...))
@@ -80,16 +80,15 @@ func showSyncExperiments(s *state) {
 	// yet" case this flow exists to fill in, so it must still be offered.
 	refresh := func() {
 		names := locGroup.Selected()
-		if len(names) < 2 {
+		if len(names) == 0 {
 			setExpGroup(nil, nil)
 			updateScanBtn()
-			statusLabel.SetText("Pick two or more locations and at least one experiment.")
+			statusLabel.SetText("")
 			return
 		}
 		locs := locationsFromNamesAny(s.cfg.Locations, names)
 		statusLabel.SetText("")
 		loading.Show()
-		setExpGroup(nil, nil)
 		updateScanBtn()
 
 		// applyUnion re-renders expGroup from the current union/seen state -
@@ -108,11 +107,26 @@ func showSyncExperiments(s *state) {
 			updateScanBtn()
 		}
 
+		// Seed the union with whatever's already showing (from the prior
+		// selection) so adding a location grows the list in place instead of
+		// blanking it while the fresh scan's goroutines report back in one
+		// at a time - mirrors dest_folder_browser's union-preserving reload.
+		var seedNames []string
+		if expGroup != nil {
+			seedNames = append(seedNames, expGroup.Options...)
+		}
+
 		go func() {
 			ctx := context.Background()
 			var mu sync.Mutex
 			seen := map[string]bool{}
 			var union []string
+			for _, name := range seedNames {
+				if !seen[name] {
+					seen[name] = true
+					union = append(union, name)
+				}
+			}
 			var firstErr error
 			var wg sync.WaitGroup
 			for _, loc := range locs {
@@ -174,7 +188,7 @@ func showSyncExperiments(s *state) {
 		s.syncExperimentsLocationNames = sel
 		refresh()
 	}
-	if len(locGroup.Selected()) >= 2 {
+	if len(locGroup.Selected()) >= 1 {
 		refresh()
 	}
 
@@ -221,7 +235,7 @@ func showSyncExperiments(s *state) {
 	content := container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle("Sync Experiments", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			widget.NewLabel("Pick two or more locations to converge — no location is a designated source."),
+			widget.NewLabel("Pick two or more locations to sync."),
 			container.NewPadded(locGroup.CanvasObject()),
 			loading.CanvasObject(),
 			statusLabel,

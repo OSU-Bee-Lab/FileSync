@@ -115,12 +115,12 @@ func (b *destFolderBrowser) RelPath() string {
 }
 
 // SetLocations replaces the set of locations being browsed (e.g. the
-// destination/upload selection changed) and resets back to the root -
-// a path chosen against the old selection may not make sense against the
-// new one.
+// destination/upload selection changed) without disturbing the currently
+// chosen path: if none of the (possibly new) locations have that folder
+// yet, that's fine - it's created on sync - and if they do, the reload
+// below re-scans and shows it.
 func (b *destFolderBrowser) SetLocations(locs []syncengine.Location) {
 	b.locs = locs
-	b.relPath = ""
 	b.closeAddFolder()
 	b.reload()
 	b.notifyPathChanged()
