@@ -100,6 +100,48 @@ func (s *state) setContent(content fyne.CanvasObject) {
 	s.win.Resize(windowSize)
 }
 
+// growingWidthLayout keeps the same MinSize cap as boundedWidthLayout (so it
+// still can't force the window wider than windowSize on its own - the
+// multi-monitor stretch bug windowSize documents), but unlike
+// boundedWidthLayout it does not clamp the width handed to its child at
+// layout time. Use it for screens whose layout should grow to fill however
+// wide the user actually resizes the window instead of staying capped at
+// windowSize.
+type growingWidthLayout struct{ maxWidth float32 }
+
+func (l *growingWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var min fyne.Size
+	for _, o := range objects {
+		if !o.Visible() {
+			continue
+		}
+		min = min.Max(o.MinSize())
+	}
+	if min.Width > l.maxWidth {
+		min.Width = l.maxWidth
+	}
+	return min
+}
+
+func (l *growingWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, o := range objects {
+		o.Resize(size)
+		o.Move(fyne.NewPos(0, 0))
+	}
+}
+
+// setContentResizable is like setContent, but its content grows to fill
+// however wide the user resizes the window rather than staying capped at
+// windowSize. Only use it for screens that were built to make good use of
+// the extra width (e.g. the sync progress screen's Experiments/Folders/Files
+// columns) - anything with fillable widgets not designed for a wide layout
+// should keep using setContent.
+func (s *state) setContentResizable(content fyne.CanvasObject) {
+	bounded := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
+	s.win.SetContent(bounded)
+	s.win.Resize(windowSize)
+}
+
 func (s *state) saveConfig() {
 	if err := appconfig.Save(s.cfg); err != nil {
 		dialog.ShowError(err, s.win)

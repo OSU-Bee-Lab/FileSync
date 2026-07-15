@@ -155,7 +155,7 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 	}
 
 	content := ps.buildLayout()
-	ps.s.setContent(container.NewPadded(content))
+	ps.s.setContentResizable(container.NewPadded(content))
 
 	if len(tasks) == 0 {
 		// Nothing to scan at all (e.g. N-way found every location already
@@ -216,7 +216,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 
 	ps.expList = widget.NewList(
 		func() int { return len(ps.expStates) },
-		func() fyne.CanvasObject { return createBackingBarItem() },
+		func() fyne.CanvasObject { return createBackingBarItem(s.win) },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			exp := ps.expStates[id]
 			prog := 0.0
@@ -296,11 +296,23 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 		ps.syncErrorLabelForSelection()
 	}
 
-	columns := container.NewGridWithColumns(3,
-		createColumn("Experiments", ps.expList),
+	// Fyne has no native N-pane split container, so three resizable columns
+	// are two nested 2-pane Splits: the outer handle divides Experiments from
+	// the (Folders, Files) remainder, the inner handle divides that
+	// remainder. Offsets start at 1/3 and 1/2 respectively so all three
+	// columns render equal width initially, while staying independently
+	// draggable afterward.
+	foldFilesSplit := container.NewHSplit(
 		createColumn("Folders", foldSplit),
 		createColumn("Files", filesSplit),
 	)
+	foldFilesSplit.SetOffset(0.5)
+
+	columns := container.NewHSplit(
+		createColumn("Experiments", ps.expList),
+		foldFilesSplit,
+	)
+	columns.SetOffset(1.0 / 3.0)
 
 	ps.cancelBtn = widget.NewButton("Cancel", func() {
 		cancelNow := func() {

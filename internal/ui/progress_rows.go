@@ -25,7 +25,7 @@ import (
 func (ps *progressScreen) makeBarList(rows *[]barRow, isSelected func(barRow) bool) *widget.List {
 	return widget.NewList(
 		func() int { return len(*rows) },
-		func() fyne.CanvasObject { return createBackingBarItem() },
+		func() fyne.CanvasObject { return createBackingBarItem(ps.s.win) },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			if int(id) < 0 || int(id) >= len(*rows) {
 				return

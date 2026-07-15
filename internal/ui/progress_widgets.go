@@ -65,12 +65,11 @@ func (l *progressItemLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 	}
 }
 
-func createBackingBarItem() fyne.CanvasObject {
+func createBackingBarItem(win fyne.Window) fyne.CanvasObject {
 	bg := canvas.NewRectangle(color.White)
 	fill := canvas.NewRectangle(color.Transparent)
 
-	nameLabel := widget.NewLabel("")
-	nameLabel.Truncation = fyne.TextTruncateEllipsis
+	nameLabel := newHoverLabel(win)
 
 	summaryLabel := widget.NewLabel("")
 	summaryLabel.Alignment = fyne.TextAlignTrailing
@@ -105,11 +104,20 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 
 	paddedContent := containerObj.Objects[2].(*fyne.Container)
 	borderContainer := paddedContent.Objects[0].(*fyne.Container)
-	nameLabel := borderContainer.Objects[0].(*widget.Label)
+	nameLabel := borderContainer.Objects[0].(*hoverLabel)
 	trailing := borderContainer.Objects[1].(*fyne.Container)
 	errBtn := trailing.Objects[0].(*widget.Button)
 	summaryLabel := trailing.Objects[1].(*widget.Label)
 
+	if nameLabel.Text != labelText {
+		// Only reset hover state when the name actually changes - i.e. this
+		// widget.List item has been recycled for a different row. refreshUI
+		// calls this on every progress tick for every visible row, including
+		// ones whose name hasn't changed, and an unconditional reset would
+		// cancel a pending/shown tooltip on every single tick, so it could
+		// never survive the hover delay during an active scan/sync.
+		nameLabel.reset()
+	}
 	nameLabel.SetText(labelText)
 	summaryLabel.SetText(summaryText)
 	if itemErr != nil {
@@ -172,11 +180,14 @@ func updateDividerItem(obj fyne.CanvasObject, text string) {
 
 	paddedContent := containerObj.Objects[2].(*fyne.Container)
 	borderContainer := paddedContent.Objects[0].(*fyne.Container)
-	nameLabel := borderContainer.Objects[0].(*widget.Label)
+	nameLabel := borderContainer.Objects[0].(*hoverLabel)
 	trailing := borderContainer.Objects[1].(*fyne.Container)
 	errBtn := trailing.Objects[0].(*widget.Button)
 	summaryLabel := trailing.Objects[1].(*widget.Label)
 
+	if nameLabel.Text != text {
+		nameLabel.reset()
+	}
 	nameLabel.SetText(text)
 	summaryLabel.SetText("")
 	errBtn.OnTapped = nil

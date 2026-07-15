@@ -60,7 +60,7 @@ func newRecorderUploadPanel(win fyne.Window) *recorderUploadPanel {
 	p := &recorderUploadPanel{win: win}
 	p.uploadingList = widget.NewList(
 		func() int { return len(p.uploading) },
-		func() fyne.CanvasObject { return createBackingBarItem() },
+		func() fyne.CanvasObject { return createBackingBarItem(p.win) },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			e := p.uploading[id]
 			prog := 0.0
@@ -73,7 +73,7 @@ func newRecorderUploadPanel(win fyne.Window) *recorderUploadPanel {
 	)
 	p.uploadedList = widget.NewList(
 		func() int { return len(p.uploaded) },
-		func() fyne.CanvasObject { return createBackingBarItem() },
+		func() fyne.CanvasObject { return createBackingBarItem(p.win) },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			e := p.uploaded[id]
 			summary := humanBytes(e.bytesTotal)
