@@ -66,11 +66,13 @@ func chooseFileOpen(win fyne.Window, exts []string, cb func(path string, err err
 }
 
 // zenityResult interprets zenity's output/exit status: a zero exit with
-// output means a path was chosen; a non-zero exit with no stderr means the
-// user cancelled (zenity exits 1 on Cancel); anything else is a real error.
+// output means a path was chosen; exit status 1 means the user cancelled
+// (zenity's documented Cancel code, regardless of anything written to
+// stderr — some distros' zenity/GTK builds emit warnings there even on a
+// clean cancel); anything else is a real error.
 func zenityResult(out []byte, err error) (string, error) {
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok && len(strings.TrimSpace(string(ee.Stderr))) == 0 {
+		if ee, ok := err.(*exec.ExitError); ok && ee.ExitCode() == 1 {
 			return "", nil
 		}
 		return "", err
