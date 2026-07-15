@@ -26,6 +26,12 @@ func init() {
 
 func (SonyICDPX370) Name() string { return "sony-icd-px370" }
 
+// QuickReject rules out volumes that aren't FAT-formatted flash storage
+// without touching the disk - see isFATFamily.
+func (SonyICDPX370) QuickReject(v recorder.Volume) bool {
+	return !isFATFamily(v.FSType)
+}
+
 // recFileDir returns the REC_FILE directory for v, checking both the
 // internal-memory layout (<mount>/REC_FILE) and the SD-card layout
 // (<mount>/PRIVATE/SONY/REC_FILE), or "" if neither is present.
