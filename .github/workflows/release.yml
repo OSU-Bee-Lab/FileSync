@@ -64,13 +64,56 @@ jobs:
         run: |
           fyne package -os darwin -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
           codesign --force --deep --sign - "$APP_NAME.app"
-          ditto -c -k --sequesterRsrc "$APP_NAME.app" "$APP_NAME-macOS.zip"
+          ditto -c -k --keepParent --sequesterRsrc "$APP_NAME.app" "$APP_NAME-macOS.zip"
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
         run: |
           fyne package -os linux -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
           mv "$APP_NAME.tar.xz" "$APP_NAME-Linux.tar.xz"
+
+      - name: Package (Linux .deb)
+        if: matrix.os == 'linux'
+        run: |
+          extract_dir="$(mktemp -d)"
+          tar -xJf "$APP_NAME-Linux.tar.xz" -C "$extract_dir"
+
+          pkg_root="$(mktemp -d)/filesync"
+          mkdir -p "$pkg_root/DEBIAN" "$pkg_root/usr/bin" \
+            "$pkg_root/usr/share/applications" "$pkg_root/usr/share/pixmaps"
+          cp "$extract_dir/filesync/usr/local/bin/filesync" "$pkg_root/usr/bin/filesync"
+          cp "$extract_dir/filesync/usr/local/share/applications/$APP_NAME.desktop" \
+            "$pkg_root/usr/share/applications/$APP_NAME.desktop"
+          cp "$extract_dir/filesync/usr/local/share/pixmaps/$APP_NAME.png" \
+            "$pkg_root/usr/share/pixmaps/$APP_NAME.png"
+
+          # Derive Depends from the actual shared libraries the binary links
+          # against, mapped back to the Ubuntu packages that provide them, so
+          # `apt install ./FileSync-Linux.deb` resolves runtime deps itself.
+          deps="$(ldd "$pkg_root/usr/bin/filesync" \
+            | awk '{print $3}' | grep '^/' | sort -u \
+            | xargs -r dpkg -S 2>/dev/null \
+            | cut -d: -f1 | sort -u | paste -sd, -)"
+
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+
+          printf 'Package: filesync\n' > "$pkg_root/DEBIAN/control"
+          printf 'Version: %s\n' "${version:-0.0.0}" >> "$pkg_root/DEBIAN/control"
+          printf 'Section: utils\n' >> "$pkg_root/DEBIAN/control"
+          printf 'Priority: optional\n' >> "$pkg_root/DEBIAN/control"
+          printf 'Architecture: amd64\n' >> "$pkg_root/DEBIAN/control"
+          printf 'Depends: %s\n' "$deps" >> "$pkg_root/DEBIAN/control"
+          printf 'Maintainer: OSU Bee Lab\n' >> "$pkg_root/DEBIAN/control"
+          printf 'Description: Sync bioacoustics experiment data between local folders and cloud remotes\n' >> "$pkg_root/DEBIAN/control"
+
+          dpkg-deb --build --root-owner-group "$pkg_root" "$APP_NAME-Linux.deb"
+
+      - name: Verify .deb installs cleanly
+        if: matrix.os == 'linux'
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work ubuntu:22.04 bash -c \
+            "apt-get update -qq && apt-get install -y -qq ./$APP_NAME-Linux.deb"
 
       - name: Package (Windows)
         if: matrix.os == 'windows'
@@ -89,4 +132,5 @@ jobs:
           files: |
             ${{ env.APP_NAME }}-macOS.zip
             ${{ env.APP_NAME }}-Linux.tar.xz
+            ${{ env.APP_NAME }}-Linux.deb
             ${{ env.APP_NAME }}-Windows.exe
