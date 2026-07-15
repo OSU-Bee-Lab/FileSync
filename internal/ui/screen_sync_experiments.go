@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -26,6 +27,7 @@ import (
 func showSyncExperiments(s *state) {
 	allNames := locationNames(s.cfg.Locations)
 	statusLabel := widget.NewLabel("Pick two or more locations and at least one experiment.")
+	loading := newLoadingBar()
 
 	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...))
 	expGroup := widget.NewCheckGroup(nil, nil)
@@ -63,53 +65,88 @@ func showSyncExperiments(s *state) {
 			return
 		}
 		locs := locationsFromNamesAny(s.cfg.Locations, names)
-		statusLabel.SetText("Loading experiments...")
+		statusLabel.SetText("")
+		loading.Show()
 		expGroup.Options = nil
 		expGroup.Selected = nil
 		expGroup.Refresh()
 		updateScanBtn()
 
+		// applyUnion re-renders expGroup from the current union/seen state -
+		// called both incrementally (as each location's listing lands, so a
+		// fast location's experiments show right away instead of waiting on
+		// a slow one) and once more at the end for the final status text.
+		applyUnion := func(union []string, seen map[string]bool) {
+			expGroup.Options = union
+			keep := make([]string, 0, len(s.syncExperimentsExpNames))
+			for _, name := range s.syncExperimentsExpNames {
+				if seen[name] {
+					keep = append(keep, name)
+				}
+			}
+			expGroup.Selected = keep
+			s.syncExperimentsExpNames = keep
+			expGroup.Refresh()
+			updateScanBtn()
+		}
+
 		go func() {
 			ctx := context.Background()
+			var mu sync.Mutex
 			seen := map[string]bool{}
 			var union []string
 			var firstErr error
+			var wg sync.WaitGroup
 			for _, loc := range locs {
-				exps, err := syncengine.ListExperiments(ctx, loc)
-				if err != nil {
-					if firstErr == nil {
-						firstErr = err
+				wg.Add(1)
+				go func(loc syncengine.Location) {
+					defer wg.Done()
+					exps, err := syncengine.ListExperiments(ctx, loc)
+					mu.Lock()
+					if err != nil {
+						if firstErr == nil {
+							firstErr = err
+						}
+						mu.Unlock()
+						return
 					}
-					continue
-				}
-				for _, e := range exps {
-					if !seen[e.Name] {
-						seen[e.Name] = true
-						union = append(union, e.Name)
+					for _, e := range exps {
+						if !seen[e.Name] {
+							seen[e.Name] = true
+							union = append(union, e.Name)
+						}
 					}
-				}
+					sort.Strings(union)
+					unionCopy := append([]string{}, union...)
+					seenCopy := make(map[string]bool, len(seen))
+					for k := range seen {
+						seenCopy[k] = true
+					}
+					mu.Unlock()
+
+					fyne.Do(func() {
+						if !equalStringSets(locGroup.Selected(), names) {
+							return // selection changed mid-load; a newer refresh is in flight
+						}
+						applyUnion(unionCopy, seenCopy)
+					})
+				}(loc)
 			}
-			sort.Strings(union)
+			wg.Wait()
+
+			mu.Lock()
+			finalUnion, finalErr := append([]string{}, union...), firstErr
+			mu.Unlock()
 
 			fyne.Do(func() {
+				loading.Hide()
 				if !equalStringSets(locGroup.Selected(), names) {
 					return // selection changed mid-load; a newer refresh is in flight
 				}
-				expGroup.Options = union
-				keep := make([]string, 0, len(s.syncExperimentsExpNames))
-				for _, name := range s.syncExperimentsExpNames {
-					if seen[name] {
-						keep = append(keep, name)
-					}
-				}
-				expGroup.Selected = keep
-				s.syncExperimentsExpNames = keep
-				expGroup.Refresh()
-				updateScanBtn()
-				if firstErr != nil {
-					statusLabel.SetText(fmt.Sprintf("%d experiment(s) found (one or more locations failed to list: %v)", len(union), firstErr))
+				if finalErr != nil {
+					statusLabel.SetText(fmt.Sprintf("%d experiment(s) found (one or more locations failed to list: %v)", len(finalUnion), finalErr))
 				} else {
-					statusLabel.SetText(fmt.Sprintf("%d experiment(s) found across %d location(s)", len(union), len(locs)))
+					statusLabel.SetText(fmt.Sprintf("%d experiment(s) found across %d location(s)", len(finalUnion), len(locs)))
 				}
 			})
 		}()
@@ -168,6 +205,7 @@ func showSyncExperiments(s *state) {
 			widget.NewLabelWithStyle("Sync Experiments", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewLabel("Pick two or more locations to converge — no location is a designated source."),
 			container.NewPadded(locGroup.CanvasObject()),
+			loading.CanvasObject(),
 			statusLabel,
 			widget.NewSeparator(),
 		),

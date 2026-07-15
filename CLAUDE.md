@@ -35,6 +35,11 @@ option to scan experiments).
   via `setContent`, never `win.SetContent`. Set `Truncation` on labels holding
   long paths for looks, but the window itself can no longer be stretched.
 - Do not commit changes until the user has tested and verified them working.
+- This is a native macOS GUI app (Fyne) with no screenshot/automation
+  harness. Never attempt to "visually verify" UI changes yourself (launching
+  the app to screenshot it, click through it, etc.) — you have no way to see
+  a native window. Build/vet/test to confirm it compiles and passes existing
+  tests, then hand off to the user to check it in the running app.
 - Worktrees go in ./.claude/worktrees
 - **rclone must always use `copy`, never `sync`** — this is a core safety
   invariant. `rclone sync` deletes destination-only files; this app must

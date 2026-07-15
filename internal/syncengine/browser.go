@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"sync"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
@@ -143,6 +144,46 @@ func UnionChildDirNames(ctx context.Context, locs []Location, relPath string) []
 	}
 	sort.Strings(names)
 	return names
+}
+
+// UnionChildDirNamesStream is UnionChildDirNames, but scans every location
+// concurrently and invokes onUpdate with the current deduped/sorted union
+// each time a location's listing lands, instead of waiting for all of them.
+// This lets a caller show a fast location's folders (e.g. local disk)
+// immediately rather than blocking on a slow one (e.g. a remote). onUpdate
+// is only ever called from one goroutine at a time. Locations that fail to
+// list are silently skipped, same as UnionChildDirNames.
+func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(names []string)) {
+	if len(locs) == 0 {
+		return
+	}
+	var mu sync.Mutex
+	seen := make(map[string]bool)
+	var wg sync.WaitGroup
+	for _, loc := range locs {
+		wg.Add(1)
+		go func(loc Location) {
+			defer wg.Done()
+			entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range entries {
+				if _, isDir := e.(fs.Directory); isDir {
+					seen[dirName(e)] = true
+				}
+			}
+			names := make([]string, 0, len(seen))
+			for n := range seen {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			onUpdate(names)
+		}(loc)
+	}
+	wg.Wait()
 }
 
 func dirName(e fs.DirEntry) string {

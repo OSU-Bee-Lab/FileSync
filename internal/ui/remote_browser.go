@@ -53,6 +53,7 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 	backBtn := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), nil)
 	statusLbl := widget.NewLabel("")
 	statusLbl.Wrapping = fyne.TextWrapWord
+	loading := newLoadingBar()
 
 	// rows mirrors destFolderBrowser's row model: drive/folder names to
 	// browse into, one row per name, rendered via a widget.List so this
@@ -133,10 +134,12 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 
 		rows = nil
 		list.Refresh()
-		statusLbl.SetText("Loading...")
+		statusLbl.SetText("")
+		loading.Show()
 		go func() {
 			dirs, err := syncengine.ListRemoteDirsOnDrive(context.Background(), remoteName, drive, current)
 			fyne.Do(func() {
+				loading.Hide()
 				if err != nil {
 					// Auth failures need the shared Reconnect window; other
 					// errors (e.g. a pre-filled path that doesn't resolve in
@@ -197,7 +200,7 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
 	header := container.NewBorder(nil, nil, backBtn, nil, pathLabel)
-	footer := container.NewVBox(statusLbl, container.NewCenter(container.NewHBox(useBtn, cancelBtn)))
+	footer := container.NewVBox(loading.CanvasObject(), statusLbl, container.NewCenter(container.NewHBox(useBtn, cancelBtn)))
 	body := container.NewBorder(header, footer, nil, nil, scroll)
 
 	d = dialog.NewCustomWithoutButtons("Browse "+remoteName, body, s.win)

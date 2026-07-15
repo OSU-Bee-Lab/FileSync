@@ -261,6 +261,55 @@ func metricPanel(label string, value *widget.Label, bg color.Color) fyne.CanvasO
 	return container.NewStack(rect, container.NewPadded(container.NewVBox(caption, value)))
 }
 
+// thinBarLayout renders its single child (an infinite progress bar) as a
+// slim horizontal strip of barHeight, vertically centered within whatever
+// height the parent actually allocates - letting a loadingBar report a much
+// shorter MinSize than the bar's own (much taller) default one.
+type thinBarLayout struct{ barHeight float32 }
+
+func (l *thinBarLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(0, l.barHeight)
+}
+
+func (l *thinBarLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) == 0 {
+		return
+	}
+	y := (size.Height - l.barHeight) / 2
+	objects[0].Resize(fyne.NewSize(size.Width, l.barHeight))
+	objects[0].Move(fyne.NewPos(0, y))
+}
+
+// loadingBar is a slim infinite progress bar (rather than a full-height
+// widget.ProgressBarInfinite) used by any folder/experiment browser while a
+// scan is in flight.
+type loadingBar struct {
+	root fyne.CanvasObject
+	bar  *widget.ProgressBarInfinite
+}
+
+func newLoadingBar() *loadingBar {
+	bar := widget.NewProgressBarInfinite()
+	thinHeight := bar.MinSize().Height / 5
+
+	barWrap := container.New(&thinBarLayout{barHeight: thinHeight}, bar)
+	barWrap.Hide()
+
+	return &loadingBar{root: barWrap, bar: bar}
+}
+
+func (lb *loadingBar) CanvasObject() fyne.CanvasObject { return lb.root }
+
+func (lb *loadingBar) Show() {
+	lb.root.Show()
+	lb.bar.Start()
+}
+
+func (lb *loadingBar) Hide() {
+	lb.bar.Stop()
+	lb.root.Hide()
+}
+
 func humanSpeed(bytesPerSec float64) string {
 	const unit = 1024
 	if bytesPerSec < unit {

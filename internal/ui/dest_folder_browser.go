@@ -46,6 +46,7 @@ type destFolderBrowser struct {
 	backBtn    *widget.Button
 	breadcrumb *widget.Label
 	statusLbl  *widget.Label
+	loading    *loadingBar
 	list       *widget.List
 	names      []string
 
@@ -68,6 +69,7 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 	b.breadcrumb = widget.NewLabel("")
 	b.statusLbl = widget.NewLabel("")
 	b.statusLbl.Wrapping = fyne.TextWrapWord
+	b.loading = newLoadingBar()
 
 	b.list = widget.NewList(
 		func() int {
@@ -88,7 +90,7 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 
 	b.root = container.NewBorder(
 		container.NewHBox(b.backBtn, b.breadcrumb),
-		b.statusLbl,
+		container.NewVBox(b.loading.CanvasObject(), b.statusLbl),
 		nil, nil,
 		b.list,
 	)
@@ -256,20 +258,30 @@ func (b *destFolderBrowser) reload() {
 		b.names = nil
 		b.list.Refresh()
 		b.statusLbl.SetText("")
+		b.loading.Hide()
 		return
 	}
 
-	b.statusLbl.SetText("Loading...")
+	b.names = nil
+	b.list.Refresh()
+	b.statusLbl.SetText("")
+	b.loading.Show()
 	go func() {
 		ctx := context.Background()
-		names := syncengine.UnionChildDirNames(ctx, locs, relPath)
+		syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string) {
+			fyne.Do(func() {
+				if gen != b.scanGen {
+					return
+				}
+				b.names = names
+				b.list.Refresh()
+			})
+		})
 		fyne.Do(func() {
 			if gen != b.scanGen {
 				return
 			}
-			b.names = names
-			b.list.Refresh()
-			b.statusLbl.SetText("")
+			b.loading.Hide()
 		})
 	}()
 }
