@@ -36,6 +36,7 @@ func (ps *progressScreen) runScan() {
 	}
 	ps.selectedFoldIdx = 0
 	ps.phase = phaseScanRunning
+	ps.cancelling = false
 	ps.refreshUI()
 	if len(ps.tasks) > 0 {
 		ps.expList.Select(0)
@@ -161,6 +162,7 @@ func (ps *progressScreen) runSync() {
 	}
 	ps.selectedFoldIdx = 0
 	ps.phase = phaseSyncing
+	ps.cancelling = false
 	ps.refreshUI()
 
 	jobs := make([]scanJob, len(ps.tasks))

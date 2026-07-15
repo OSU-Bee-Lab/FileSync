@@ -70,6 +70,14 @@ type progressScreen struct {
 	// run's worker goroutine is launched — see progress_run.go.
 	activeCancel context.CancelFunc
 
+	// cancelling is true from the moment the user confirms "Cancel Sync"
+	// until the in-flight jobs actually wind down (runSync resets it on the
+	// next run). It exists because that wind-down isn't instant — jobs keep
+	// reporting progress, and refreshUI/applyPhaseChrome run on every one of
+	// those updates — so without this flag the next refresh would just
+	// redraw "Cancel Sync" as if nothing happened.
+	cancelling bool
+
 	titleLabel *widget.Label
 	speedLabel *widget.Label
 	retryLabel *canvas.Text
@@ -276,12 +284,21 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 			"Cancel Sync", "Continue Syncing",
 			func(ok bool) {
 				if ok {
+					ps.cancelling = true
 					cancelNow()
+					ps.refreshUI()
 				}
 			}, s.win)
 	})
 
-	ps.backBtn = widget.NewButton("Back", ps.onBack)
+	// Batch Upload never returns to a prior screen - like End Sync, onBack
+	// here ends the recorder-sync session outright - so its Back button is
+	// labeled "Exit Sync" to reflect that.
+	backLabel := "Back"
+	if ps.extras.syncingTitle == "Batch Upload" {
+		backLabel = "Exit Sync"
+	}
+	ps.backBtn = widget.NewButton(backLabel, ps.onBack)
 
 	ps.syncBtn = widget.NewButton("Sync", func() {
 		if ps.extras.onNWaySync != nil {
@@ -396,9 +413,11 @@ func (ps *progressScreen) applyPhaseChrome() {
 		ps.syncBtn.Hide()
 		ps.scanBtn.Hide()
 		ps.resolveBtn.Hide()
+		ps.cancelBtn.Importance = widget.MediumImportance
 		ps.cancelBtn.SetText("Cancel")
 		ps.cancelBtn.Show()
 		ps.cancelBtn.Enable()
+		ps.cancelBtn.Refresh()
 		ps.backBtn.Disable()
 	case phaseScanComplete:
 		ps.titleLabel.SetText("Ready to Sync")
@@ -447,9 +466,16 @@ func (ps *progressScreen) applyPhaseChrome() {
 		ps.scanBtn.Hide()
 		ps.syncBtn.Hide()
 		ps.resolveBtn.Hide()
-		ps.cancelBtn.SetText("Cancel Sync")
+		ps.cancelBtn.Importance = widget.DangerImportance
 		ps.cancelBtn.Show()
-		ps.cancelBtn.Enable()
+		if ps.cancelling {
+			ps.cancelBtn.SetText("Cancelling...")
+			ps.cancelBtn.Disable()
+		} else {
+			ps.cancelBtn.SetText("Cancel Sync")
+			ps.cancelBtn.Enable()
+		}
+		ps.cancelBtn.Refresh()
 		ps.backBtn.Disable()
 	case phaseSyncComplete:
 		var hasAnyErrors bool

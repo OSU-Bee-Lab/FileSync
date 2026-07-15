@@ -67,6 +67,11 @@ type recorderSyncScreen struct {
 	// refreshEndSyncDialog).
 	endSyncMsgLabel   *widget.Label
 	endSyncConfirmBtn *widget.Button
+
+	// exitBtn sits beside cancelBtn, visible only while cancelBtn reads
+	// "Batch Upload" - an escape hatch so committing to Batch Upload isn't
+	// the only way off the idle screen. See refreshCancelBtn.
+	exitBtn *widget.Button
 }
 
 // showRecorderSync builds and shows Screen 2 for params, then launches its
@@ -101,6 +106,8 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	go sc.watchVolumes()
 
 	sc.cancelBtn = widget.NewButton("End Sync", sc.confirmEndSync)
+	sc.exitBtn = widget.NewButton("Exit Sync", sc.confirmEndSync)
+	sc.exitBtn.Hide()
 	sc.refreshCancelBtn()
 
 	rowsScroll := container.NewVScroll(sc.rowsBox)
@@ -121,8 +128,11 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	localHeader := container.NewBorder(nil, nil, nil, sortToggleBtn, sectionHeader("Local Sync"))
 	localPanel := container.NewBorder(localHeader, nil, nil, nil, rowsScroll)
 
+	// Batch mode uploads only after local sync finishes, on a separate
+	// screen (see confirmBatchUpload) - there's never anything in flight
+	// here, so the Upload Queue/Uploaded panels would only ever be empty.
 	var main fyne.CanvasObject = localPanel
-	if len(params.uploads) > 0 {
+	if len(params.uploads) > 0 && !params.batchUpload {
 		main = container.NewHSplit(localPanel, sc.uploads.panel())
 	}
 
@@ -132,7 +142,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 			widget.NewLabelWithStyle("Syncing to: "+strings.Join(identParts, "/"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewSeparator(),
 		),
-		sc.cancelBtn,
+		container.NewHBox(sc.cancelBtn, sc.exitBtn),
 		nil, nil,
 		main,
 	)
@@ -305,12 +315,15 @@ func (sc *recorderSyncScreen) refreshCancelBtn() {
 	case sc.hasActiveTransfer():
 		sc.cancelBtn.SetText("Cancel Sync")
 		sc.cancelBtn.OnTapped = sc.confirmEndSync
+		sc.exitBtn.Hide()
 	case sc.params.batchUpload && len(sc.params.uploads) > 0:
 		sc.cancelBtn.SetText("Batch Upload")
 		sc.cancelBtn.OnTapped = sc.confirmBatchUpload
+		sc.exitBtn.Show()
 	default:
 		sc.cancelBtn.SetText("End Sync")
 		sc.cancelBtn.OnTapped = sc.confirmEndSync
+		sc.exitBtn.Hide()
 	}
 }
 

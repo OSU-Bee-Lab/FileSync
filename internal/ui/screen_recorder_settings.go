@@ -210,7 +210,7 @@ func showSyncRecorders(s *state) {
 		startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
 	}
 
-	backBtn := widget.NewButton("Cancel", func() { showHome(s) })
+	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	top := container.NewVBox(
 		widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
