@@ -226,6 +226,12 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 				} else {
 					prog = 1.0
 				}
+				// Same 99%-hold as the overall bar: don't claim 100% for an
+				// individual experiment until the sync phase itself confirms
+				// completion.
+				if ps.phase == phaseSyncing && prog > 0.99 {
+					prog = 0.99
+				}
 			} else if exp.totalBytes > 0 {
 				prog = float64(exp.bytesDone) / float64(exp.totalBytes)
 			}
@@ -608,10 +614,25 @@ func (ps *progressScreen) renderMetrics(m syncMetrics) {
 			ps.filesValue.SetText(fmt.Sprintf("%d / %d\n(%d already synced)", m.copyFilesDone, m.copyFilesTotal, skipFilesTotal))
 			ps.bytesValue.SetText(fmt.Sprintf("%s / %s\n(%s already synced)", humanBytes(m.copyBytesDone), humanBytes(m.copyBytesTotal), humanBytes(skipBytesTotal)))
 		}
-		if m.copyBytesTotal > 0 {
-			ps.overallBar.SetValue(float64(m.copyBytesDone) / float64(m.copyBytesTotal))
-		} else {
-			ps.overallBar.SetValue(1.0)
+		// While actively syncing, never show 100% from the byte ratio alone —
+		// bytes can finish transferring before the sync is actually confirmed
+		// done (post-transfer verification/cleanup still has to run). Hold
+		// the bar at 99% until phaseSyncComplete flips it to 1.0 for real.
+		switch {
+		case ps.phase != phaseSyncing:
+			if m.copyBytesTotal > 0 {
+				ps.overallBar.SetValue(float64(m.copyBytesDone) / float64(m.copyBytesTotal))
+			} else {
+				ps.overallBar.SetValue(1.0)
+			}
+		case m.copyBytesTotal > 0:
+			v := float64(m.copyBytesDone) / float64(m.copyBytesTotal)
+			if v > 0.99 {
+				v = 0.99
+			}
+			ps.overallBar.SetValue(v)
+		default:
+			ps.overallBar.SetValue(0.99)
 		}
 	}
 }
