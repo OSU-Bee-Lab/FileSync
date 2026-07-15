@@ -327,7 +327,20 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 		}
 	}
 	if len(tasks) == 0 {
-		dialog.ShowInformation("Nothing to sync", "Every selected location already agrees on every file (excluding any files you chose not to sync).", s.win)
+		msg := "All files in these locations already exist in the selected locations."
+		if mode == syncengine.NWayQuickScan {
+			msg += " This quick sync can determine if the files are present, but not if the files are identical. Run a Full Sync to check file contents."
+		}
+		// Render the normal finished-sync chrome (see showSyncFlowExtras'
+		// zero-task path) rather than a blocking dialog. This is reached
+		// from onScanDone while the prior scan screen is still mid-scan
+		// (Back disabled, no further phase transition coming for it) — a
+		// plain dialog would leave that screen stuck showing "Scanning...";
+		// setContent here replaces it outright.
+		showSyncFlowExtras(s, nil, func() { showSyncExperiments(s) }, syncFlowExtras{
+			finishedTitle:   "Already in sync!",
+			finishedMessage: msg,
+		})
 		return
 	}
 	syncingTitle := "Full Syncing"

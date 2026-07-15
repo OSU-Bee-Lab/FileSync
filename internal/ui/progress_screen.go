@@ -57,6 +57,15 @@ type syncFlowExtras struct {
 	// this is skipped and the aggregate scan screen renders as usual so
 	// the user can see what went wrong.
 	onScanDone func()
+	// finishedTitle/finishedMessage, when set, mark a session with no tasks
+	// at all — e.g. N-way's transfer plan turning up empty because every
+	// location already agrees. showSyncFlowExtras skips the scan phase
+	// entirely (there is nothing to scan) and renders straight into the
+	// phaseSyncComplete chrome with this title and message, so the user
+	// sees a normal finished-sync screen (with a working Back/"Done") rather
+	// than a blocking dialog or a scan that never progresses.
+	finishedTitle   string
+	finishedMessage string
 }
 
 // progressScreen holds all state and widgets for the shared scan/sync
@@ -98,7 +107,8 @@ type progressScreen struct {
 	filesValue *widget.Label
 	bytesValue *widget.Label
 
-	errorLabel *widget.Label
+	errorLabel       *widget.Label
+	finishedMsgLabel *widget.Label
 
 	expList *widget.List
 
@@ -147,9 +157,17 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 	content := ps.buildLayout()
 	ps.s.setContent(container.NewPadded(content))
 
-	if len(tasks) > 0 {
-		ps.expList.Select(0)
+	if len(tasks) == 0 {
+		// Nothing to scan at all (e.g. N-way found every location already
+		// agrees) — skip the scan phase outright and land straight on the
+		// finished chrome instead of a scan that runs zero tasks and never
+		// visibly progresses.
+		ps.phase = phaseSyncComplete
+		ps.refreshUI()
+		return
 	}
+
+	ps.expList.Select(0)
 	ps.refreshUI()
 
 	ps.scanBtn.OnTapped = ps.runScan
@@ -191,6 +209,10 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	ps.errorLabel = widget.NewLabel("")
 	ps.errorLabel.Wrapping = fyne.TextWrapWord
 	ps.errorLabel.Hide()
+
+	ps.finishedMsgLabel = widget.NewLabel("")
+	ps.finishedMsgLabel.Wrapping = fyne.TextWrapWord
+	ps.finishedMsgLabel.Hide()
 
 	ps.expList = widget.NewList(
 		func() int { return len(ps.expStates) },
@@ -342,6 +364,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 		progressContainer,
 		metrics,
 		ps.errorLabel,
+		ps.finishedMsgLabel,
 		widget.NewSeparator(),
 	)
 
@@ -413,6 +436,9 @@ func (ps *progressScreen) gateNWaySync() {
 // applyPhaseChrome switches title text, progress-bar visibility, and button
 // visibility/enablement based on the current phase.
 func (ps *progressScreen) applyPhaseChrome() {
+	if ps.phase != phaseSyncComplete {
+		ps.finishedMsgLabel.Hide()
+	}
 	switch ps.phase {
 	case phaseScanRunning:
 		ps.titleLabel.SetText("Scanning...")
@@ -487,17 +513,27 @@ func (ps *progressScreen) applyPhaseChrome() {
 		ps.cancelBtn.Refresh()
 		ps.backBtn.Disable()
 	case phaseSyncComplete:
-		var hasAnyErrors bool
-		for _, e := range ps.expStates {
-			if e.hasError {
-				hasAnyErrors = true
-				break
+		if ps.extras.finishedTitle != "" {
+			ps.titleLabel.SetText(ps.extras.finishedTitle)
+		} else {
+			var hasAnyErrors bool
+			for _, e := range ps.expStates {
+				if e.hasError {
+					hasAnyErrors = true
+					break
+				}
+			}
+			if hasAnyErrors {
+				ps.titleLabel.SetText("Sync Completed with Errors")
+			} else {
+				ps.titleLabel.SetText("Sync Complete")
 			}
 		}
-		if hasAnyErrors {
-			ps.titleLabel.SetText("Sync Completed with Errors")
+		if ps.extras.finishedMessage != "" {
+			ps.finishedMsgLabel.SetText(ps.extras.finishedMessage)
+			ps.finishedMsgLabel.Show()
 		} else {
-			ps.titleLabel.SetText("Sync Complete")
+			ps.finishedMsgLabel.Hide()
 		}
 		ps.overallBarInf.Hide()
 		ps.overallBar.Show()
