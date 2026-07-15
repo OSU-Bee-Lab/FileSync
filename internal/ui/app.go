@@ -142,8 +142,8 @@ func Run() {
 		msg := widget.NewLabel("An instance of FileSync is already open. Running multiple instances of FileSync will cause issues if multiple syncs are run simultaneously. Running another instance is not recommended.")
 		msg.Wrapping = fyne.TextWrapWord
 
-		closeBtn := widget.NewButton("Close", func() { w.Close() })
-		closeBtn.Importance = widget.HighImportance
+		closeBtn := widget.NewButton("Exit", func() { w.Close() })
+		closeBtn.Importance = widget.LowImportance
 
 		continueBtn := widget.NewButton("Continue", func() {
 			startApp()
