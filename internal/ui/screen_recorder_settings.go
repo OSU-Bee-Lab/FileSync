@@ -116,7 +116,7 @@ func showSyncRecorders(s *state) {
 	// root level *is* the experiment picker (each top-level folder is an
 	// experiment), and drilling further in is the subpath. The current
 	// browse depth is split back into experimentName/subpath at Start.
-	browser := newDestFolderBrowser(s.win)
+	browser := newDestFolderBrowser(s.win, true)
 
 	syncingToLabel := widget.NewLabel("")
 	syncingToLabel.Wrapping = fyne.TextWrapWord

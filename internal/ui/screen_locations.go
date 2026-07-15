@@ -25,7 +25,7 @@ func showLocations(s *state) {
 			pathLabel := widget.NewLabel("")
 			removeBtn := widget.NewButton("Remove", nil)
 			removeBtn.Importance = widget.DangerImportance
-			btnBox := container.NewHBox(widget.NewButton("Show Experiments", nil), widget.NewButton("Edit", nil), widget.NewButton("Export", nil), removeBtn)
+			btnBox := container.NewHBox(widget.NewButton("Browse", nil), widget.NewButton("Edit", nil), widget.NewButton("Export", nil), removeBtn)
 			nameRow := container.NewBorder(nil, nil, nil, btnBox, nameLabel)
 			return container.NewVBox(nameRow, pathLabel)
 		},
@@ -40,8 +40,8 @@ func showLocations(s *state) {
 
 			btnBox := nameRow.Objects[1].(*fyne.Container)
 
-			showExpBtn := btnBox.Objects[0].(*widget.Button)
-			showExpBtn.OnTapped = func() { showLocationExperiments(s, loc) }
+			browseBtn := btnBox.Objects[0].(*widget.Button)
+			browseBtn.OnTapped = func() { browseLocation(s, id, loc) }
 
 			editBtn := btnBox.Objects[1].(*widget.Button)
 			editBtn.OnTapped = func() { showEditLocation(s, id) }
@@ -291,43 +291,49 @@ func runRemoteOAuth(s *state, bt syncengine.BackendType, dialogTitle, progressTe
 	}()
 }
 
-// showLocationExperiments lists the experiment directories found at the
-// root of loc, so users can check what's there without starting a Sync
-// Experiments or Pull Files flow.
-func showLocationExperiments(s *state, loc syncengine.Location) {
-	ctx, cancel := context.WithCancel(context.Background())
+// browseLocation shows an in-app folder browser over loc (reusing
+// destFolderBrowser, including its "+ Add Folder" row - typing a
+// not-yet-existing name just lets browsing continue into it; nothing is
+// created on disk until an actual sync copies files there). "Set as
+// Location" lets the user navigate to the folder they actually mean and
+// adopt it as loc's RootPath, e.g. after finding experiments have moved
+// into a subfolder.
+//
+// The browser is anchored above loc.RootPath - the remote's own root for a
+// remote location, or "/" for a local one - and starts already drilled down
+// to loc.RootPath, so Back can climb above the current location (e.g. up to
+// a sibling folder, the remote root, or the local drive root) rather than
+// treating RootPath as a floor.
+func browseLocation(s *state, id int, loc syncengine.Location) {
+	browser := newDestFolderBrowser(s.win, true)
+	rootLoc := loc
+	if loc.Kind == syncengine.LocationRemote {
+		rootLoc.RootPath = ""
+	} else {
+		rootLoc.RootPath = "/"
+	}
+	browser.locs = []syncengine.Location{rootLoc}
+	browser.relPath = strings.Trim(loc.RootPath, "/")
+	browser.reload()
 
-	progressDialog := dialog.NewCustom("Loading...", "Cancel", widget.NewLabel("Listing experiments in "+loc.Name+"..."), s.win)
-	progressDialog.SetOnClosed(cancel)
-	progressDialog.Show()
+	var d dialog.Dialog
+	setBtn := widget.NewButton("Set as Location", func() {
+		rel := browser.RelPath()
+		if loc.Kind == syncengine.LocationLocal {
+			rel = "/" + rel
+		}
+		s.cfg.Locations[id].RootPath = rel
+		s.saveConfig()
+		d.Hide()
+		showLocations(s)
+	})
+	setBtn.Importance = widget.HighImportance
+	closeBtn := widget.NewButton("Close", func() { d.Hide() })
 
-	go func() {
-		defer cancel()
-		exps, err := syncengine.ListExperiments(ctx, loc)
-		fyne.Do(func() {
-			progressDialog.Hide()
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				showLocationError(s, err, loc)
-				return
-			}
-			names := make([]string, len(exps))
-			for i, e := range exps {
-				names[i] = e.Name
-			}
-			body := "No experiments found."
-			if len(names) > 0 {
-				body = strings.Join(names, "\n")
-			}
-			list := widget.NewLabel(body)
-			list.Wrapping = fyne.TextWrapWord
-			scroll := container.NewVScroll(list)
-			scroll.SetMinSize(fyne.NewSize(360, 300))
-			dialog.ShowCustom(fmt.Sprintf("Experiments in %s (%d)", loc.Name, len(names)), "Close", scroll, s.win)
-		})
-	}()
+	body := container.NewBorder(nil, container.NewCenter(container.NewHBox(setBtn, closeBtn)), nil, nil, browser.CanvasObject())
+	d = dialog.NewCustomWithoutButtons("Browse "+loc.Name, body, s.win)
+	d.Resize(fyne.NewSize(480, 500))
+	d.Show()
 }
 
 func describeLocation(loc syncengine.Location) string {

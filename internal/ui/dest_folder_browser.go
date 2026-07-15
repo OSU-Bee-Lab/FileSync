@@ -33,6 +33,12 @@ type destFolderBrowser struct {
 
 	win fyne.Window
 
+	// allowCreate controls whether the trailing "+ Add Folder" row is
+	// offered - off for a plain "browse existing folders" use (e.g. Manage
+	// Locations' Browse button), on for recorder-sync's destination picker
+	// where typing a not-yet-existing folder name is the point.
+	allowCreate bool
+
 	locs    []syncengine.Location
 	relPath string
 	scanGen int
@@ -56,15 +62,20 @@ type destFolderBrowser struct {
 	root fyne.CanvasObject
 }
 
-func newDestFolderBrowser(win fyne.Window) *destFolderBrowser {
-	b := &destFolderBrowser{win: win}
+func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser {
+	b := &destFolderBrowser{win: win, allowCreate: allowCreate}
 
 	b.breadcrumb = widget.NewLabel("")
 	b.statusLbl = widget.NewLabel("")
 	b.statusLbl.Wrapping = fyne.TextWrapWord
 
 	b.list = widget.NewList(
-		func() int { return len(b.names) + 1 }, // +1 for the trailing "+ Add Folder" row
+		func() int {
+			if b.allowCreate {
+				return len(b.names) + 1 // +1 for the trailing "+ Add Folder" row
+			}
+			return len(b.names)
+		},
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
 			entry.Hide()
@@ -131,18 +142,20 @@ func (b *destFolderBrowser) ascend() {
 }
 
 func (b *destFolderBrowser) showAddFolder() {
-	if len(b.locs) == 0 {
+	if !b.allowCreate || len(b.locs) == 0 {
 		return
 	}
 	b.addingFolder = true
 	b.addFolderText = ""
 	b.needsFocus = true
+	b.statusLbl.SetText("Folder will be created on first sync.")
 	b.list.Refresh()
 }
 
 func (b *destFolderBrowser) closeAddFolder() {
 	b.addingFolder = false
 	b.addFolderText = ""
+	b.statusLbl.SetText("")
 }
 
 // commitNewFolder folds the typed name into relPath and re-opens browsing
