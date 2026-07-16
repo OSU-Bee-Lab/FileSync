@@ -45,6 +45,12 @@ type fileUIState struct {
 	action         syncengine.ScanAction
 	dstSize        int64
 	conflictReason string
+
+	// folder is the owning folderUIState, set once by buildExpUIState. Lets
+	// applySyncSnapshot fold per-file updates straight into their folder's
+	// aggregates in a single pass over e.fileMap, instead of a second pass
+	// over e.folders/fold.files.
+	folder *folderUIState
 }
 
 type folderUIState struct {
@@ -83,6 +89,15 @@ type expUIState struct {
 	copyBytesDone  int64
 	copyTotalFiles int
 	copyFilesDone  int
+
+	// totalFiles and totalConflicts are invariant once the scan that built
+	// this expUIState has finished: a sync never changes how many files an
+	// experiment has or how many are conflicts. Populated once by
+	// buildExpUIState so computeSyncMetrics — which runs every UI tick while
+	// a sync is running — can sum these instead of re-walking every file of
+	// every folder each time just to recompute a number that never changes.
+	totalFiles     int
+	totalConflicts int
 }
 
 // barRow is one rendered row in a split sub-panel (Files or Folders): a real
@@ -157,6 +172,7 @@ func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 			path: dirPath,
 		}
 		for _, f := range files {
+			f.folder = folder
 			folder.totalBytes += f.size
 			folder.totalFiles++
 			if f.done {
@@ -170,6 +186,9 @@ func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 					folder.copyBytesDone += f.size
 					folder.copyFilesDone++
 				}
+			}
+			if f.action == syncengine.ActionConflict {
+				exp.totalConflicts++
 			}
 			folder.files = append(folder.files, f)
 		}
@@ -193,6 +212,7 @@ func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
 		exp.copyBytesDone += f.copyBytesDone
 		exp.copyTotalFiles += f.copyTotalFiles
 		exp.copyFilesDone += f.copyFilesDone
+		exp.totalFiles += f.totalFiles
 	}
 
 	return exp
@@ -222,24 +242,20 @@ func computeSyncMetrics(expStates []*expUIState) syncMetrics {
 			m.totalExpsDone++
 		}
 		if len(e.folders) > 0 {
+			// totalFiles and totalConflicts don't change once the scan that
+			// built e.folders has finished, so they're pre-summed on
+			// expUIState by buildExpUIState rather than re-derived here from
+			// every file, every tick.
+			m.totalFiles += e.totalFiles
+			m.totalConflicts += e.totalConflicts
+			m.totalBytes += e.totalBytes
 			for _, fold := range e.folders {
-				m.totalFiles += fold.totalFiles
 				m.totalFilesDone += fold.filesDone
-				m.totalBytes += fold.totalBytes
 				m.totalBytesDone += fold.bytesDone
 				m.copyFilesTotal += fold.copyTotalFiles
 				m.copyFilesDone += fold.copyFilesDone
 				m.copyBytesTotal += fold.copyTotalBytes
 				m.copyBytesDone += fold.copyBytesDone
-				// Conflicts surface the moment the scan finds them — a burst
-				// of conflicts mid-scan is exactly the "picked the wrong
-				// location / stale recorder files" signal the user needs
-				// before syncing.
-				for _, file := range fold.files {
-					if file.action == syncengine.ActionConflict {
-						m.totalConflicts++
-					}
-				}
 			}
 		} else {
 			for _, row := range e.tempFolders {
@@ -281,54 +297,125 @@ func (e *expUIState) applyScanProgress(p syncengine.ScanProgress) {
 // per-file, per-folder, and experiment-level aggregates. Pure — the caller
 // wraps this in fyne.Do and triggers a re-render.
 func (e *expUIState) applySyncSnapshot(snap syncengine.ProgressSnapshot) {
-	completedBytesSum := int64(0)
+	// Reset folder/exp aggregates; the loop below over e.fileMap re-derives
+	// them in the same pass as the per-file updates (folders are cheap —
+	// there are far fewer of them than files — so this two-line reset plus
+	// one file pass replaces what used to be two full passes over every
+	// file).
+	e.hasError = false
+	e.bytesDone = 0
+	e.copyBytesDone = 0
+	e.copyFilesDone = 0
+	for _, fold := range e.folders {
+		fold.bytesDone = 0
+		fold.filesDone = 0
+		fold.copyBytesDone = 0
+		fold.copyFilesDone = 0
+		fold.hasError = false
+	}
+
 	for _, file := range e.fileMap {
+		// newBytes/haveBytes: the candidate bytesDone value this snapshot
+		// implies for this file, if any. Applied through a monotonic clamp
+		// below rather than assigned directly, so a file's bytesDone can
+		// never regress across snapshots — defense in depth against a file
+		// transiently falling out of rclone's windowed Files map (completed
+		// transfers) or, in principle, a single tick where it briefly
+		// disappears from the transferring list too.
+		var newBytes int64
+		haveBytes := false
+
 		if p, ok := snap.Files[file.relPath]; ok {
+			// A file currently being copied is present here too (via
+			// rclone's "transferring" list, keyed the same as CurrentFile),
+			// with its own live partial BytesDone — so the current file's
+			// bytes come from here directly, with no need to reconstruct
+			// them from the job-global snap.BytesDone (which sums ALL
+			// in-flight files under Transfers>1, not just this one, and
+			// never includes already-skipped files' bytes at all).
+			//
 			// Completion is sticky (|| p.Done): rclone can report a file as
 			// live-transferring one tick and pruned the next, but this app
 			// only ever copies — a file never un-finishes within a job.
-			// rclone reports a completed transfer with Bytes == Size, so
-			// p.BytesDone already carries the full size here.
 			file.done = file.done || p.Done
-			file.bytesDone = p.BytesDone
 			file.err = p.Err
 			file.hasError = p.Err != nil
-		} else if file.action == syncengine.ActionSkipIdentical {
-			file.done = true
-			file.bytesDone = file.size
-		} else {
-			// Not in this snapshot. rclone's accounting keeps only its most
-			// recent ~100 completed transfers (MaxCompletedTransfers) in the
-			// list snap.Files is built from, so on a big folder a
-			// genuinely-copied file silently drops out mid-sync. Never
-			// regress it to zero — that's what made fully-synced folders
-			// de-sync and the Bytes counter fall. Only files that truly
-			// haven't started yet stay at zero.
 			if file.done {
-				file.bytesDone = file.size
-			} else if file.relPath != snap.CurrentFile {
-				file.bytesDone = 0
+				// rclone reports a completed transfer with Bytes == Size,
+				// but once sticky-done, always show the full size rather
+				// than trusting whatever this tick's snapshot says.
+				newBytes = file.size
+			} else {
+				newBytes = p.BytesDone
+			}
+			haveBytes = true
+		} else if file.action == syncengine.ActionSkipIdentical {
+			// Already-synced files are never transferred, so they never
+			// appear in snap.Files at all.
+			file.done = true
+			newBytes = file.size
+			haveBytes = true
+		} else if file.done {
+			// Not in this snapshot, but previously completed. rclone's
+			// accounting keeps only its most recent ~100 completed
+			// transfers (MaxCompletedTransfers) in the list snap.Files is
+			// built from, so on a big folder a genuinely-copied file
+			// silently drops out mid-sync. Keep it at full size — that's
+			// what made fully-synced folders de-sync and the Bytes counter
+			// fall.
+			newBytes = file.size
+			haveBytes = true
+		}
+		// Else: not in this snapshot, not skip-identical, not yet done —
+		// i.e. genuinely hasn't started (or, in principle, momentarily fell
+		// out of the transferring list). Leave file.bytesDone untouched;
+		// the monotonic clamp below is a no-op in that case since it can
+		// only ever hold its prior value (0, for a not-yet-started file).
+
+		if haveBytes && newBytes > file.bytesDone {
+			file.bytesDone = newBytes
+		}
+
+		fold := file.folder
+		if fold == nil {
+			continue
+		}
+		fold.bytesDone += file.bytesDone
+		if file.done {
+			fold.filesDone++
+		}
+		if file.action == syncengine.ActionCopy {
+			fold.copyBytesDone += file.bytesDone
+			if file.done {
+				fold.copyFilesDone++
 			}
 		}
-		if file.done && file.relPath != snap.CurrentFile {
-			completedBytesSum += file.size
+		if file.hasError {
+			fold.hasError = true
 		}
 	}
 
-	if snap.CurrentFile != "" {
-		if file, ok := e.fileMap[snap.CurrentFile]; ok {
-			fileBytes := snap.BytesDone - completedBytesSum
-			if fileBytes < 0 {
-				fileBytes = 0
-			}
-			if fileBytes > file.size {
-				fileBytes = file.size
-			}
-			file.bytesDone = fileBytes
-			file.done = (fileBytes == file.size)
+	for _, fold := range e.folders {
+		e.bytesDone += fold.bytesDone
+		e.copyBytesDone += fold.copyBytesDone
+		e.copyFilesDone += fold.copyFilesDone
+		if fold.hasError {
+			e.hasError = true
 		}
 	}
+}
 
+// markDone finalizes the experiment once its sync job has finished
+// successfully, so the render shows the true completed state rather than
+// whatever the last progress snapshot happened to report. It only marks
+// ActionCopy files done — and only those with no recorded error: a
+// deliberately-skipped ActionConflict file was never copied, and an errored
+// transfer didn't complete, so neither should read as done.
+// (ActionSkipIdentical files are left alone: applySyncSnapshot/
+// buildExpUIState already mark those done, since they were already synced
+// before this job ran.) Pure — the caller wraps this in fyne.Do and
+// triggers a re-render.
+func (e *expUIState) markDone() {
 	e.hasError = false
 	e.bytesDone = 0
 	e.copyBytesDone = 0
@@ -340,13 +427,15 @@ func (e *expUIState) applySyncSnapshot(snap syncengine.ProgressSnapshot) {
 		fold.copyFilesDone = 0
 		fold.hasError = false
 		for _, file := range fold.files {
-			fold.bytesDone += file.bytesDone
-			if file.done {
-				fold.filesDone++
+			if file.action == syncengine.ActionCopy && !file.hasError {
+				file.bytesDone = file.size
+				file.done = true
 			}
-			if file.action == syncengine.ActionCopy {
-				fold.copyBytesDone += file.bytesDone
-				if file.done {
+			if file.done {
+				fold.bytesDone += file.bytesDone
+				fold.filesDone++
+				if file.action == syncengine.ActionCopy {
+					fold.copyBytesDone += file.bytesDone
 					fold.copyFilesDone++
 				}
 			}
@@ -361,24 +450,4 @@ func (e *expUIState) applySyncSnapshot(snap syncengine.ProgressSnapshot) {
 			e.hasError = true
 		}
 	}
-}
-
-// markDone sets every folder/file in the experiment to fully complete. Called
-// once a sync job finishes successfully, so the final render shows 100%
-// rather than whatever the last progress snapshot happened to report. Pure —
-// the caller wraps this in fyne.Do and triggers a re-render.
-func (e *expUIState) markDone() {
-	for _, fold := range e.folders {
-		fold.bytesDone = fold.totalBytes
-		fold.filesDone = fold.totalFiles
-		fold.copyBytesDone = fold.copyTotalBytes
-		fold.copyFilesDone = fold.copyTotalFiles
-		for _, file := range fold.files {
-			file.bytesDone = file.size
-			file.done = true
-		}
-	}
-	e.bytesDone = e.totalBytes
-	e.copyBytesDone = e.copyTotalBytes
-	e.copyFilesDone = e.copyTotalFiles
 }
