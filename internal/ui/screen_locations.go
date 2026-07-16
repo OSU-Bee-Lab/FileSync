@@ -6,54 +6,286 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/OSU-Bee-Lab/filesync/internal/appconfig"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
+// byPriorityThenName sorts by explicit Priority ascending; locations that
+// share a Priority (in particular a legacy config where Priority was never
+// set — all zero — before this ranking feature existed) fall back to
+// alphabetical order by Name rather than whatever order they happened to be
+// in, so a freshly upgraded config starts from a predictable ranking
+// instead of an arbitrary one.
+func byPriorityThenName(locs []syncengine.Location) func(i, j int) bool {
+	return func(i, j int) bool {
+		if locs[i].Priority != locs[j].Priority {
+			return locs[i].Priority < locs[j].Priority
+		}
+		return strings.ToLower(locs[i].Name) < strings.ToLower(locs[j].Name)
+	}
+}
+
+// normalizePriorities re-sorts cfg.Locations so all Local locations are
+// grouped first (by byPriorityThenName), followed by all Remote locations
+// (same rule, independently numbered), with each group's Priority
+// renumbered 1..n. Slice order is what BuildNWayTransferPlan actually walks
+// for its tie-break between two same-kind sources (see PreferLocalSource,
+// which only ever prefers local over remote, never reorders two same-kind
+// candidates against each other) — keeping slice order in sync with
+// Priority here is what makes the ranking take effect, for both groups
+// independently. Idempotent, and safe to call before every render: it's
+// also what upgrades a legacy config where Priority was never set (all
+// zero) into a stable, predictable (alphabetical) default order.
+func normalizePriorities(cfg *appconfig.Config) {
+	cfg.Locations = normalizedLocationOrder(cfg.Locations)
+}
+
+// normalizedLocationOrder is the pure reordering logic behind
+// normalizePriorities, split out so it's testable without an appconfig.Config
+// or any UI/disk side effects.
+func normalizedLocationOrder(locs []syncengine.Location) []syncengine.Location {
+	locals := make([]syncengine.Location, 0, len(locs))
+	remotes := make([]syncengine.Location, 0, len(locs))
+	for _, loc := range locs {
+		if loc.Kind == syncengine.LocationLocal {
+			locals = append(locals, loc)
+		} else {
+			remotes = append(remotes, loc)
+		}
+	}
+	sort.SliceStable(locals, byPriorityThenName(locals))
+	sort.SliceStable(remotes, byPriorityThenName(remotes))
+	for i := range locals {
+		locals[i].Priority = i + 1
+	}
+	for i := range remotes {
+		remotes[i].Priority = i + 1
+	}
+	return append(locals, remotes...)
+}
+
+// moveToPosition moves the location currently at cfg index cfgIdx so it
+// lands at finalPos (0-indexed) among locations of the same Kind, then
+// renumbers that group's Priority 1..n to match and persists. Used directly
+// by the priority dropdown (finalPos is exactly the position the user
+// picked).
+func moveToPosition(s *state, cfgIdx int, finalPos int) {
+	s.cfg.Locations = locationsMovedToPosition(s.cfg.Locations, cfgIdx, finalPos)
+	s.saveConfig()
+	showLocations(s)
+}
+
+// locationsMovedToPosition is the pure reordering logic behind
+// moveToPosition, split out so it's testable without a *state (which pulls
+// in Fyne widgets and disk writes via saveConfig/showLocations).
+func locationsMovedToPosition(locs []syncengine.Location, cfgIdx int, finalPos int) []syncengine.Location {
+	loc := locs[cfgIdx]
+	group := make([]syncengine.Location, 0, len(locs))
+	others := make([]syncengine.Location, 0, len(locs))
+	for i, l := range locs {
+		if i == cfgIdx {
+			continue
+		}
+		if l.Kind == loc.Kind {
+			group = append(group, l)
+		} else {
+			others = append(others, l)
+		}
+	}
+	if finalPos < 0 {
+		finalPos = 0
+	}
+	if finalPos > len(group) {
+		finalPos = len(group)
+	}
+	group = append(group[:finalPos], append([]syncengine.Location{loc}, group[finalPos:]...)...)
+	for i := range group {
+		group[i].Priority = i + 1
+	}
+	if loc.Kind == syncengine.LocationLocal {
+		return append(group, others...)
+	}
+	return append(others, group...)
+}
+
+// moveBySeam is the drag-and-drop entry point: seam is a drop-gap index
+// among the n current rows in the dragged row's group (0 = above the first
+// row, n = below the last), measured against the pre-move row order (the
+// row being dragged is still shown in place during the drag). It converts
+// that into the finalPos moveToPosition expects.
+func moveBySeam(s *state, cfgIdx int, from int, seam int) {
+	moveToPosition(s, cfgIdx, seamToFinalPos(from, seam))
+}
+
+// seamToFinalPos converts a drop-gap seam index (measured against the
+// pre-move row order, including the row being dragged) into the 0-indexed
+// final position locationsMovedToPosition expects (measured after that row
+// is removed from the group). Split out from moveBySeam so it's directly
+// testable.
+func seamToFinalPos(from, seam int) int {
+	finalPos := seam
+	if seam > from {
+		finalPos--
+	}
+	return finalPos
+}
+
+func locationButtonRow(s *state, id int, loc syncengine.Location) *fyne.Container {
+	removeBtn := widget.NewButton("Remove", func() { removeLocation(s, id, loc) })
+	removeBtn.Importance = widget.DangerImportance
+	browseBtn := widget.NewButton("Browse", func() { browseLocation(s, id, loc) })
+	editBtn := widget.NewButton("Edit", func() { showEditLocation(s, id) })
+	btns := []fyne.CanvasObject{browseBtn, editBtn}
+	if loc.Kind == syncengine.LocationRemote {
+		exportBtn := widget.NewButton("Export", func() { exportLocation(s, loc) })
+		btns = append(btns, exportBtn)
+	}
+	btns = append(btns, removeBtn)
+	return container.NewHBox(btns...)
+}
+
+func locationRowContent(s *state, id int, loc syncengine.Location, priorityLabels []string, priorityIdx int) fyne.CanvasObject {
+	nameLabel := widget.NewLabelWithStyle(loc.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	pathLabel := widget.NewLabel(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
+	trailing := locationButtonRow(s, id, loc)
+	// NewSelect + SetSelectedIndex, in that order, would fire OnChanged
+	// immediately (the previous "" selected value always differs from the
+	// initial index) and re-enter showLocations while it's still building
+	// this same render — an infinite loop. Set the initial index with no
+	// callback attached, then attach OnChanged only after.
+	prioritySelect := widget.NewSelect(priorityLabels, nil)
+	prioritySelect.SetSelectedIndex(priorityIdx)
+	prioritySelect.OnChanged = func(sel string) {
+		n, err := strconv.Atoi(sel)
+		if err != nil {
+			return
+		}
+		moveToPosition(s, id, n-1)
+	}
+	trailing = container.NewHBox(widget.NewLabel("Priority"), prioritySelect, trailing)
+	nameRow := container.NewBorder(nil, nil, nil, trailing, nameLabel)
+	return container.NewVBox(nameRow, pathLabel)
+}
+
+// addRankedSection appends a titled group of rows to body for every
+// location in idx (all the same Kind), each with a priority dropdown and a
+// drag handle so the user can rank them — 1 beats 2 beats 3, etc. — for
+// N-way sync source selection. Locals are always preferred over remotes
+// regardless of either group's ranking (see PreferLocalSource); ranking
+// only breaks ties within a group — among locals when several hold a file
+// no remote needs, or among remotes when no local has the file at all.
+func addRankedSection(s *state, body *fyne.Container, title string, idx []int) {
+	if len(idx) == 0 {
+		return
+	}
+	body.Add(widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}))
+
+	priorityLabels := make([]string, len(idx))
+	for i := range priorityLabels {
+		priorityLabels[i] = strconv.Itoa(i + 1)
+	}
+
+	// One seam rectangle above each row plus one below the last row;
+	// seam[i] is the drop-gap "above row i" (seam[len(idx)] is below the
+	// last row). Highlighted blue while a row is dragged over it,
+	// transparent otherwise.
+	seams := make([]*canvas.Rectangle, len(idx)+1)
+	for i := range seams {
+		r := canvas.NewRectangle(theme.Color(theme.ColorNameBackground))
+		r.SetMinSize(fyne.NewSize(0, 3))
+		seams[i] = r
+	}
+	clearSeams := func() {
+		for _, r := range seams {
+			r.FillColor = theme.Color(theme.ColorNameBackground)
+			r.Refresh()
+		}
+	}
+
+	body.Add(seams[0])
+	for pos, cfgIdx := range idx {
+		loc := s.cfg.Locations[cfgIdx]
+		row := locationRowContent(s, cfgIdx, loc, priorityLabels, pos)
+
+		from := pos
+		cid := cfgIdx
+		startY := float32(0)
+		clampTarget := func(t int) int {
+			if t < 0 {
+				return 0
+			}
+			if t > len(idx) {
+				return len(idx)
+			}
+			return t
+		}
+
+		var rowWithHandle *fyne.Container
+		handle := newDragHandle(
+			func(dy float32) {
+				startY += dy
+				rowHeight := rowWithHandle.MinSize().Height
+				if rowHeight <= 0 {
+					rowHeight = 1
+				}
+				target := clampTarget(int(float32(from) + startY/rowHeight + 0.5))
+				clearSeams()
+				seams[target].FillColor = theme.Color(theme.ColorNamePrimary)
+				seams[target].Refresh()
+			},
+			func() {
+				rowHeight := rowWithHandle.MinSize().Height
+				if rowHeight <= 0 {
+					rowHeight = 1
+				}
+				target := clampTarget(int(float32(from) + startY/rowHeight + 0.5))
+				startY = 0
+				clearSeams()
+				if target != from {
+					moveBySeam(s, cid, from, target)
+				}
+			},
+		)
+		rowWithHandle = container.NewBorder(nil, nil, handle, nil, row)
+
+		body.Add(rowWithHandle)
+		body.Add(seams[pos+1])
+	}
+}
+
+// showLocations renders Manage Locations, split into a Local section and a
+// Remote section, each independently ranked (priority dropdown + drag
+// handle). Locals always win as an N-way sync source over remotes
+// regardless of rank; ranking only breaks ties within a group.
 func showLocations(s *state) {
-	list := widget.NewList(
-		func() int { return len(s.cfg.Locations) },
-		func() fyne.CanvasObject {
-			nameLabel := widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-			pathLabel := widget.NewLabel("")
-			removeBtn := widget.NewButton("Remove", nil)
-			removeBtn.Importance = widget.DangerImportance
-			btnBox := container.NewHBox(widget.NewButton("Browse", nil), widget.NewButton("Edit", nil), widget.NewButton("Export", nil), removeBtn)
-			nameRow := container.NewBorder(nil, nil, nil, btnBox, nameLabel)
-			return container.NewVBox(nameRow, pathLabel)
-		},
-		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			loc := s.cfg.Locations[id]
-			vbox := obj.(*fyne.Container)
-			nameRow := vbox.Objects[0].(*fyne.Container)
-			pathLabel := vbox.Objects[1].(*widget.Label)
-			nameLabel := nameRow.Objects[0].(*widget.Label)
-			nameLabel.SetText(loc.Name)
-			pathLabel.SetText(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
+	normalizePriorities(&s.cfg)
 
-			btnBox := nameRow.Objects[1].(*fyne.Container)
+	var localIdx, remoteIdx []int
+	for i, loc := range s.cfg.Locations {
+		if loc.Kind == syncengine.LocationLocal {
+			localIdx = append(localIdx, i)
+		} else {
+			remoteIdx = append(remoteIdx, i)
+		}
+	}
 
-			browseBtn := btnBox.Objects[0].(*widget.Button)
-			browseBtn.OnTapped = func() { browseLocation(s, id, loc) }
+	body := container.NewVBox()
+	addRankedSection(s, body, "Local", localIdx)
+	addRankedSection(s, body, "Remote", remoteIdx)
 
-			editBtn := btnBox.Objects[1].(*widget.Button)
-			editBtn.OnTapped = func() { showEditLocation(s, id) }
-
-			exportBtn := btnBox.Objects[2].(*widget.Button)
-			exportBtn.Hidden = loc.Kind != syncengine.LocationRemote
-			exportBtn.OnTapped = func() { exportLocation(s, loc) }
-
-			removeBtn := btnBox.Objects[3].(*widget.Button)
-			removeBtn.OnTapped = func() { removeLocation(s, id, loc) }
-		},
-	)
+	scroll := container.NewVScroll(body)
 
 	addBtn := widget.NewButton("+ Add Location", func() { showAddLocation(s) })
 	importBtn := widget.NewButton("Import Location...", func() { importLocation(s) })
@@ -63,7 +295,7 @@ func showLocations(s *state) {
 		container.NewVBox(widget.NewLabelWithStyle("Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), container.NewHBox(addBtn, importBtn), widget.NewSeparator()),
 		backBtn,
 		nil, nil,
-		list,
+		scroll,
 	)
 	s.setContent(container.NewPadded(content))
 }

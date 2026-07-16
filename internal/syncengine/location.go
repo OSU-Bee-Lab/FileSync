@@ -63,6 +63,15 @@ type Location struct {
 	// "Bee Lab Docs". It points directly at the experiments/ root — the
 	// folder whose immediate children are experiment directories.
 	RootPath string `json:"rootPath"`
+
+	// Priority ranks this location among other local locations as an N-way
+	// sync source: 1 beats 2 beats 3, etc. It's only meaningful for
+	// LocationLocal (see PreferLocalSource, which already always prefers any
+	// local over any remote — Priority is the tie-break among locals, so the
+	// fastest drive can be ranked ahead of a slower one). It's kept in sync
+	// with slice order in appconfig.Config.Locations, which is what
+	// BuildNWayTransferPlan actually iterates for its tie-break.
+	Priority int `json:"priority,omitempty"`
 }
 
 // rcloneSpec returns the fs.NewFs-ready path string for this location, e.g.
