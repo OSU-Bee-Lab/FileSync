@@ -284,7 +284,12 @@ func (e *expUIState) applySyncSnapshot(snap syncengine.ProgressSnapshot) {
 	completedBytesSum := int64(0)
 	for _, file := range e.fileMap {
 		if p, ok := snap.Files[file.relPath]; ok {
-			file.done = p.Done
+			// Completion is sticky (|| p.Done): rclone can report a file as
+			// live-transferring one tick and pruned the next, but this app
+			// only ever copies — a file never un-finishes within a job.
+			// rclone reports a completed transfer with Bytes == Size, so
+			// p.BytesDone already carries the full size here.
+			file.done = file.done || p.Done
 			file.bytesDone = p.BytesDone
 			file.err = p.Err
 			file.hasError = p.Err != nil
@@ -292,8 +297,16 @@ func (e *expUIState) applySyncSnapshot(snap syncengine.ProgressSnapshot) {
 			file.done = true
 			file.bytesDone = file.size
 		} else {
-			if file.relPath != snap.CurrentFile {
-				file.done = false
+			// Not in this snapshot. rclone's accounting keeps only its most
+			// recent ~100 completed transfers (MaxCompletedTransfers) in the
+			// list snap.Files is built from, so on a big folder a
+			// genuinely-copied file silently drops out mid-sync. Never
+			// regress it to zero — that's what made fully-synced folders
+			// de-sync and the Bytes counter fall. Only files that truly
+			// haven't started yet stay at zero.
+			if file.done {
+				file.bytesDone = file.size
+			} else if file.relPath != snap.CurrentFile {
 				file.bytesDone = 0
 			}
 		}
