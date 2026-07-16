@@ -262,8 +262,14 @@ func (t *scanTracker) emit(currentDir, currentPath string, force bool) {
 		SkipCount:     t.result.SkipCount,
 		ConflictCount: t.result.ConflictCount,
 		TotalBytes:    t.result.TotalBytes,
-		Recent:        append([]ScanEntry(nil), t.recent...),
-		Dirs:          t.snapshotDirs(),
+		// Cap the returned slice's capacity at its current length rather
+		// than deep-copying: addEntry only ever appends to t.recent (never
+		// mutates existing entries in place), so sharing the backing array
+		// is safe — a later append(t.recent, ...) is forced to allocate a
+		// new backing array since cap == len here, so it can never
+		// overwrite what's already been handed to the UI.
+		Recent: t.recent[:len(t.recent):len(t.recent)],
+		Dirs:   t.snapshotDirs(),
 	})
 }
 
@@ -280,9 +286,10 @@ func (t *scanTracker) finish() ScanResult {
 			SkipCount:     t.result.SkipCount,
 			ConflictCount: t.result.ConflictCount,
 			TotalBytes:    t.result.TotalBytes,
-			Recent:        append([]ScanEntry(nil), t.recent...),
-			Dirs:          t.snapshotDirs(),
-			Done:          true,
+			// See emit's identical Recent line for why this is safe.
+			Recent: t.recent[:len(t.recent):len(t.recent)],
+			Dirs:   t.snapshotDirs(),
+			Done:   true,
 		})
 	}
 	return t.result
