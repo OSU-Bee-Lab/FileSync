@@ -173,12 +173,43 @@ func StartOffload(
 		// mid-run: the bar could reach 100% on file 1 alone, then drop back
 		// down the instant file 2's entry inflated the denominator.
 		files := make(map[string]FileOffloadProgress, len(sourceFiles))
+
+		// aggDone/aggBytesDone/aggBytesTotal are running totals mirroring
+		// `files`, maintained incrementally by setFile below rather than
+		// resummed across the whole map on every emit. An offload can run
+		// for hours with a 300ms progress ticker per in-flight file, so a
+		// per-emit O(len(files)) resum adds up; setFile keeps each emit O(1)
+		// by only adjusting for the one entry that actually changed.
+		var aggDone int
+		var aggBytesDone, aggBytesTotal int64
+
+		// setFile is the sole way `files` should be mutated below: it
+		// updates the map and adjusts the running aggregates by removing the
+		// previous entry's contribution (if any) and adding the new one's,
+		// so aggDone/aggBytesDone/aggBytesTotal always match the map's
+		// contents without ever rescanning it.
+		setFile := func(key string, fp FileOffloadProgress) {
+			if old, ok := files[key]; ok {
+				if old.State == StateComplete {
+					aggDone--
+				}
+				aggBytesDone -= old.BytesDone
+				aggBytesTotal -= old.BytesTotal
+			}
+			files[key] = fp
+			if fp.State == StateComplete {
+				aggDone++
+			}
+			aggBytesDone += fp.BytesDone
+			aggBytesTotal += fp.BytesTotal
+		}
+
 		for _, sf := range sourceFiles {
 			var size int64
 			if info, err := os.Stat(sf.AbsPath); err == nil {
 				size = info.Size()
 			}
-			files[sf.DestRelPath] = FileOffloadProgress{BytesTotal: size}
+			setFile(sf.DestRelPath, FileOffloadProgress{BytesTotal: size})
 		}
 
 		// uploadSem bounds how many cloud uploads run at once across this
@@ -189,26 +220,27 @@ func StartOffload(
 		// rclone copy batch would be bounded.
 		uploadSem := make(chan struct{}, maxConcurrentUploads)
 
-		emit := func(status OffloadStatus, phase, current string, err error) {
-			done := 0
-			var bytesDone, bytesTotal int64
-			for _, fp := range files {
-				if fp.State == StateComplete {
-					done++
-				}
-				bytesDone += fp.BytesDone
-				bytesTotal += fp.BytesTotal
-			}
+		// emit publishes a progress snapshot. includeFiles controls whether
+		// the (cloned) per-file map is attached. Every call site below is a
+		// one-per-file transition (checking/complete/conflict/error/
+		// deleting/done) except the in-copy ticker further down, which fires
+		// every 300ms for however long the current file takes to copy — by
+		// far the highest-frequency emit — so that one site skips the
+		// clone, since CurrentFile/BytesDone/BytesTotal already carry
+		// everything a live progress bar needs.
+		emit := func(status OffloadStatus, phase, current string, err error, includeFiles bool) {
 			snapshot := OffloadProgress{
-				FilesDone:   done,
+				FilesDone:   aggDone,
 				FilesTotal:  len(sourceFiles),
-				BytesDone:   bytesDone,
-				BytesTotal:  bytesTotal,
+				BytesDone:   aggBytesDone,
+				BytesTotal:  aggBytesTotal,
 				CurrentFile: current,
 				Phase:       phase,
 				Status:      status,
 				Err:         err,
-				Files:       cloneFileProgress(files),
+			}
+			if includeFiles {
+				snapshot.Files = cloneFileProgress(files)
 			}
 			select {
 			case progressCh <- snapshot:
@@ -241,17 +273,17 @@ func StartOffload(
 
 		for _, sf := range sourceFiles {
 			if ctx.Err() != nil {
-				emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
+				emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err(), true)
 				return
 			}
 
 			if err := verifyIdentity(); err != nil {
-				files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-				emit(OffloadError, "", sf.DestRelPath, err)
+				setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
+				emit(OffloadError, "", sf.DestRelPath, err, true)
 				return
 			}
 
-			emit(OffloadRunning, "checking", sf.DestRelPath, nil)
+			emit(OffloadRunning, "checking", sf.DestRelPath, nil, true)
 
 			destPaths := make([]string, len(destDirs))
 			for i, dir := range destDirs {
@@ -259,16 +291,16 @@ func StartOffload(
 			}
 			for _, dp := range destPaths {
 				if err := os.MkdirAll(filepath.Dir(dp), 0o755); err != nil {
-					files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-					emit(OffloadError, "", sf.DestRelPath, err)
+					setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
+					emit(OffloadError, "", sf.DestRelPath, err, true)
 					return
 				}
 			}
 
 			states, err := fileStates(sf.AbsPath, destPaths)
 			if err != nil {
-				files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-				emit(OffloadError, "", sf.DestRelPath, err)
+				setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
+				emit(OffloadError, "", sf.DestRelPath, err, true)
 				return
 			}
 
@@ -286,13 +318,13 @@ func StartOffload(
 			}
 			if conflict {
 				err := fmt.Errorf("%s already exists at destination with different content", sf.DestRelPath)
-				files[sf.DestRelPath] = FileOffloadProgress{Err: err, State: StateConflict}
-				emit(OffloadConflict, "", sf.DestRelPath, err)
+				setFile(sf.DestRelPath, FileOffloadProgress{Err: err, State: StateConflict})
+				emit(OffloadConflict, "", sf.DestRelPath, err, true)
 				return
 			}
 			if len(pending) == 0 {
 				sz := files[sf.DestRelPath].BytesTotal
-				files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: sz, BytesTotal: sz}
+				setFile(sf.DestRelPath, FileOffloadProgress{State: StateComplete, BytesDone: sz, BytesTotal: sz})
 				continue
 			}
 
@@ -307,24 +339,24 @@ func StartOffload(
 				case err := <-copyDone:
 					ticker.Stop()
 					if err != nil {
-						files[sf.DestRelPath] = FileOffloadProgress{Err: err}
-						emit(OffloadError, "", sf.DestRelPath, err)
+						setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
+						emit(OffloadError, "", sf.DestRelPath, err, true)
 						return
 					}
 					break copyLoop
 				case <-ticker.C:
-					files[sf.DestRelPath] = FileOffloadProgress{BytesDone: cp.ByteCurrent.Load(), BytesTotal: cp.BytesTotal.Load()}
-					emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
+					setFile(sf.DestRelPath, FileOffloadProgress{BytesDone: cp.ByteCurrent.Load(), BytesTotal: cp.BytesTotal.Load()})
+					emit(OffloadRunning, "syncing", sf.DestRelPath, nil, false)
 				case <-ctx.Done():
 					ticker.Stop()
-					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
+					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err(), true)
 					return
 				}
 			}
 
 			total := cp.BytesTotal.Load()
-			files[sf.DestRelPath] = FileOffloadProgress{State: StateComplete, BytesDone: total, BytesTotal: total}
-			emit(OffloadRunning, "syncing", sf.DestRelPath, nil)
+			setFile(sf.DestRelPath, FileOffloadProgress{State: StateComplete, BytesDone: total, BytesTotal: total})
+			emit(OffloadRunning, "syncing", sf.DestRelPath, nil, true)
 
 			if batchUpload {
 				continue
@@ -365,28 +397,39 @@ func StartOffload(
 		}
 
 		if autoDelete && allComplete {
-			// Re-verify identity once more right before deleting anything:
-			// this is the one place StartOffload deletes source data (see
-			// package doc), so it must never run against a device that
-			// swapped in after the last file's copy completed.
-			if err := verifyIdentity(); err != nil {
-				emit(OffloadError, "", "", err)
-				return
-			}
 			for _, sf := range sourceFiles {
 				if ctx.Err() != nil {
-					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err())
+					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err(), true)
 					return
 				}
-				emit(OffloadRunning, "deleting", sf.DestRelPath, nil)
+
+				// Re-verify identity before every single deletion, not just
+				// once before this loop starts: this is the one place
+				// StartOffload deletes source data (see package doc), and a
+				// recorder can be unplugged and a *different* device
+				// attached at the same mount point in the time it takes to
+				// delete a batch of files (see verifyIdentity's doc above).
+				// RecorderID is documented as cheap, so there's no reason to
+				// trust a check taken before the loop for files deleted
+				// later in it. On any verification failure — including the
+				// device simply being gone — stop immediately without
+				// deleting this or any further file; a failed re-check means
+				// the trusted device may no longer be there, so no further
+				// deletion is safe.
+				if err := verifyIdentity(); err != nil {
+					emit(OffloadError, "", sf.DestRelPath, err, true)
+					return
+				}
+
+				emit(OffloadRunning, "deleting", sf.DestRelPath, nil, true)
 				if err := os.Remove(sf.AbsPath); err != nil {
-					emit(OffloadError, "", sf.DestRelPath, err)
+					emit(OffloadError, "", sf.DestRelPath, err, true)
 					return
 				}
 			}
 		}
 
-		emit(OffloadDone, "", "", nil)
+		emit(OffloadDone, "", "", nil, true)
 	}()
 
 	return job, progressCh
