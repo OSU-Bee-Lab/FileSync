@@ -229,6 +229,7 @@ func showHome(s *state) {
 	syncExperimentsBtn := widget.NewButton("Sync Experiments", func() { showSyncExperiments(s) })
 	syncExperimentsBtn.Importance = widget.HighImportance
 	pullFilesBtn := widget.NewButton("Pull Files", func() { showPullFiles(s) })
+	manageFilesBtn := widget.NewButton("Manage Files", func() { showManageFiles(s) })
 	syncRecordersBtn := widget.NewButton("Sync Recorders", func() { showSyncRecorders(s) })
 	syncRecordersBtn.Importance = widget.HighImportance
 	locationsBtn := widget.NewButton("Manage Locations", func() { showLocations(s) })
@@ -239,6 +240,7 @@ func showHome(s *state) {
 	}
 	if len(s.cfg.Locations) < 1 {
 		pullFilesBtn.Disable()
+		manageFilesBtn.Disable()
 	}
 
 	body := container.NewVBox(
@@ -249,6 +251,7 @@ func showHome(s *state) {
 	)
 	if devMode() {
 		body.Add(pullFilesBtn)
+		body.Add(manageFilesBtn)
 	}
 	body.Add(locationsBtn)
 	body.Add(settingsBtn)

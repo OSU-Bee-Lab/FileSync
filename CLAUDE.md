@@ -64,3 +64,17 @@ option to scan experiments).
   reachable as a default, automatically, or without that confirmation. All
   other N-way propagation stays copy-only: it never deletes a file from a
   location just because another location lacks it.
+- The never-delete rule above scopes to the automated sync/copy pathway
+  between Locations (`rclone copy`, N-way propagation) — it is not a
+  blanket ban on deletion anywhere in the app. **Manage Files**
+  (`internal/ui/screen_manage_files.go`, `internal/syncengine/manage.go`)
+  is a second, deliberate, narrowly-scoped exception, by explicit,
+  informed decision of the project owner: a dev-flag-gated tool (same gate
+  as Pull Files) where the user directly renames, moves/merges, or deletes
+  files/dirs within experiment data, including permanent deletion. It is
+  user-driven, not automatic — reachable only from the dev-gated menu, only
+  after the user browses to or types the exact path, previews the final
+  state, resolves any collisions, and (for delete) types the exact relative
+  path plus confirms an irreversible-action prompt. Like N-way conflict
+  deletion, it must never trigger automatically or as a side effect of a
+  scan/sync operation.
