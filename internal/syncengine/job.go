@@ -51,7 +51,16 @@ type ProgressSnapshot struct {
 	Status                JobStatus
 	Err                   error
 	Speed                 float64
-	Files                 map[string]FileProgress
+
+	// Files is a lossy, windowed view of per-file progress: it's built from
+	// rclone's stats.Transferred() (only the last ~100 completed transfers
+	// are retained) plus stats.RemoteStats' "transferring" list, which
+	// collapses up to ci.Transfers concurrent in-flight files down to a
+	// single CurrentFile name. Consumers must treat a file's completion as
+	// sticky once seen and must not assume Files reflects every file in the
+	// job - older completions can fall out of the window, and concurrent
+	// in-flight files beyond the first aren't individually named here.
+	Files map[string]FileProgress
 
 	// Retrying is true while the job is paused between attempts after a
 	// transient error (see copyDirWithRetry). The job is still JobRunning
@@ -248,8 +257,16 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 			for _, t := range stats.Transferred() {
 				filesMap[t.Name] = FileProgress{
 					BytesDone: t.Bytes,
-					Done:      !t.CompletedAt.IsZero() || t.Error != nil || t.Bytes == t.Size,
-					Err:       t.Error,
+					// An errored transfer must never report Done=true - a
+					// caller tallying filesDone would otherwise count a
+					// failed file as if it succeeded. The error is still
+					// carried via Err below (see hasError downstream).
+					// Note t.Error==nil must gate the whole expression: rclone
+					// sets CompletedAt unconditionally in Transfer.Done (even
+					// on failure), so "!t.CompletedAt.IsZero()" alone is true
+					// for errored transfers too.
+					Done: t.Error == nil && (!t.CompletedAt.IsZero() || t.Bytes == t.Size),
+					Err:  t.Error,
 				}
 			}
 
@@ -281,8 +298,20 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 			snapRetrying, snapAttempt, snapMax, snapRetryErr := retrying, retryAttempt, retryMax, retryErr
 			retryMu.Unlock()
 
+			// copyDirWithRetry re-runs sync.CopyDir on the same stats group
+			// after a transient error, so a file that partially transferred
+			// before the drop gets fully re-sent on retry; stats.GetBytes()
+			// is cumulative and never subtracts the abandoned partial, so it
+			// can climb past expected.TotalBytes. Clamp only the reported
+			// value here - currentSpeed above legitimately uses the raw,
+			// unclamped currentBytes deltas.
+			reportedBytesDone := currentBytes
+			if reportedBytesDone > expected.TotalBytes {
+				reportedBytesDone = expected.TotalBytes
+			}
+
 			progress <- ProgressSnapshot{
-				BytesDone:    currentBytes,
+				BytesDone:    reportedBytesDone,
 				BytesTotal:   expected.TotalBytes,
 				FilesDone:    int(stats.GetTransfers()),
 				FilesTotal:   expected.CopyCount,
