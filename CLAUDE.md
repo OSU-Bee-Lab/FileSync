@@ -34,9 +34,9 @@ option to scan experiments).
   `boundedWidthLayout` (caps min width to windowSize). So: always swap content
   via `setContent`, never `win.SetContent`. Set `Truncation` on labels holding
   long paths for looks, but the window itself can no longer be stretched.
-- Do not commit changes until the user has tested and verified them working.
-- Commits may be made at-will on the `development` branch once verified. Never
-  commit or push to `main` without explicit user confirmation first.
+- Commits may be made freely and at-will on the `development` branch — no need
+  to wait for the user to test and verify changes first. Never commit or push
+  to `main` without explicit user confirmation first.
 - This is a native macOS GUI app (Fyne) with no screenshot/automation
   harness. Never attempt to "visually verify" UI changes yourself (launching
   the app to screenshot it, click through it, etc.) — you have no way to see
@@ -76,12 +76,11 @@ option to scan experiments).
   blanket ban on deletion anywhere in the app. **Manage Files**
   (`internal/ui/screen_manage_files.go`, `internal/syncengine/manage.go`)
   is a second, deliberate, narrowly-scoped exception, by explicit,
-  informed decision of the project owner: a dev-flag-gated tool (same gate
-  as Pull Files) where the user directly renames, moves/merges, or deletes
-  files/dirs within experiment data, including permanent deletion. It is
-  user-driven, not automatic — reachable only from the dev-gated menu, only
-  after the user browses to or types the exact path, previews the final
-  state, resolves any collisions, and (for delete) types the exact relative
-  path plus confirms an irreversible-action prompt. Like N-way conflict
-  deletion, it must never trigger automatically or as a side effect of a
-  scan/sync operation.
+  informed decision of the project owner: a tool where the user directly
+  renames, moves/merges, or deletes files/dirs within experiment data,
+  including permanent deletion. It is user-driven, not automatic —
+  reachable only from the main menu, only after the user browses to or
+  types the exact path, previews the final state, resolves any collisions,
+  and (for delete) types the exact relative path plus confirms an
+  irreversible-action prompt. Like N-way conflict deletion, it must never
+  trigger automatically or as a side effect of a scan/sync operation.

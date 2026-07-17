@@ -265,7 +265,7 @@ func addRankedSection(s *state, body *fyne.Container, title string, idx []int) {
 	}
 }
 
-// showLocations renders Manage Locations, split into a Local section and a
+// showLocations renders Edit Sync Locations, split into a Local section and a
 // Remote section, each independently ranked (priority dropdown + drag
 // handle). Locals always win as an N-way sync source over remotes
 // regardless of rank; ranking only breaks ties within a group.
