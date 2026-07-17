@@ -82,6 +82,12 @@ type recorderSyncScreen struct {
 	// "Batch Upload" - an escape hatch so committing to Batch Upload isn't
 	// the only way off the idle screen. See refreshCancelBtn.
 	exitBtn *widget.Button
+
+	// timestampsHandled guards checkTimestampsThen from showing the review
+	// screen more than once per session - confirmEndSync/confirmBatchUpload
+	// can each call it, and either can be retried (e.g. backing out of the
+	// End Sync confirm dialog and pressing it again).
+	timestampsHandled bool
 }
 
 // showRecorderSync builds and shows Screen 2 for params, then launches its
@@ -112,12 +118,17 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	go sc.runBlinkTicker()
 	go sc.inactivity.run(sc.watchCtx, s, &sc.recordersIdle, func() {
-		showInactivitySyncPrompt(s, sc.inactivity.signalActivity, sc.endSync)
+		showInactivitySyncPrompt(s, sc.inactivity.signalActivity, sc.confirmEndSync)
 	})
 	go sc.watchVolumes()
 
 	sc.cancelBtn = widget.NewButton("End Sync", sc.confirmEndSync)
-	sc.exitBtn = widget.NewButton("Exit Sync", sc.confirmEndSync)
+	// Exit Sync deliberately calls doConfirmEndSync directly, not
+	// confirmEndSync - it's the escape hatch off the idle screen without
+	// committing to Batch Upload, so it should just end the session, not
+	// also run the timestamp check (that's what Check Times/Batch Upload
+	// are for).
+	sc.exitBtn = widget.NewButton("Exit Sync", sc.doConfirmEndSync)
 	sc.exitBtn.Importance = widget.DangerImportance
 	sc.exitBtn.Hide()
 	sc.refreshCancelBtn()
@@ -315,29 +326,59 @@ func (sc *recorderSyncScreen) hasActiveTransfer() bool {
 	return sc.syncingCount() > 0 || len(sc.uploads.uploading) > 0
 }
 
-// refreshCancelBtn keeps the bottom-of-screen button's label and action
-// current: "Cancel Sync" while something's actively transferring, "Batch
-// Upload" once idle in batch mode (moves to the next step rather than
-// ending), or "End Sync" once idle otherwise.
+// refreshCancelBtn keeps the bottom-of-screen button's label, action, and
+// enablement current. As long as a bad-timestamp check is still pending
+// (detection is on and checkTimestampsThen hasn't shown its review yet, see
+// timestampsHandled), the button always reads "Check Times" - even while a
+// recorder is still syncing or a background upload is still draining - and
+// is simply disabled for the duration of any such transfer (see
+// hasActiveTransfer), rather than being replaced by "Cancel Sync": tapping
+// it may land on the review screen rather than actually
+// batch-uploading/ending, so it shouldn't be actionable, but it also
+// shouldn't disappear and reappear as transfers start and stop. Once
+// nothing is pending, this falls back to the original three states:
+// "Cancel Sync" while something's actively transferring, "Batch Upload"
+// once idle in batch mode (moves to the next step rather than ending), or
+// "End Sync" once idle otherwise.
 func (sc *recorderSyncScreen) refreshCancelBtn() {
 	if sc.cancelBtn == nil {
 		return
 	}
+	pendingTimestampCheck := sc.params.detectBadTimestamps && !sc.timestampsHandled
 	switch {
+	case pendingTimestampCheck:
+		sc.cancelBtn.SetText("Check Times")
+		if sc.params.batchUpload && len(sc.params.uploads) > 0 {
+			sc.cancelBtn.OnTapped = sc.confirmBatchUpload
+			sc.cancelBtn.Importance = widget.HighImportance
+			sc.exitBtn.Show()
+		} else {
+			sc.cancelBtn.OnTapped = sc.confirmEndSync
+			sc.cancelBtn.Importance = widget.MediumImportance
+			sc.exitBtn.Hide()
+		}
+		if sc.hasActiveTransfer() {
+			sc.cancelBtn.Disable()
+		} else {
+			sc.cancelBtn.Enable()
+		}
 	case sc.hasActiveTransfer():
 		sc.cancelBtn.SetText("Cancel Sync")
 		sc.cancelBtn.OnTapped = sc.confirmEndSync
-		sc.cancelBtn.Importance = widget.MediumImportance
+		sc.cancelBtn.Importance = widget.DangerImportance
+		sc.cancelBtn.Enable()
 		sc.exitBtn.Hide()
 	case sc.params.batchUpload && len(sc.params.uploads) > 0:
 		sc.cancelBtn.SetText("Batch Upload")
 		sc.cancelBtn.OnTapped = sc.confirmBatchUpload
 		sc.cancelBtn.Importance = widget.HighImportance
+		sc.cancelBtn.Enable()
 		sc.exitBtn.Show()
 	default:
 		sc.cancelBtn.SetText("End Sync")
 		sc.cancelBtn.OnTapped = sc.confirmEndSync
 		sc.cancelBtn.Importance = widget.MediumImportance
+		sc.cancelBtn.Enable()
 		sc.exitBtn.Hide()
 	}
 	sc.cancelBtn.Refresh()
@@ -407,6 +448,14 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 	row.started = true
 	row.status = jobSyncing
 	row.statusMsg = ""
+	// Captured now, while the volume is still attached, so bad-timestamp
+	// detection can run later purely from these (see the OffloadDone case
+	// below) without needing the recorder itself, which may already be
+	// disconnected or wiped by the time every file has landed.
+	if sc.params.detectBadTimestamps {
+		row.sourceFiles, _ = row.driver.SourceFiles(row.volume)
+		row.destDirs = recorder.DestDirs(sc.destRoots, sc.params.subpath, sc.params.experimentName, row.id)
+	}
 	job, progress := recorder.StartOffload(sc.watchCtx, row.driver, row.volume, row.id, sc.destRoots, sc.params.subpath,
 		sc.params.experimentName, sc.params.uploads, sc.params.autoDelete, sc.params.batchUpload, sc.uploads.onUploadEvent)
 	row.job = job
@@ -461,6 +510,101 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 			})
 		}
 	}()
+}
+
+// checkTimestampsThen runs the bad-timestamp check computing a session-wide
+// consensus date (see recorder.ConsensusDate) and, for each recorder,
+// checking its earliest file against that consensus and every OTHER
+// recorder's earliest file (see recorder.CheckRecorderTimestamp's doc for
+// why cross-recorder, rather than a recorder's own other files, is the only
+// valid ground truth) - then either shows the timestamp review screen (whose
+// own Continue action calls next) or, if there's nothing to review, calls
+// next immediately.
+//
+// This runs at the point the user actually commits to leaving Screen 2 -
+// End Sync, Exit Sync, or Batch Upload - rather than as soon as every
+// recorder goes idle: reviewing corrections is only useful once the user is
+// done attaching recorders, and running it earlier would repeatedly
+// interrupt a session where more recorders are still expected. For Batch
+// Upload specifically, this also means the correction lands before any
+// remote upload starts, so a corrected filename - not the original bad one -
+// is what ever reaches the cloud. Guarded by timestampsHandled so it only
+// ever shows the review once per session, even if called again (e.g. the
+// user backs out of a confirm dialog and retries).
+func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
+	if sc.timestampsHandled || !sc.params.detectBadTimestamps {
+		next()
+		return
+	}
+
+	type parsedRow struct {
+		row    *recorderRow
+		parser recorder.TimestampParser
+		start  time.Time
+	}
+	var eligible []parsedRow
+	for _, r := range sc.rows {
+		if r.status != jobDone || len(r.sourceFiles) == 0 {
+			continue
+		}
+		parser, ok := r.driver.(recorder.TimestampParser)
+		if !ok {
+			continue
+		}
+		var start time.Time
+		found := false
+		for _, f := range r.sourceFiles {
+			if t, ok := parser.ParseTimestamp(f.DestRelPath); ok && (!found || t.Before(start)) {
+				start = t
+				found = true
+			}
+		}
+		if !found {
+			continue
+		}
+		eligible = append(eligible, parsedRow{r, parser, start})
+	}
+	if len(eligible) == 0 {
+		// Nothing this driver set supports checking - proceed as if
+		// detection were off.
+		next()
+		return
+	}
+	sc.timestampsHandled = true
+
+	allStarts := make([]time.Time, len(eligible))
+	for i, e := range eligible {
+		allStarts[i] = e.start
+	}
+	consensusYear, consensusMonth, consensusDay := recorder.ConsensusDate(allStarts)
+
+	reviewRows := make([]timestampReviewRow, 0, len(eligible))
+	for i, e := range eligible {
+		others := make([]time.Time, 0, len(eligible)-1)
+		for j, o := range eligible {
+			if j != i {
+				others = append(others, o.start)
+			}
+		}
+		check := recorder.CheckRecorderTimestamp(e.row.sourceFiles, e.parser, consensusYear, consensusMonth, consensusDay, others, sc.params.timestampTolerance)
+		if check == nil {
+			continue
+		}
+		reviewRows = append(reviewRows, timestampReviewRow{
+			recorderID:  e.row.id,
+			parser:      e.parser,
+			sourceFiles: e.row.sourceFiles,
+			destDirs:    e.row.destDirs,
+			check:       *check,
+		})
+	}
+	if len(reviewRows) == 0 {
+		sc.timestampsHandled = false
+		next()
+		return
+	}
+
+	showTimestampReview(sc, reviewRows, next)
 }
 
 // onVolumeAttached handles a newly attached volume: detects its driver and
@@ -548,7 +692,7 @@ func (sc *recorderSyncScreen) onVolumeDetached(vol recorder.Volume) {
 
 func (sc *recorderSyncScreen) endSync() {
 	sc.cancelWatch()
-	showHome(sc.s)
+	showSyncExperiments(sc.s)
 }
 
 // syncingCount returns how many rows are actively mid-transfer.
@@ -609,13 +753,28 @@ func (sc *recorderSyncScreen) refreshEndSyncDialog() {
 	}
 }
 
-// confirmEndSync warns before ending the session if anything is actively
+// confirmEndSync is the End Sync/Exit Sync button handler. If anything is
+// actively transferring it defers straight to doConfirmEndSync (see
+// hasActiveTransfer) - interrupting a transfer is the more urgent thing to
+// confirm, and there's nothing yet for the timestamp check to review, since
+// checkTimestampsThen only considers rows that have already finished (see
+// updateRecordersIdle). Otherwise it runs the timestamp check first, so a
+// pending correction is reviewed before the session actually ends.
+func (sc *recorderSyncScreen) confirmEndSync() {
+	if sc.hasActiveTransfer() {
+		sc.doConfirmEndSync()
+		return
+	}
+	sc.checkTimestampsThen(sc.doConfirmEndSync)
+}
+
+// doConfirmEndSync warns before ending the session if anything is actively
 // transferring (see hasActiveTransfer), since ending the session cancels
 // that job in progress rather than merely closing the screen. Other states
 // (idle, done, error, disconnected) end silently, as before. While the
 // dialog is open, its message updates live (see refreshEndSyncDialog) as
 // syncing recorders finish and uploads drain.
-func (sc *recorderSyncScreen) confirmEndSync() {
+func (sc *recorderSyncScreen) doConfirmEndSync() {
 	if !sc.hasActiveTransfer() {
 		sc.endSync()
 		return
@@ -631,7 +790,15 @@ func (sc *recorderSyncScreen) confirmEndSync() {
 		}, sc.s.win)
 }
 
-// confirmBatchUpload runs a Quick Scan-equivalent existence check between
+// confirmBatchUpload is the Batch Upload button handler: it runs the
+// timestamp check first (see checkTimestampsThen), so any correction lands
+// before doConfirmBatchUpload starts the actual upload - the corrected
+// filename, not the original bad one, is what reaches the remote.
+func (sc *recorderSyncScreen) confirmBatchUpload() {
+	sc.checkTimestampsThen(sc.doConfirmBatchUpload)
+}
+
+// doConfirmBatchUpload runs a Quick Scan-equivalent existence check between
 // the local destinations (already fully synced from every recorder that
 // passed through this session, via recorder.StartOffload) and the
 // configured remote uploads, then uploads whatever's missing. This is the
@@ -640,7 +807,7 @@ func (sc *recorderSyncScreen) confirmEndSync() {
 // restricted to one experiment and labeled "Batch Upload" throughout.
 // Reached only once params.batchUpload is set and every row is idle (see
 // refreshCancelBtn), so there is nothing to warn about interrupting.
-func (sc *recorderSyncScreen) confirmBatchUpload() {
+func (sc *recorderSyncScreen) doConfirmBatchUpload() {
 	locs := append(append([]syncengine.Location{}, sc.params.destinations...), sc.params.uploads...)
 	runBatchUploadScan(sc.s, sc.endSync, locs, sc.params.experimentName, sc.batchUploadPaths)
 }

@@ -3,7 +3,9 @@ package ui
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -117,6 +119,11 @@ type recorderSyncParams struct {
 	// until the user presses Batch Upload on Screen 2 instead of uploading
 	// each file as soon as it's verified complete locally.
 	batchUpload bool
+	// detectBadTimestamps and timestampTolerance gate/configure per-recorder
+	// bad-first-timestamp detection - see recorder.DetectBadFirstTimestamp.
+	// Dev-only for now (see devMode).
+	detectBadTimestamps bool
+	timestampTolerance  time.Duration
 }
 
 // showSyncRecorders is the entry point for the Sync Recorders feature: the
@@ -169,6 +176,26 @@ func showSyncRecorders(s *state) {
 	// wrap against, breaking it into one character per line).
 	batchUploadHint := widget.NewLabel("(faster when syncing many files - uploads everything at once instead of as each file lands.)")
 	batchUploadHint.Wrapping = fyne.TextWrapWord
+
+	// Bad-timestamp detection is dev-only for now (see devMode) - it's still
+	// being stabilized, so it stays hidden from release builds until then.
+	detectTimestampsCheck := widget.NewCheck("Detect bad recorder timestamps (dev)", nil)
+	detectTimestampsCheck.SetChecked(s.cfg.RecorderSettings.DetectBadTimestamps)
+	detectTimestampsHint := widget.NewLabel("(flags a recorder's first file if its timestamp looks wrong - bad AM/PM, year, month, or day - once every file from that recorder has landed locally.)")
+	detectTimestampsHint.Wrapping = fyne.TextWrapWord
+
+	toleranceMinutes := s.cfg.RecorderSettings.TimestampToleranceMinutes
+	if toleranceMinutes <= 0 {
+		toleranceMinutes = 60
+	}
+	toleranceEntry := widget.NewEntry()
+	toleranceEntry.SetText(strconv.Itoa(toleranceMinutes))
+	toleranceRow := container.NewBorder(nil, nil, widget.NewLabel("Hour tolerance (minutes)"), nil, toleranceEntry)
+
+	detectTimestampsBox := container.NewVBox(detectTimestampsCheck, detectTimestampsHint, toleranceRow)
+	if !devMode() {
+		detectTimestampsBox.Hide()
+	}
 
 	startBtn := widget.NewButton("Sync Here", nil)
 	startBtn.Importance = widget.HighImportance
@@ -248,7 +275,7 @@ func showSyncRecorders(s *state) {
 		checkMissingDestinations(func() {
 			destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
 			uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected(), syncengine.LocationRemote)
-			startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, destinations, uploads)
+			startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, detectTimestampsCheck, toleranceEntry, destinations, uploads)
 		})
 	}
 
@@ -261,6 +288,7 @@ func showSyncRecorders(s *state) {
 			&widget.FormItem{Text: "Remote", Widget: uploadGroup.CanvasObject()},
 			&widget.FormItem{Text: "", Widget: container.NewVBox(batchUploadCheck, batchUploadHint)},
 			&widget.FormItem{Text: "", Widget: autoDeleteCheck},
+			&widget.FormItem{Text: "", Widget: detectTimestampsBox},
 		),
 	)
 	destCol := container.NewBorder(
@@ -285,7 +313,7 @@ func showSyncRecorders(s *state) {
 // to the active-sync screen with destinations/uploads already resolved.
 // relPath is the folder chosen in the destination browser; its first
 // segment is the experiment name and everything after it is the subpath.
-func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadCheck *widget.Check, destinations, uploads []syncengine.Location) {
+func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadCheck, detectTimestampsCheck *widget.Check, toleranceEntry *widget.Entry, destinations, uploads []syncengine.Location) {
 	segments := splitSubpathUI(relPath)
 	expName := ""
 	var subpathParts []string
@@ -295,18 +323,27 @@ func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadChe
 	}
 	subpath := strings.Join(subpathParts, "/")
 
+	tolerance := s.cfg.RecorderSettings.TimestampToleranceMinutes
+	if n, err := strconv.Atoi(strings.TrimSpace(toleranceEntry.Text)); err == nil && n > 0 {
+		tolerance = n
+	}
+
 	s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)
 	s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(uploads)
 	s.cfg.RecorderSettings.AutoDeleteAfterVerify = autoDeleteCheck.Checked
 	s.cfg.RecorderSettings.BatchUpload = batchUploadCheck.Checked
+	s.cfg.RecorderSettings.DetectBadTimestamps = detectTimestampsCheck.Checked
+	s.cfg.RecorderSettings.TimestampToleranceMinutes = tolerance
 	s.saveConfig()
 
 	showRecorderSync(s, recorderSyncParams{
-		destinations:   destinations,
-		uploads:        uploads,
-		subpath:        subpath,
-		experimentName: expName,
-		autoDelete:     autoDeleteCheck.Checked,
-		batchUpload:    batchUploadCheck.Checked && len(uploads) > 0,
+		destinations:        destinations,
+		uploads:             uploads,
+		subpath:             subpath,
+		experimentName:      expName,
+		autoDelete:          autoDeleteCheck.Checked,
+		batchUpload:         batchUploadCheck.Checked && len(uploads) > 0,
+		detectBadTimestamps: devMode() && detectTimestampsCheck.Checked,
+		timestampTolerance:  time.Duration(tolerance) * time.Minute,
 	})
 }

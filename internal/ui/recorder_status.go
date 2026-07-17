@@ -41,6 +41,13 @@ type recorderRow struct {
 	progress  float64
 	started   bool // a job was ever started for this row
 	done      bool
+
+	// sourceFiles and destDirs are captured at offload start (while the
+	// volume is still attached) so bad-timestamp detection can run later,
+	// once every recorder this session is idle, without needing the
+	// recorder itself - see recorder.CheckRecorderTimestamp/ApplyTimestampFix.
+	sourceFiles []recorder.SourceFile
+	destDirs    []string
 }
 
 // rowStatusText is the default display label for a state, used whenever a
