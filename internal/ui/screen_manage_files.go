@@ -25,6 +25,27 @@ var (
 	manageColorFromBg   = color.NRGBA{R: 0xE5, G: 0xE7, B: 0xEB, A: 0xFF} // gray wash - FROM (source) rows
 )
 
+// commaInt formats n with thousands separators (e.g. 1234 -> "1,234"), for
+// the irreversible-delete confirmation's file count.
+func commaInt(n int) string {
+	s := fmt.Sprint(n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	var out []byte
+	for i, c := range []byte(s) {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			out = append(out, ',')
+		}
+		out = append(out, c)
+	}
+	if neg {
+		return "-" + string(out)
+	}
+	return string(out)
+}
+
 // strikethroughText overlays a Unicode combining long-stroke on every
 // rune, since fyne.TextStyle has no strikethrough of its own (only Bold/
 // Italic/Underline as of fyne v2.7). Used to mark a move/rename's source
@@ -1046,7 +1067,19 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 		}
 
 		if req.op == manageOpDelete {
-			showIrreversibleDeleteConfirm(s, run)
+			var fileCount, locCount int
+			for _, lp := range plans {
+				if lp.err != nil {
+					continue
+				}
+				locCount++
+				if n := lp.fileCount(req.op); n > fileCount {
+					fileCount = n
+				}
+			}
+			message := fmt.Sprintf("This will permanently delete %s selected file(s) across the %d location(s). This cannot be undone.",
+				commaInt(fileCount), locCount)
+			showIrreversibleDeleteConfirm(s, message, "Delete Permanently", run)
 			return
 		}
 		run()

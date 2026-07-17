@@ -344,7 +344,9 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 				})
 			}
 			if resolver.hasDeletes() {
-				showIrreversibleDeleteConfirm(s, proceed)
+				showIrreversibleDeleteConfirm(s,
+					"This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.",
+					"Delete and Sync", proceed)
 				return
 			}
 			proceed()
