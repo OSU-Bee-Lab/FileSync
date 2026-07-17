@@ -41,6 +41,11 @@ option to scan experiments).
   a native window. Build/vet/test to confirm it compiles and passes existing
   tests, then hand off to the user to check it in the running app.
 - Worktrees go in ./.claude/worktrees
+- Features that are incomplete or still being stabilized should stay hidden
+  from release builds by gating them behind `devMode()`
+  (`internal/ui/features.go`), which is on when the `FILESYNC_DEV` env var is
+  set to any non-empty value (`FILESYNC_DEV=1 go run .`). This reveals
+  dev-only features at runtime without rebuilding.
 - **rclone must always use `copy`, never `sync`** — this is a core safety
   invariant. `rclone sync` deletes destination-only files; this app must
   never delete data from a synced destination — with the single narrow,

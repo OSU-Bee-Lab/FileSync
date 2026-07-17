@@ -24,6 +24,15 @@ type RecorderSettings struct {
 	// until the user explicitly presses Batch Upload on the active-sync
 	// screen, instead of uploading each file as soon as it lands locally.
 	BatchUpload bool `json:"batchUpload"`
+	// DetectBadTimestamps enables automatic detection of a bad first-file
+	// recording timestamp per recorder (wrong AM/PM, year, month, or day at
+	// setup time), flagged once every file from that recorder has landed
+	// locally. Dev-only for now - see internal/ui.devMode.
+	DetectBadTimestamps bool `json:"detectBadTimestamps,omitempty"`
+	// TimestampToleranceMinutes bounds how far the first file's time-of-day
+	// may drift from the file right after it before DetectBadTimestamps
+	// treats it as suspicious rather than ordinary recorder-setup drift.
+	TimestampToleranceMinutes int `json:"timestampToleranceMinutes,omitempty"`
 }
 
 // Config is FileSync's entire persisted app state.
@@ -56,8 +65,9 @@ func Default() Config {
 	return Config{
 		DefaultFilter: syncengine.DefaultFilterSettings(),
 		RecorderSettings: RecorderSettings{
-			AutoDeleteAfterVerify: true,
-			BatchUpload:           true,
+			AutoDeleteAfterVerify:     true,
+			BatchUpload:               true,
+			TimestampToleranceMinutes: 60,
 		},
 		RecorderInactivityTimeoutMinutes: 5,
 		Checkers:                         syncengine.DefaultCheckers,

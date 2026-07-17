@@ -11,6 +11,23 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
+// DestDirs computes, for each destRoot in destRoots, the recorder's
+// destination directory: destRoot/experimentName/subpath/recorderID
+// (subpath's components, split via splitSubpath, are skipped if empty).
+// Shared by StartOffload and anything else that needs to locate a
+// recorder's already-offloaded files without re-running the whole offload
+// (e.g. bad-timestamp detection/correction, which runs after StartOffload
+// has finished and the recorder itself may already be gone).
+func DestDirs(destRoots []string, subpath, experimentName, recorderID string) []string {
+	subpathParts := splitSubpath(subpath)
+	destDirs := make([]string, len(destRoots))
+	for i, root := range destRoots {
+		parts := append([]string{root, experimentName}, subpathParts...)
+		destDirs[i] = filepath.Join(append(parts, recorderID)...)
+	}
+	return destDirs
+}
+
 // splitSubpath breaks a user-typed subpath into its component directory
 // names, accepting either "/" or "\" as a separator regardless of the
 // current OS - so a path typed on Windows still nests correctly when the
@@ -159,12 +176,7 @@ func StartOffload(
 		}
 
 		subpathParts := splitSubpath(subpath)
-
-		destDirs := make([]string, len(destRoots))
-		for i, root := range destRoots {
-			parts := append([]string{root, experimentName}, subpathParts...)
-			destDirs[i] = filepath.Join(append(parts, recorderID)...)
-		}
+		destDirs := DestDirs(destRoots, subpath, experimentName, recorderID)
 
 		// Each source file's size is stat'd upfront so the progress bar's
 		// denominator (bytesTotal, summed across files below) is known in full
@@ -428,6 +440,27 @@ func uploadWithRetry(ctx context.Context, localPath string, dst syncengine.Locat
 			return
 		}
 	}
+}
+
+// UploadCorrectedFile uploads localPath to dst as relPath, retrying
+// transient failures the same way StartOffload's own per-file uploads do
+// (see uploadWithRetry), and reports progress via onUpload in the same
+// UploadUpdate shape - so a bad-timestamp fix's re-upload (see
+// internal/ui's timestamp review screen, reached once every recorder this
+// session is idle) shows up in the same upload panel as a normal offload
+// upload rather than needing its own UI path. Used only outside batch-upload
+// mode: there, a file already uploaded under its bad name the instant it
+// landed locally, so correcting it locally afterward doesn't by itself push
+// the corrected copy anywhere - this does that push explicitly.
+func UploadCorrectedFile(ctx context.Context, recorderID, relPath, localPath string, dst syncengine.Location, onUpload func(UploadUpdate)) {
+	if onUpload != nil {
+		onUpload(UploadUpdate{RecorderID: recorderID, RelPath: relPath, Event: syncengine.UploadQueued})
+	}
+	uploadWithRetry(ctx, localPath, dst, relPath, func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
+		if onUpload != nil {
+			onUpload(UploadUpdate{RecorderID: recorderID, RelPath: relPath, Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr})
+		}
+	})
 }
 
 func cloneFileProgress(m map[string]FileOffloadProgress) map[string]FileOffloadProgress {

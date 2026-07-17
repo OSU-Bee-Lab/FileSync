@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 )
@@ -101,6 +103,48 @@ func stripRecorderPrefix(relDir string) string {
 		return "."
 	}
 	return relDir
+}
+
+// olympusTimestampPattern matches the destination names this driver itself
+// generates in SourceFiles: "20060102_150405.wma", with an optional
+// "_<n>" disambiguator appended by uniqueDestRel when two recordings on the
+// device landed in the same second.
+var olympusTimestampPattern = regexp.MustCompile(`(?i)^(\d{8})_(\d{6})(?:_\d+)?\.wma$`)
+
+// ParseTimestamp implements recorder.TimestampParser. Unlike the WMA-
+// internal timestamp (bogus/null on this hardware, see SourceFiles' doc),
+// BestCreationTime still ultimately comes from the recorder's own real-time
+// clock as recorded on its FAT filesystem - the same single point of
+// failure as Sony's filename-encoded timestamp. A recorder whose clock was
+// set with the wrong date, or in the wrong half of the day, produces a
+// wrong destination timestamp here exactly as it would a wrong filename on
+// Sony, so this device is not exempt from bad-timestamp detection despite
+// the renaming step.
+func (OlympusVN541PC) ParseTimestamp(destRelPath string) (time.Time, bool) {
+	m := olympusTimestampPattern.FindStringSubmatch(filepath.Base(destRelPath))
+	if m == nil {
+		return time.Time{}, false
+	}
+	t, err := time.ParseInLocation("20060102_150405", m[1]+"_"+m[2], time.Local)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+// RenameForTimestamp implements recorder.TimestampParser, rebuilding this
+// driver's own "20060102_150405.wma" name for t. Any "_<n>" disambiguator
+// on destRelPath is dropped, since the corrected file no longer necessarily
+// collides with whatever it originally shared a second with; a fresh
+// collision at the new timestamp is left to the normal offload/copy
+// machinery to catch, same as it would for a first-time offload.
+func (OlympusVN541PC) RenameForTimestamp(destRelPath string, t time.Time) string {
+	dir := filepath.Dir(destRelPath)
+	newBase := t.Format("20060102_150405") + ".wma"
+	if dir == "." {
+		return newBase
+	}
+	return filepath.Join(dir, newBase)
 }
 
 // uniqueDestRel avoids collisions within a single offload batch (two

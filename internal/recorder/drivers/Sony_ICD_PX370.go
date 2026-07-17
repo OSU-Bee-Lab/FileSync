@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
+	"time"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 )
@@ -106,6 +108,50 @@ func (d SonyICDPX370) SourceFiles(v recorder.Volume) ([]recorder.SourceFile, err
 		return nil, err
 	}
 	return walkRelative(dir)
+}
+
+// sonyTimestampPattern matches the Sony ICD-PX370's own recording filenames:
+// YYMMDD_HHMM.mp3, e.g. "260221_1421.mp3" (Feb 21 2026, 2:21 PM), sometimes
+// prepended with "tmp_" for reasons the recorder itself doesn't document,
+// e.g. "tmp_260221_1421.mp3".
+var sonyTimestampPattern = regexp.MustCompile(`(?i)^(?:tmp_)?(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})\.mp3$`)
+
+// ParseTimestamp implements recorder.TimestampParser: it recovers the
+// recording time the Sony encoded into its own filename, so a bad-timestamp
+// detector can compare it across a whole recorder's files without needing
+// the device itself (which may already be disconnected, or wiped, by the
+// time such a check runs).
+func (SonyICDPX370) ParseTimestamp(destRelPath string) (time.Time, bool) {
+	m := sonyTimestampPattern.FindStringSubmatch(filepath.Base(destRelPath))
+	if m == nil {
+		return time.Time{}, false
+	}
+	yy, _ := strconv.Atoi(m[1])
+	mm, _ := strconv.Atoi(m[2])
+	dd, _ := strconv.Atoi(m[3])
+	hh, _ := strconv.Atoi(m[4])
+	min, _ := strconv.Atoi(m[5])
+	if mm < 1 || mm > 12 || dd < 1 || dd > 31 || hh > 23 || min > 59 {
+		return time.Time{}, false
+	}
+	return time.Date(2000+yy, time.Month(mm), dd, hh, min, 0, 0, time.Local), true
+}
+
+// RenameForTimestamp implements recorder.TimestampParser: it rebuilds the
+// Sony-style YYMMDD_HHMM.mp3 name for t, preserving destRelPath's directory
+// and "tmp_" prefix (if any) - only the timestamp portion changes.
+func (SonyICDPX370) RenameForTimestamp(destRelPath string, t time.Time) string {
+	dir := filepath.Dir(destRelPath)
+	base := filepath.Base(destRelPath)
+	prefix := ""
+	if len(base) >= 4 && (base[:4] == "tmp_" || base[:4] == "TMP_") {
+		prefix = base[:4]
+	}
+	newBase := prefix + t.Format("060102_1504") + ".mp3"
+	if dir == "." {
+		return newBase
+	}
+	return filepath.Join(dir, newBase)
 }
 
 // walkRelative lists every regular file under dir, recursively, with
