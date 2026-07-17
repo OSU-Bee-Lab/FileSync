@@ -40,14 +40,17 @@ func strikethroughText(s string) string {
 
 // focusEntry is a widget.Entry that reports focus changes, used so the
 // shared path picker in Manage Files knows whether "From" or "To" is
-// currently being edited.
+// currently being edited (onFocus), and so "From" can validate its typed
+// path once the user is done editing it rather than on every keystroke
+// (onBlur).
 type focusEntry struct {
 	widget.Entry
 	onFocus func()
+	onBlur  func()
 }
 
-func newFocusEntry(onFocus func()) *focusEntry {
-	e := &focusEntry{onFocus: onFocus}
+func newFocusEntry(onFocus, onBlur func()) *focusEntry {
+	e := &focusEntry{onFocus: onFocus, onBlur: onBlur}
 	e.ExtendBaseWidget(e)
 	return e
 }
@@ -56,6 +59,13 @@ func (e *focusEntry) FocusGained() {
 	e.Entry.FocusGained()
 	if e.onFocus != nil {
 		e.onFocus()
+	}
+}
+
+func (e *focusEntry) FocusLost() {
+	e.Entry.FocusLost()
+	if e.onBlur != nil {
+		e.onBlur()
 	}
 }
 
@@ -171,9 +181,18 @@ func showManageFiles(s *state) {
 					// destination (e.g. via "+ New Folder" or typing a name
 					// that doesn't exist at any Location) - rclone creates
 					// it on Apply, so show it as empty rather than erroring.
-					if target == "To" && errors.Is(err, fs.ErrorDirNotFound) {
+					// "From" must always be an existing path, but that's
+					// surfaced by validateFromPath on blur (an inline
+					// message), not a modal here - so it also just shows
+					// empty rather than popping a dialog on every keystroke/
+					// focus change.
+					if errors.Is(err, fs.ErrorDirNotFound) {
 						entries = nil
-						breadcrumb.SetText("experiments/" + relPath + " (new folder)")
+						suffix := ""
+						if target == "To" {
+							suffix = " (new folder)"
+						}
+						breadcrumb.SetText("experiments/" + relPath + suffix)
 						upBtn.Disable()
 						if relPath != "" {
 							upBtn.Enable()
@@ -298,9 +317,52 @@ func showManageFiles(s *state) {
 		loadChildren()
 	}
 
-	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") })
+	// fromPathError surfaces a not-found "From" path inline, once the user
+	// is done editing it (see validateFromPath) - never as a modal, and
+	// never just from clicking into the field.
+	fromPathError := widget.NewLabel("")
+	fromPathError.Wrapping = fyne.TextWrapWord
+	fromPathError.Hide()
+
+	// validateFromPath checks the typed "From" path against every
+	// currently selected Location (not just the picker's reference
+	// Location), since the operation is meant to apply to all of them.
+	validateFromPath := func() {
+		p := strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
+		if p == "" {
+			fromPathError.Hide()
+			return
+		}
+		locs := locationsFromNamesAny(s.cfg.Locations, locGroup.Selected())
+		if len(locs) == 0 {
+			fromPathError.Hide()
+			return
+		}
+		go func() {
+			found := false
+			for _, loc := range locs {
+				if _, err := syncengine.ListChildren(context.Background(), loc, p); err == nil {
+					found = true
+					break
+				}
+			}
+			fyne.Do(func() {
+				if strings.Trim(strings.TrimSpace(fromEntry.Text), "/") != p {
+					return // stale - the field changed since this check started
+				}
+				if found {
+					fromPathError.Hide()
+				} else {
+					fromPathError.SetText("Path not found: this path is not present on any of the currently selected locations")
+					fromPathError.Show()
+				}
+			})
+		}()
+	}
+
+	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") }, validateFromPath)
 	fromFocusEntry.SetPlaceHolder("experiments/<relative path to rename/move/delete>")
-	toFocusEntry := newFocusEntry(func() { setPickerTarget("To") })
+	toFocusEntry := newFocusEntry(func() { setPickerTarget("To") }, nil)
 	toFocusEntry.SetPlaceHolder("experiments/<new name or destination folder>")
 	fromEntry = &fromFocusEntry.Entry
 	toEntry = &toFocusEntry.Entry
@@ -380,6 +442,7 @@ func showManageFiles(s *state) {
 		widget.NewSeparator(),
 		opGroup,
 		fromForm,
+		fromPathError,
 		toForm,
 		deleteForm,
 		container.NewHBox(previewBtn, backBtn),
@@ -659,17 +722,16 @@ func manageRowTint(row barRow) color.Color {
 // both the old and new path for each child. A delete shows every affected
 // path once, tinted red.
 func showManageFilesPreview(s *state, req manageFilesRequest) {
-	previewTitle := "Preview: Rename / Move / Merge"
+	// previewTitle and applyingTitle both name the exact operation - the
+	// only difference is the verb - so the header reads the same way
+	// before and during Apply, just swapping "Preview" for "Applying".
+	previewTitle := "Preview: " + req.from + " → " + req.to
+	applyingTitle := "Applying: " + req.from + " → " + req.to
 	verb := "moved"
 	if req.op == manageOpDelete {
-		previewTitle = "Preview: Delete"
-		verb = "permanently deleted"
-	}
-	// applyingTitle describes exactly what's being applied - shown while
-	// Apply is running, in place of the preview title.
-	applyingTitle := "Applying: " + req.from + " → " + req.to
-	if req.op == manageOpDelete {
+		previewTitle = "Preview: DELETE " + req.from
 		applyingTitle = "Applying: DELETE " + req.from
+		verb = "permanently deleted"
 	}
 	titleLabel := widget.NewLabelWithStyle(previewTitle, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
@@ -975,7 +1037,9 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					// swap the title and the footer's Back/Apply for a
 					// single Done that returns to the setup screen.
 					titleLabel.SetText("Operation complete!")
-					buttonRow.Objects = []fyne.CanvasObject{widget.NewButton("Done", func() { showManageFiles(s) })}
+					doneBtn := widget.NewButton("Done", func() { showManageFiles(s) })
+					doneBtn.Importance = widget.HighImportance
+					buttonRow.Objects = []fyne.CanvasObject{doneBtn}
 					buttonRow.Refresh()
 				})
 			}()
