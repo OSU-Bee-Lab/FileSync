@@ -636,15 +636,20 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 
 // showIrreversibleDeleteConfirm gates any resolution that deletes a file
 // behind its own explicit confirmation naming the fact that it cannot be
-// undone — separate from the main Sync action so a delete is never one
-// click away from an otherwise-routine sync.
-func showIrreversibleDeleteConfirm(s *state, onConfirm func()) {
-	msg := canvas.NewText("This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.", destructiveRed)
+// undone — separate from the main Sync/Apply action so a delete is never
+// one click away from an otherwise-routine operation. message and
+// confirmLabel let each caller name what's actually being deleted (e.g. a
+// file count) and what confirming actually does (N-way conflict resolution
+// continues into a sync; Manage Files just deletes).
+func showIrreversibleDeleteConfirm(s *state, message, confirmLabel string, onConfirm func()) {
+	msg := canvas.NewText(message, destructiveRed)
 	msg.TextStyle = fyne.TextStyle{Bold: true}
-	dialog.NewCustomConfirm("Delete is irreversible", "Delete and Sync", "Cancel",
+	d := dialog.NewCustomConfirm("Delete is irreversible", confirmLabel, "Cancel",
 		container.NewVBox(msg), func(confirmed bool) {
 			if confirmed {
 				onConfirm()
 			}
-		}, s.win).Show()
+		}, s.win)
+	d.SetConfirmImportance(widget.DangerImportance)
+	d.Show()
 }
