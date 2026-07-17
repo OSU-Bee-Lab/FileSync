@@ -2,10 +2,12 @@ package syncengine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
@@ -47,10 +49,13 @@ func ListRecursive(ctx context.Context, loc Location, relPath string) ([]ManageE
 }
 
 // PlannedMove is one file's source and destination path within a single
-// Location's rename/move/merge operation.
+// Location's rename/move/merge operation, plus its size (from the same
+// recursive listing PlanMove already had to do, so callers that want sizes
+// for a preview don't need a second one).
 type PlannedMove struct {
 	SrcRelPath string
 	DstRelPath string
+	Size       int64
 }
 
 // MovePlan is the full set of per-file moves a rename/move/merge would
@@ -59,32 +64,65 @@ type PlannedMove struct {
 type MovePlan struct {
 	Moves      []PlannedMove
 	Collisions []string // DstRelPath values that already exist
+	// SrcRoot is the srcRelPath PlanMove was called with. ApplyMove uses it
+	// afterward to clean up any directories left empty by moving every file
+	// out of them - rclone remotes generally have no real "rename a
+	// directory" operation (a directory is just an inferred prefix of its
+	// objects' paths), so a move is always applied file-by-file, and the
+	// now-pathless source directories don't disappear on their own.
+	SrcRoot string
 }
 
 // PlanMove lists everything under srcRelPath and computes each file's new
 // path under dstRelPath, preserving the relative structure beneath
 // srcRelPath — the same computation whether the destination is a sibling
 // name (rename) or an existing directory with its own contents (move/merge):
-// only the prefix changes, so there's a single code path for both. Each
-// computed destination is checked for existence at the Location; anything
-// already present is reported as a collision rather than silently decided.
+// only the prefix changes, so there's a single code path for both. Every
+// computed destination is checked against a single recursive listing of
+// dstRelPath (below) rather than one existence lookup per file - on a
+// remote like SharePoint/OneDrive, each such lookup is its own network
+// round trip, so doing it per file turns a rename of a few hundred files
+// into a few hundred sequential API calls before anything even moves.
 func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) (MovePlan, error) {
-	entries, err := ListRecursive(ctx, loc, srcRelPath)
-	if err != nil {
-		return MovePlan{}, err
+	// The source and destination listings are independent - run them
+	// concurrently rather than paying two sequential recursive-listing
+	// round trips on a slow remote.
+	var entries, dstEntries []ManageEntry
+	var srcErr, dstErr error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		entries, srcErr = ListRecursive(ctx, loc, srcRelPath)
+	}()
+	go func() {
+		defer wg.Done()
+		// dstRelPath may not exist yet (the common case for a rename/move)
+		// - that just means nothing collides, not an error.
+		dstEntries, dstErr = ListRecursive(ctx, loc, dstRelPath)
+		if dstErr != nil && errors.Is(dstErr, fs.ErrorDirNotFound) {
+			dstEntries, dstErr = nil, nil
+		}
+	}()
+	wg.Wait()
+	if srcErr != nil {
+		return MovePlan{}, srcErr
+	}
+	if dstErr != nil {
+		return MovePlan{}, dstErr
 	}
 
-	f, err := cache.Get(ctx, loc.rcloneSpec())
-	if err != nil {
-		return MovePlan{}, err
+	existing := make(map[string]bool, len(dstEntries))
+	for _, e := range dstEntries {
+		existing[e.RelPath] = true
 	}
 
-	var plan MovePlan
+	plan := MovePlan{SrcRoot: srcRelPath}
 	for _, e := range entries {
 		suffix := strings.TrimPrefix(strings.TrimPrefix(e.RelPath, srcRelPath), "/")
 		dst := path.Join(dstRelPath, suffix)
-		plan.Moves = append(plan.Moves, PlannedMove{SrcRelPath: e.RelPath, DstRelPath: dst})
-		if _, err := f.NewObject(ctx, dst); err == nil {
+		plan.Moves = append(plan.Moves, PlannedMove{SrcRelPath: e.RelPath, DstRelPath: dst, Size: e.Size})
+		if existing[dst] {
 			plan.Collisions = append(plan.Collisions, dst)
 		}
 	}
@@ -109,7 +147,15 @@ const (
 // ApplyMove executes a MovePlan at loc. resolutions supplies the decision
 // for every path in plan.Collisions (by DstRelPath); any collision without
 // an explicit resolution is treated as CollisionSkip, never as an implicit
-// overwrite.
+// overwrite. Moves run up to fs.Config.Transfers at a time (the same
+// concurrency the rest of the app uses for copies - see SetTransfers):
+// rclone remotes have no bulk "rename a directory" call, so this is applied
+// one MoveFile per file, and on a remote like SharePoint/OneDrive each of
+// those is its own network round trip - running them one at a time turns a
+// few-hundred-file rename into a few-hundred-round-trip wait even though
+// the backend moves each file server-side (no re-upload). Once every file
+// has moved, it also removes any directory under plan.SrcRoot (including
+// SrcRoot itself) left with nothing in it.
 func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map[string]CollisionResolution) error {
 	f, err := cache.Get(ctx, loc.rcloneSpec())
 	if err != nil {
@@ -119,6 +165,16 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	for _, c := range plan.Collisions {
 		collides[c] = true
 	}
+
+	workers := fs.GetConfig(ctx).Transfers
+	if workers < 1 {
+		workers = DefaultTransfers
+	}
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var firstErr error
+
 	for _, m := range plan.Moves {
 		dst := m.DstRelPath
 		if collides[dst] {
@@ -131,8 +187,28 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 				// fall through: MoveFile onto an existing dst replaces it.
 			}
 		}
-		if err := operations.MoveFile(ctx, f, f, dst, m.SrcRelPath); err != nil {
-			return fmt.Errorf("moving %s to %s at %s: %w", m.SrcRelPath, dst, loc.Name, err)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := operations.MoveFile(ctx, f, f, dst, m.SrcRelPath); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("moving %s to %s at %s: %w", m.SrcRelPath, dst, loc.Name, err)
+				}
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+
+	if plan.SrcRoot != "" {
+		if err := operations.Rmdirs(ctx, f, plan.SrcRoot, false); err != nil {
+			return fmt.Errorf("cleaning up empty directories under %s at %s: %w", plan.SrcRoot, loc.Name, err)
 		}
 	}
 	return nil

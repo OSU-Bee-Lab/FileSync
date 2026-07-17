@@ -48,6 +48,10 @@ type Config struct {
 	// Transfers is rclone's --transfers value: how many files are copied
 	// concurrently within a single scan/copy job. Must be >= 1.
 	Transfers int `json:"transfers"`
+	// ManageFilesLocationIDs persists the dev-gated Manage Files screen's
+	// last-selected Locations across restarts, the same way
+	// RecorderSettings.DestinationLocationIDs does for Sync Recorders.
+	ManageFilesLocationIDs []string `json:"manageFilesLocationIds,omitempty"`
 }
 
 // Default returns the config used the first time FileSync runs on a
