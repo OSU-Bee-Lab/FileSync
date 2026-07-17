@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -56,6 +57,15 @@ type recorderSyncScreen struct {
 	uploads    *recorderUploadPanel
 	inactivity *recorderInactivityWatcher
 
+	// batchUploadPaths accumulates, across every recorder offloaded in this
+	// session, the relative path (subpath/recorderID/DestRelPath, relative
+	// to the experiment root - the same rooting ScanNWayWithProgress uses)
+	// of every file that reached verified-complete. In batch-upload mode
+	// (params.batchUpload), confirmBatchUpload restricts the upload to
+	// exactly this set, so files already local but never uploaded from an
+	// earlier, unrelated session aren't swept in - see runBatchUploadTransfers.
+	batchUploadPaths map[string]bool
+
 	// cancelBtn is the bottom-of-screen action button; its label and
 	// OnTapped are kept current by refreshCancelBtn as syncing/uploading
 	// activity starts and stops - see hasActiveTransfer.
@@ -86,15 +96,16 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	}
 
 	sc := &recorderSyncScreen{
-		s:           s,
-		params:      params,
-		destRoots:   destRoots,
-		watchCtx:    watchCtx,
-		cancelWatch: cancelWatch,
-		blinkOn:     true,
-		rowsBox:     container.NewVBox(),
-		uploads:     newRecorderUploadPanel(s.win),
-		inactivity:  newRecorderInactivityWatcher(),
+		s:                s,
+		params:           params,
+		destRoots:        destRoots,
+		watchCtx:         watchCtx,
+		cancelWatch:      cancelWatch,
+		blinkOn:          true,
+		rowsBox:          container.NewVBox(),
+		uploads:          newRecorderUploadPanel(s.win),
+		inactivity:       newRecorderInactivityWatcher(),
+		batchUploadPaths: map[string]bool{},
 	}
 	sc.recordersIdle.Store(true)
 	sc.uploads.onChange = sc.refreshCancelBtn
@@ -376,6 +387,22 @@ func (sc *recorderSyncScreen) refreshAllRows() {
 	sc.refreshEndSyncDialog()
 }
 
+// recordBatchUploadPaths adds every verified-complete file from one
+// recorder's just-finished offload into sc.batchUploadPaths, keyed relative
+// to the experiment root (subpath/recorderID/DestRelPath) - the same
+// rooting ScanNWayWithProgress/BuildNWayTransferPlan use for
+// NWayTransfer.RelPath, since that scan is rooted at the experiment
+// directory itself, not the location root. See runBatchUploadTransfers.
+func (sc *recorderSyncScreen) recordBatchUploadPaths(recorderID string, files map[string]recorder.FileOffloadProgress) {
+	for relPath, fp := range files {
+		if fp.State != recorder.StateComplete {
+			continue
+		}
+		parts := append(append([]string{}, splitSubpathUI(sc.params.subpath)...), recorderID, relPath)
+		sc.batchUploadPaths[filepath.ToSlash(filepath.Join(parts...))] = true
+	}
+}
+
 func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 	row.started = true
 	row.status = jobSyncing
@@ -397,6 +424,9 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 					row.statusMsg = ""
 					if p.FilesTotal == 0 {
 						row.statusMsg = "Done (no files)"
+					}
+					if sc.params.batchUpload {
+						sc.recordBatchUploadPaths(row.id, p.Files)
 					}
 				case recorder.OffloadConflict:
 					row.status = jobConflict
@@ -612,14 +642,19 @@ func (sc *recorderSyncScreen) confirmEndSync() {
 // refreshCancelBtn), so there is nothing to warn about interrupting.
 func (sc *recorderSyncScreen) confirmBatchUpload() {
 	locs := append(append([]syncengine.Location{}, sc.params.destinations...), sc.params.uploads...)
-	runBatchUploadScan(sc.s, sc.endSync, locs, sc.params.experimentName)
+	runBatchUploadScan(sc.s, sc.endSync, locs, sc.params.experimentName, sc.batchUploadPaths)
 }
 
 // runBatchUploadScan is runNWayScan (screen_sync_experiments.go) narrowed
 // to a single experiment and Quick Scan mode. onDone is called once the
 // upload screen is left (Back, or scan/transfer completion) - Batch Upload
 // is a terminal action for Sync Recorders' Screen 2, same as End Sync.
-func runBatchUploadScan(s *state, onDone func(), locs []syncengine.Location, name string) {
+// allowedPaths restricts the eventual transfer to exactly the files this
+// session's offloads just wrote (see recordBatchUploadPaths) - the scan
+// itself still covers the whole experiment (so existing/converged files
+// are correctly detected as already in sync), but runBatchUploadTransfers
+// filters the resulting plan down to allowedPaths before transferring.
+func runBatchUploadScan(s *state, onDone func(), locs []syncengine.Location, name string, allowedPaths map[string]bool) {
 	fset := s.cfg.DefaultFilter
 	var result syncengine.NWayScanResult
 
@@ -631,6 +666,19 @@ func runBatchUploadScan(s *state, onDone func(), locs []syncengine.Location, nam
 			if err != nil {
 				return syncengine.ScanResult{}, err
 			}
+			// Restrict to allowedPaths right after the scan, before
+			// anything is displayed - both NWayDisplayScanResult (the
+			// counts/list shown on this screen) and the later transfer plan
+			// (runBatchUploadTransfers) derive entirely from r.Files, so
+			// filtering it here is enough for both to only ever reflect
+			// files this session's recorder offloads actually just wrote.
+			filtered := r.Files[:0:0]
+			for _, f := range r.Files {
+				if allowedPaths[f.RelPath] {
+					filtered = append(filtered, f)
+				}
+			}
+			r.Files = filtered
 			result = r
 			return syncengine.NWayDisplayScanResult(r), nil
 		},
@@ -647,7 +695,12 @@ func runBatchUploadScan(s *state, onDone func(), locs []syncengine.Location, nam
 // runBatchUploadScan's result and runs only the local -> remote legs: the
 // local destinations already agree with each other directly from the
 // recorder offload copy, so no local<->local pass is needed here (unlike
-// Sync Experiments' general N-way case).
+// Sync Experiments' general N-way case). result.Files has already been
+// restricted to allowedPaths by runBatchUploadScan, so every pair built
+// here only ever contains files this session's recorder offloads actually
+// just wrote - files already sitting locally under this experiment from an
+// earlier, unrelated session are never swept into this batch; that's Sync
+// Experiments' job.
 func runBatchUploadTransfers(s *state, onDone func(), name string, result syncengine.NWayScanResult) {
 	pairs := syncengine.BuildNWayTransferPlan(result, syncengine.PreferLocalSource)
 	var tasks []scanTask
@@ -656,6 +709,9 @@ func runBatchUploadTransfers(s *state, onDone func(), name string, result syncen
 			continue
 		}
 		pair := pair
+		if len(pair.Files) == 0 {
+			continue
+		}
 		transferResult := syncengine.ScanResultFromNWayTransfers(pair)
 		tasks = append(tasks, scanTask{
 			Label: fmt.Sprintf("%s: %s → %s", name, pair.Source.Name, pair.Dest.Name),
