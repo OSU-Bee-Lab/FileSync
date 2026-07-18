@@ -4,6 +4,13 @@
 
 [![Latest release](https://img.shields.io/github/v/release/OSU-Bee-Lab/FileSync)](https://github.com/OSU-Bee-Lab/FileSync/releases/latest)
 
+# Warning: vibe documentation ahead
+This app is still under rapid development, so we haven't had time to write our own documentation.
+Most of this README is currently AI-generated; we will replace it with fully human documentation when the dust settles.
+Pardon the slop.
+
+# Overview
+
 A small cross-platform (Linux/macOS/Windows) desktop app for the OSU Bee Lab's bioacoustics data schema. It wraps [rclone](https://rclone.org) (embedded as a Go library, not a bundled/shelled-out binary) so that colleagues who aren't comfortable with the CLI can:
 
 - back up one experiment at a time between two storage locations (never the whole multi-terabyte `experiments/` tree at once - that's what made the old hand-typed `rclone copy` commands slow), or
