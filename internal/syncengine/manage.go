@@ -22,17 +22,42 @@ type ManageEntry struct {
 	Size    int64
 }
 
-// ListRecursive walks every file under <loc>/<relPath>, one true recursive
-// listing — unlike ListChildren (browser.go), which only ever looks one
-// level deep. Used to build move/merge and delete previews, where the tool
-// needs to know about every file that will actually move or be removed, not
-// just the immediate children of the selected path.
-func ListRecursive(ctx context.Context, loc Location, relPath string) ([]ManageEntry, error) {
+// singleFileSize checks whether relPath itself names an existing file (not a
+// directory) at loc — the Manage Files picker lets the user select an
+// individual file as well as a folder, and rclone's fs.NewFs errors
+// (ErrorIsFile) if pointed straight at a file path, so any relPath must be
+// probed as a file before it's treated as a directory to list.
+func singleFileSize(ctx context.Context, loc Location, relPath string) (int64, bool) {
+	if relPath == "" {
+		return 0, false
+	}
+	parent := path.Dir(relPath)
+	if parent == "." {
+		parent = ""
+	}
+	f, err := cache.Get(ctx, joinSpec(loc.rcloneSpec(), parent))
+	if err != nil {
+		return 0, false
+	}
+	obj, err := f.NewObject(ctx, path.Base(relPath))
+	if err != nil {
+		return 0, false
+	}
+	return obj.Size(), true
+}
+
+// listRecursiveDetail is ListRecursive, additionally reporting whether
+// relPath itself named a single file (the fast path via singleFileSize)
+// rather than a directory that was walked — PlanMove needs to know which,
+// to decide whether a move targets one file or a whole subtree.
+func listRecursiveDetail(ctx context.Context, loc Location, relPath string) (out []ManageEntry, isFile bool, err error) {
+	if size, ok := singleFileSize(ctx, loc, relPath); ok {
+		return []ManageEntry{{RelPath: relPath, Size: size}}, true, nil
+	}
 	f, err := cache.Get(ctx, joinSpec(loc.rcloneSpec(), relPath))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	var out []ManageEntry
 	err = walk.ListR(ctx, f, "", false, -1, walk.ListObjects, func(entries fs.DirEntries) error {
 		for _, e := range entries {
 			if obj, ok := e.(fs.Object); ok {
@@ -42,10 +67,21 @@ func ListRecursive(ctx context.Context, loc Location, relPath string) ([]ManageE
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RelPath < out[j].RelPath })
-	return out, nil
+	return out, false, nil
+}
+
+// ListRecursive walks every file under <loc>/<relPath>, one true recursive
+// listing — unlike ListChildren (browser.go), which only ever looks one
+// level deep. Used to build move/merge and delete previews, where the tool
+// needs to know about every file that will actually move or be removed, not
+// just the immediate children of the selected path. relPath may itself name
+// a single file (see singleFileSize) rather than a directory.
+func ListRecursive(ctx context.Context, loc Location, relPath string) ([]ManageEntry, error) {
+	out, _, err := listRecursiveDetail(ctx, loc, relPath)
+	return out, err
 }
 
 // PlannedMove is one file's source and destination path within a single
@@ -88,12 +124,13 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 	// concurrently rather than paying two sequential recursive-listing
 	// round trips on a slow remote.
 	var entries, dstEntries []ManageEntry
+	var srcIsFile bool
 	var srcErr, dstErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		entries, srcErr = ListRecursive(ctx, loc, srcRelPath)
+		entries, srcIsFile, srcErr = listRecursiveDetail(ctx, loc, srcRelPath)
 	}()
 	go func() {
 		defer wg.Done()
@@ -117,10 +154,30 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 		existing[e.RelPath] = true
 	}
 
+	// Moving a single file onto an existing, non-empty directory (rather
+	// than an exact new/renamed path) lands the file inside that directory
+	// under its own name, matching familiar "mv file dir/" semantics -
+	// directory-to-directory moves already merge by exact path below, so
+	// this only applies when srcRelPath names exactly one file and
+	// dstRelPath isn't itself the exact colliding path (an explicit
+	// overwrite/rename target).
+	effectiveDst := dstRelPath
+	if srcIsFile && len(dstEntries) > 0 && !existing[dstRelPath] {
+		effectiveDst = path.Join(dstRelPath, path.Base(srcRelPath))
+	}
+
 	plan := MovePlan{SrcRoot: srcRelPath}
+	if srcIsFile {
+		// Cleanup only ever Rmdirs a directory - SrcRoot must be the file's
+		// parent, not the file's own path.
+		plan.SrcRoot = path.Dir(srcRelPath)
+		if plan.SrcRoot == "." {
+			plan.SrcRoot = ""
+		}
+	}
 	for _, e := range entries {
 		suffix := strings.TrimPrefix(strings.TrimPrefix(e.RelPath, srcRelPath), "/")
-		dst := path.Join(dstRelPath, suffix)
+		dst := path.Join(effectiveDst, suffix)
 		plan.Moves = append(plan.Moves, PlannedMove{SrcRelPath: e.RelPath, DstRelPath: dst, Size: e.Size})
 		if existing[dst] {
 			plan.Collisions = append(plan.Collisions, dst)

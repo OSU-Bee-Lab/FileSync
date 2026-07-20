@@ -143,6 +143,13 @@ func showManageFiles(s *state) {
 		return fromEntry
 	}
 
+	// selectFile fills the current target (From/To) with a tapped file's
+	// full relative path - unlike a directory tap, it never navigates the
+	// picker (a file has no children to browse into). Assigned once
+	// validateFromPath exists below; only ever called from the running UI,
+	// well after that assignment happens.
+	var selectFile func(relPath string)
+
 	// addingFolder/addFolderText/needsFocus back the trailing "+ New Folder"
 	// row, shown only while picking "To" - typing a destination that
 	// doesn't exist yet is the point there (rclone creates it on Apply);
@@ -161,9 +168,10 @@ func showManageFiles(s *state) {
 			return len(entries)
 		},
 		func() fyne.CanvasObject {
+			bg := canvas.NewRectangle(color.Transparent)
 			entry := widget.NewEntry()
 			entry.Hide()
-			return container.NewStack(widget.NewButton("", nil), entry)
+			return container.NewStack(bg, widget.NewButton("", nil), entry)
 		},
 		nil,
 	)
@@ -206,11 +214,15 @@ func showManageFiles(s *state) {
 					// surfaced by validateFromPath on blur (an inline
 					// message), not a modal here - so it also just shows
 					// empty rather than popping a dialog on every keystroke/
-					// focus change.
-					if errors.Is(err, fs.ErrorDirNotFound) {
+					// focus change. relPath naming an existing file (not a
+					// directory - e.g. typed/submitted rather than tapped
+					// from the list, which goes through selectFile instead)
+					// is likewise not an error: a file just has no children,
+					// so it browses as an empty listing rather than erroring.
+					if errors.Is(err, fs.ErrorDirNotFound) || errors.Is(err, fs.ErrorIsFile) {
 						entries = nil
 						suffix := ""
-						if target == "To" {
+						if target == "To" && errors.Is(err, fs.ErrorDirNotFound) {
 							suffix = " (new folder)"
 						}
 						breadcrumb.SetText("experiments/" + relPath + suffix)
@@ -264,8 +276,9 @@ func showManageFiles(s *state) {
 
 	list.UpdateItem = func(id widget.ListItemID, obj fyne.CanvasObject) {
 		stack := obj.(*fyne.Container)
-		btn := stack.Objects[0].(*widget.Button)
-		entry := stack.Objects[1].(*widget.Entry)
+		bg := stack.Objects[0].(*canvas.Rectangle)
+		btn := stack.Objects[1].(*widget.Button)
+		entry := stack.Objects[2].(*widget.Entry)
 
 		if int(id) < len(entries) {
 			entry.Hide()
@@ -274,18 +287,39 @@ func showManageFiles(s *state) {
 			label := e.Name
 			if e.IsDir {
 				label = "\U0001F4C1 " + label
+				bg.FillColor = color.Transparent
+				btn.Importance = widget.MediumImportance
 			} else {
 				label = fmt.Sprintf("%s  (%s)", label, humanBytes(e.Size))
+				// Selected-file highlight: blue when this row's path is the
+				// current target's (From/To) selection, matching the same
+				// blue used for TO rows in the preview screen
+				// (manageColorMoveBg). LowImportance so the button's own
+				// (otherwise opaque) background doesn't paint over the tint
+				// underneath it.
+				entryPath := joinRel(relPath, e.Name)
+				if entryPath == strings.Trim(strings.TrimSpace(targetEntry().Text), "/") {
+					bg.FillColor = manageColorMoveBg
+				} else {
+					bg.FillColor = color.Transparent
+				}
+				btn.Importance = widget.LowImportance
 			}
+			bg.Refresh()
+			btn.Refresh()
 			btn.SetText(label)
 			btn.OnTapped = func() {
 				if e.IsDir {
 					setRelPath(joinRel(relPath, e.Name))
 					loadChildren()
+					return
 				}
+				selectFile(joinRel(relPath, e.Name))
 			}
 			return
 		}
+		bg.FillColor = color.Transparent
+		bg.Refresh()
 
 		// Trailing "+ New Folder" row (only present while pickerTarget ==
 		// "To" - see the list's Length func above).
@@ -362,7 +396,10 @@ func showManageFiles(s *state) {
 		go func() {
 			found := false
 			for _, loc := range locs {
-				if _, err := syncengine.ListChildren(context.Background(), loc, p); err == nil {
+				// ListChildren errors with ErrorIsFile when p names a file
+				// rather than a directory - the picker lets "From" select an
+				// individual file, so that's a valid path too, not a miss.
+				if _, err := syncengine.ListChildren(context.Background(), loc, p); err == nil || errors.Is(err, fs.ErrorIsFile) {
 					found = true
 					break
 				}
@@ -379,6 +416,15 @@ func showManageFiles(s *state) {
 				}
 			})
 		}()
+	}
+
+	selectFile = func(p string) {
+		closeAddFolder()
+		targetEntry().SetText(p)
+		if pickerTarget == "From" {
+			validateFromPath()
+		}
+		list.Refresh()
 	}
 
 	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") }, validateFromPath)
