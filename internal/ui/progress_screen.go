@@ -623,8 +623,8 @@ func (ps *progressScreen) renderMetrics(m syncMetrics) {
 		} else {
 			skipFilesTotal := m.totalFiles - m.copyFilesTotal
 			skipBytesTotal := m.totalBytes - m.copyBytesTotal
-			ps.filesValue.SetText(fmt.Sprintf("%d / %d\n(%d already synced)", m.copyFilesDone, m.copyFilesTotal, skipFilesTotal))
-			ps.bytesValue.SetText(fmt.Sprintf("%s / %s\n(%s already synced)", humanBytes(m.copyBytesDone), humanBytes(m.copyBytesTotal), humanBytes(skipBytesTotal)))
+			ps.filesValue.SetText(fmt.Sprintf("%d / %d\n(%d previously synced)", m.copyFilesDone, m.copyFilesTotal, skipFilesTotal))
+			ps.bytesValue.SetText(fmt.Sprintf("%s / %s\n(%s previously synced)", humanBytes(m.copyBytesDone), humanBytes(m.copyBytesTotal), humanBytes(skipBytesTotal)))
 		}
 		// While actively syncing, never show 100% from the byte ratio alone —
 		// bytes can finish transferring before the sync is actually confirmed
