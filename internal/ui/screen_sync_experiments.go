@@ -15,16 +15,51 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
-// showSyncExperiments is the Sync Experiments flow: N-way, always
-// whole-experiment granularity. There's no From/To distinction and no
-// designated source — pick two or more locations and one or more
-// experiments, and every selected location converges on every file, with
-// same-name/different-content disagreements always surfaced for an
-// explicit decision (never guessed; see syncengine.compareObjectsN). This
-// supersedes the old pairwise/directional flow: with exactly two locations
-// selected it behaves the same as the old From/To sync, since N-way
-// diffing degenerates cleanly to a two-way diff.
+const (
+	syncModeAllWay = "All-Way Sync"
+	syncModeOneWay = "One Way Sync"
+)
+
+// showSyncExperiments is the Sync Locations screen's entry point. It
+// dispatches on the last-chosen mode (state.syncOneWay), and the mode
+// toggle each screen renders switches back here so choosing a mode always
+// rebuilds a fresh screen for it rather than trying to mutate one screen's
+// widgets in place into the other's.
 func showSyncExperiments(s *state) {
+	if s.syncOneWay {
+		showSyncExperimentsOneWay(s)
+		return
+	}
+	showSyncExperimentsAllWay(s)
+}
+
+// syncModeToggle renders the All-Way/One Way radio shared by both modes.
+// Selecting a mode persists it to state and rebuilds the screen for it.
+func syncModeToggle(s *state) *widget.RadioGroup {
+	g := widget.NewRadioGroup([]string{syncModeAllWay, syncModeOneWay}, func(choice string) {
+		oneWay := choice == syncModeOneWay
+		if oneWay == s.syncOneWay {
+			return
+		}
+		s.syncOneWay = oneWay
+		showSyncExperiments(s)
+	})
+	g.Horizontal = true
+	if s.syncOneWay {
+		g.Selected = syncModeOneWay
+	} else {
+		g.Selected = syncModeAllWay
+	}
+	return g
+}
+
+// showSyncExperimentsAllWay is the N-way flow: always whole-experiment
+// granularity. There's no From/To distinction and no designated source —
+// pick two or more locations and one or more experiments, and every
+// selected location converges on every file, with same-name/
+// different-content disagreements always surfaced for an explicit decision
+// (never guessed; see syncengine.compareObjectsN).
+func showSyncExperimentsAllWay(s *state) {
 	allNames := locationNames(s.cfg.Locations)
 	statusLabel := widget.NewLabel("")
 	loading := newLoadingBar()
@@ -75,9 +110,7 @@ func showSyncExperiments(s *state) {
 	setExpGroup(nil, nil)
 
 	// refresh reloads the experiment list as the union of every experiment
-	// visible from any of the currently-selected locations — a location
-	// missing an experiment entirely is exactly the "hasn't arrived there
-	// yet" case this flow exists to fill in, so it must still be offered.
+	// visible from any of the currently-selected locations.
 	var refresh func()
 	refresh = func() {
 		names := locGroup.Selected()
@@ -257,6 +290,7 @@ func showSyncExperiments(s *state) {
 	content := container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			container.NewPadded(syncModeToggle(s)),
 			widget.NewLabel("Pick two or more locations to sync."),
 			container.NewPadded(locGroup.CanvasObject()),
 			loading.CanvasObject(),
@@ -268,6 +302,250 @@ func showSyncExperiments(s *state) {
 		expScroll,
 	)
 	s.setContent(container.NewPadded(content))
+}
+
+// showSyncExperimentsOneWay is the directional flow: pick an arbitrary local
+// folder (an OS folder picker — not necessarily anything under a Location's
+// experiments root) and push its contents one way onto an existing or new
+// folder within any single Location, browsed like a destination rather than
+// picked from a fixed schema. This is the inverse of Pull Files: there, a
+// Location is the browsed source and a raw local folder is the destination;
+// here, a raw local folder is the source and a Location is the browsed
+// destination. Files that exist only at the destination are left untouched
+// (never deleted), same as every other copy path in this app. It exists for
+// the case where simultaneously connecting to every Location isn't
+// practical — e.g. pushing a batch of recordings from a laptop up to a
+// remote, to be reconciled later from a machine with access to everything.
+func showSyncExperimentsOneWay(s *state) {
+	names := locationNames(s.cfg.Locations)
+	dstSelect := widget.NewSelect(names, nil)
+
+	var dstLoc *syncengine.Location
+	srcLabel := widget.NewLabel("No source folder chosen")
+	destLabel := widget.NewLabel("No destination chosen")
+	srcFolder := s.syncOneWayFromFolder
+	if srcFolder != "" {
+		srcLabel.SetText(srcFolder)
+	}
+
+	syncBtn := widget.NewButton("Sync", nil)
+	syncBtn.Importance = widget.HighImportance
+	syncBtn.Disable()
+
+	updateSyncEnabled := func() {
+		if dstLoc != nil && srcFolder != "" {
+			syncBtn.Enable()
+		} else {
+			syncBtn.Disable()
+		}
+	}
+
+	browser := newDestFolderBrowser(s.win, true)
+	browser.OnPathChanged = func(relPath string) {
+		s.syncOneWayToRelPath = relPath
+		if dstLoc == nil {
+			destLabel.SetText("No destination chosen")
+			return
+		}
+		if relPath == "" {
+			destLabel.SetText(dstLoc.Name + ": /")
+		} else {
+			destLabel.SetText(dstLoc.Name + ": /" + relPath)
+		}
+	}
+
+	// checkDstMissing pops the not-found prompt immediately if dstLoc is a
+	// local location that isn't present on disk (e.g. an unplugged external
+	// drive), mirroring Pull Files' checkSrcMissing but for the destination
+	// side, since here the Location is the destination rather than source.
+	checkDstMissing := func(onOK func()) {
+		if dstLoc == nil {
+			onOK()
+			return
+		}
+		if missing := missingLocalLocations(*dstLoc); len(missing) > 0 {
+			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
+				dstSelect.ClearSelected()
+			}, onOK)
+			return
+		}
+		onOK()
+	}
+
+	dstSelect.OnChanged = func(name string) {
+		dstLoc = findLocation(s.cfg.Locations, name)
+		s.syncOneWayToName = name
+		browser.relPath = ""
+		if dstLoc == nil {
+			browser.SetLocations(nil)
+			destLabel.SetText("No destination chosen")
+		} else {
+			browser.SetLocations([]syncengine.Location{*dstLoc})
+		}
+		updateSyncEnabled()
+		checkDstMissing(func() {})
+	}
+	if contains(names, s.syncOneWayToName) {
+		dstSelect.SetSelected(s.syncOneWayToName) // fires OnChanged above
+		browser.relPath = s.syncOneWayToRelPath
+		browser.reload()
+	}
+
+	chooseSrcBtn := widget.NewButton("Choose source folder...", func() {
+		chooseFolder(s.win, func(path string, err error) {
+			if err != nil {
+				dialog.ShowError(err, s.win)
+				return
+			}
+			if path == "" {
+				return
+			}
+			srcFolder = path
+			s.syncOneWayFromFolder = path
+			srcLabel.SetText(srcFolder)
+			updateSyncEnabled()
+		})
+	})
+
+	syncBtn.OnTapped = func() {
+		if dstLoc == nil || srcFolder == "" {
+			return
+		}
+		dst := *dstLoc
+		dstRelPath := browser.RelPath()
+
+		label := "→ " + dst.Name
+		if dstRelPath != "" {
+			label += "/" + dstRelPath
+		}
+
+		// checkDstMissing is also run on every dstSelect change, so this is a
+		// safety net for a drive that goes missing in between rather than
+		// the primary catch.
+		checkDstMissing(func() {
+			src := syncengine.LocalFolderLocation("Source folder", srcFolder)
+			dstSub := syncengine.SubLocation(dst, dstRelPath)
+			runOneWayScan(s, src, dstSub, label)
+		})
+	}
+	backBtn := widget.NewButton("Back", func() { showHome(s) })
+
+	content := container.NewBorder(
+		container.NewVBox(
+			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			container.NewPadded(syncModeToggle(s)),
+			widget.NewLabel("Push a local folder's contents one-way onto a folder in any location."),
+			container.NewHBox(chooseSrcBtn, srcLabel),
+			widget.NewForm(&widget.FormItem{Text: "To location", Widget: dstSelect}),
+		),
+		container.NewVBox(
+			widget.NewSeparator(),
+			destLabel,
+			container.NewHBox(syncBtn, backBtn),
+		),
+		nil, nil,
+		browser.CanvasObject(),
+	)
+	s.setContent(container.NewPadded(content))
+}
+
+// oneWayPseudoName is the internal "experiment name" runOneWayScan/
+// runOneWayTransfers thread through the N-way engine as the scan relPath.
+// It's always "" — src and dst are ephemeral Locations (see
+// syncengine.LocalFolderLocation/SubLocation) whose own RootPath already
+// points at the exact folders to compare, so no further relPath is needed
+// on top of that. It only exists as a slice element because the N-way
+// resolver/applyNWayResolutions machinery is keyed by a list of names.
+const oneWayPseudoName = ""
+
+// runOneWayScan scans a source folder against a destination folder through
+// the exact same N-way conflict-resolution machinery as All-Way Sync (see
+// runNWayScan) — same resolver, same dialog, same Overwrite/Rename/Delete
+// options — but restricted to these two ephemeral Locations. Once every
+// conflict is resolved, runOneWayTransfers keeps only the source→destination
+// leg of the resulting transfer plan, discarding any destination→source leg,
+// so this can never write back into the local source folder no matter how a
+// conflict is resolved (see runOneWayTransfers).
+func runOneWayScan(s *state, src, dst syncengine.Location, label string) {
+	fset := s.cfg.DefaultFilter
+	locs := []syncengine.Location{src, dst}
+	names := []string{oneWayPseudoName}
+
+	resolver := newNWayResolver(names)
+	results := make([]syncengine.NWayScanResult, 1)
+
+	tasks := []scanTask{{
+		Label: label,
+		Locs:  locs,
+		Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
+			result, err := syncengine.ScanNWayWithProgress(ctx, locs, oneWayPseudoName, fset, progress, syncengine.NWayFullScan)
+			if err != nil {
+				return syncengine.ScanResult{}, err
+			}
+			results[0] = result
+			resolver.results[0] = result
+			return syncengine.NWayDisplayScanResult(result), nil
+		},
+		// Start is deliberately nil, same as runNWayScan: Sync is replaced by
+		// onNWaySync below, which builds and runs the real transfer plan
+		// (filtered to the forward leg only) in a fresh session.
+	}}
+
+	onSync := func() {
+		resolutions := resolver.buildResolutions()
+		proceed := func() {
+			applyNWayResolutions(s, names, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
+				runOneWayTransfers(s, src, dst, label, resolved[0])
+			})
+		}
+		if resolver.hasDeletes() {
+			showIrreversibleDeleteConfirm(s,
+				"This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.",
+				"Delete and Sync", proceed)
+			return
+		}
+		proceed()
+	}
+
+	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
+		syncFlowExtras{nway: resolver, onNWaySync: onSync, syncingTitle: "Syncing"})
+}
+
+// runOneWayTransfers builds the minimal transfer plan the same way
+// runNWayTransfers does, but keeps only the source→destination leg. A
+// conflict resolved as "destination wins" turns into a transfer plan entry
+// sourced from dst, which would otherwise propagate back into the local
+// source folder — dropping any such entry here means that choice simply
+// skips the file (never touches the source folder) instead, keeping the
+// push strictly one-way regardless of how a conflict was resolved.
+func runOneWayTransfers(s *state, src, dst syncengine.Location, label string, result syncengine.NWayScanResult) {
+	pairs := syncengine.BuildNWayTransferPlan(result, syncengine.PreferLocalSource)
+	var tasks []scanTask
+	for _, pair := range pairs {
+		if pair.Source.ID != src.ID || pair.Dest.ID != dst.ID {
+			continue
+		}
+		transferResult := syncengine.ScanResultFromNWayTransfers(pair)
+		tasks = append(tasks, scanTask{
+			Label: label,
+			Locs:  []syncengine.Location{pair.Source, pair.Dest},
+			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
+				return transferResult, nil
+			},
+			Start: func(ctx context.Context, expected syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
+				return syncengine.StartSyncExperiments(ctx, pair.Source, pair.Dest, oneWayPseudoName, expected)
+			},
+		})
+	}
+	if len(tasks) == 0 {
+		showSyncFlowExtras(s, nil, func() { showSyncExperiments(s) }, syncFlowExtras{
+			finishedTitle:   "Already in sync!",
+			finishedMessage: "Every file in the source folder already exists at the destination.",
+		})
+		return
+	}
+	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
+		syncFlowExtras{autoSync: true, syncingTitle: "Syncing"})
 }
 
 // runNWayScan runs the N-way scan live inside the shared scan/sync screen:
@@ -537,4 +815,14 @@ func equalStringSets(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// contains reports whether name appears in names.
+func contains(names []string, name string) bool {
+	for _, n := range names {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }

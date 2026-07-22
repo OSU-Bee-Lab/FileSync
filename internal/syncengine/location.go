@@ -83,6 +83,31 @@ func (l Location) rcloneSpec() string {
 	return l.RemoteName + ":" + l.RootPath
 }
 
+// LocalFolderLocation wraps an arbitrary local folder path as an ephemeral,
+// unsaved Location — e.g. a folder chosen via a native OS picker — so it can
+// flow through the N-way scan/conflict-resolution machinery (ScanNWay,
+// BuildNWayTransferPlan, the resolver in internal/ui) the exact same way any
+// configured Location does. Never persisted; its ID only needs to be stable
+// and unique for the lifetime of one scan/resolve/transfer session.
+func LocalFolderLocation(name, absPath string) Location {
+	return Location{ID: "local-folder:" + absPath, Name: name, Kind: LocationLocal, RootPath: absPath}
+}
+
+// SubLocation returns a copy of loc with relPath folded into its RootPath —
+// for treating a specific subfolder of a Location as its own pseudo-Location
+// root, e.g. so N-way helpers (which operate on a Location's own root, not
+// root+relPath) can be reused against an arbitrary destination folder chosen
+// via a folder browser rather than a Location's fixed experiments root.
+func SubLocation(loc Location, relPath string) Location {
+	if relPath == "" {
+		return loc
+	}
+	sub := loc
+	sub.RootPath = path.Join(loc.RootPath, relPath)
+	sub.ID = loc.ID + "/" + relPath
+	return sub
+}
+
 // joinSpec appends a relative sub-path (forward-slash separated, as rclone
 // path specs always are regardless of host OS) onto an rclone spec string.
 // path.Join is safe here because it treats the "remote:" prefix as an
