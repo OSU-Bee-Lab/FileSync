@@ -565,14 +565,15 @@ func showManageFiles(s *state) {
 // recursively lists from at the first selected Location (via
 // syncengine.ListRecursive, so this works the same whether that Location is
 // local or remote), groups the results into candidate recorder directories
-// (recorder.GroupTimestampFiles), computes a session-wide consensus date
-// across every one found (recorder.ConsensusDate) exactly as Sync Recorders
-// does for the recorders attached in one session, and - if anything looks
-// suspicious - shows the same review screen (showTimestampReview) before
-// applying anything. The correction, once confirmed, is applied at every
-// selected Location (local or remote alike, via syncengine.ApplyRenames) -
-// mirroring how a recorder's fix already lands at every one of its
-// destDirs in Sync Recorders.
+// (recorder.GroupTimestampFiles), then hands them to the shared retime
+// pathway (buildTimestampReviewRows) that computes the session consensus and
+// each recorder's check exactly as Sync Recorders does, and - if anything
+// looks suspicious - shows the same review screen (showTimestampReview)
+// before applying anything. The only Retime-specific part is the apply step:
+// the correction, once confirmed, is applied at every selected Location
+// (local or remote alike, via syncengine.ApplyRenames) - mirroring how a
+// recorder's fix already lands at every one of its destDirs in Sync
+// Recorders.
 func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	ctx := context.Background()
 	entries, err := syncengine.ListRecursive(ctx, locs[0], from)
