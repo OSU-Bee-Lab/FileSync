@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -182,18 +181,14 @@ func showSyncRecorders(s *state) {
 	// being stabilized, so it stays hidden from release builds until then.
 	detectTimestampsCheck := widget.NewCheck("Detect bad recorder timestamps (dev)", nil)
 	detectTimestampsCheck.SetChecked(s.cfg.RecorderSettings.DetectBadTimestamps)
-	detectTimestampsHint := widget.NewLabel("(flags a recorder's first file if its timestamp looks wrong - bad AM/PM, year, month, or day - once every file from that recorder has landed locally.)")
+	// The match tolerance itself is set live on the timestamp review screen
+	// (with a slider that re-judges every recorder as it moves), not here -
+	// that's where seeing its effect is useful. It persists to
+	// RecorderSettings.TimestampToleranceMinutes from there.
+	detectTimestampsHint := widget.NewLabel("(flags a recorder's first file if its timestamp looks wrong - bad AM/PM, year, month, or day - once every file from that recorder has landed locally. Adjust the match tolerance on the review screen.)")
 	detectTimestampsHint.Wrapping = fyne.TextWrapWord
 
-	toleranceMinutes := s.cfg.RecorderSettings.TimestampToleranceMinutes
-	if toleranceMinutes <= 0 {
-		toleranceMinutes = appconfig.DefaultTimestampToleranceMinutes
-	}
-	toleranceEntry := widget.NewEntry()
-	toleranceEntry.SetText(strconv.Itoa(toleranceMinutes))
-	toleranceRow := container.NewBorder(nil, nil, widget.NewLabel("Hour tolerance (minutes)"), nil, toleranceEntry)
-
-	detectTimestampsBox := container.NewVBox(detectTimestampsCheck, detectTimestampsHint, toleranceRow)
+	detectTimestampsBox := container.NewVBox(detectTimestampsCheck, detectTimestampsHint)
 	if !devMode() {
 		detectTimestampsBox.Hide()
 	}
@@ -276,7 +271,7 @@ func showSyncRecorders(s *state) {
 		checkMissingDestinations(func() {
 			destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
 			uploads := locationsFromNames(s.cfg.Locations, uploadGroup.Selected(), syncengine.LocationRemote)
-			startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, detectTimestampsCheck, toleranceEntry, destinations, uploads)
+			startRecorderSync(s, browser.RelPath(), autoDeleteCheck, batchUploadCheck, detectTimestampsCheck, destinations, uploads)
 		})
 	}
 
@@ -314,7 +309,7 @@ func showSyncRecorders(s *state) {
 // to the active-sync screen with destinations/uploads already resolved.
 // relPath is the folder chosen in the destination browser; its first
 // segment is the experiment name and everything after it is the subpath.
-func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadCheck, detectTimestampsCheck *widget.Check, toleranceEntry *widget.Entry, destinations, uploads []syncengine.Location) {
+func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadCheck, detectTimestampsCheck *widget.Check, destinations, uploads []syncengine.Location) {
 	segments := splitSubpathUI(relPath)
 	expName := ""
 	var subpathParts []string
@@ -324,9 +319,12 @@ func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadChe
 	}
 	subpath := strings.Join(subpathParts, "/")
 
+	// Tolerance is no longer set here - it's driven live on the review screen
+	// (and Load backfills a sane default), so read whatever's persisted and
+	// pass it through as the review screen's starting value.
 	tolerance := s.cfg.RecorderSettings.TimestampToleranceMinutes
-	if n, err := strconv.Atoi(strings.TrimSpace(toleranceEntry.Text)); err == nil && n > 0 {
-		tolerance = n
+	if tolerance <= 0 {
+		tolerance = appconfig.DefaultTimestampToleranceMinutes
 	}
 
 	s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(destinations)

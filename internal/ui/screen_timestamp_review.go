@@ -38,6 +38,63 @@ type timestampReviewRow struct {
 	recheck func(tolerance time.Duration) recorder.TimestampIssue
 }
 
+// timestampReviewInput is one recorder handed to buildTimestampReviewRows:
+// its identity, its files, its earliest recorded start (used for the
+// session-wide consensus), and the one thing that genuinely differs between
+// the two retime entry points - how a confirmed correction is applied to its
+// files (Sync Recorders renames local dirs directly; Manage Files renames
+// across rclone Locations). Everything else about the check is shared.
+type timestampReviewInput struct {
+	recorderID  string
+	parser      recorder.TimestampParser
+	sourceFiles []recorder.SourceFile
+	start       time.Time
+	apply       func(correct func(time.Time) time.Time) error
+}
+
+// buildTimestampReviewRows is the single retime pathway both entry points go
+// through: it computes the session's consensus date across every recorder's
+// earliest start (recorder.ConsensusDate), then for each recorder checks that
+// start against the consensus and every OTHER recorder's start
+// (recorder.CheckRecorderTimestamp), wiring a recheck closure so the review
+// screen's tolerance slider can re-judge live. Recorders with no parseable
+// timestamp are dropped. Keeping this in one place is what stops the two
+// callers from drifting - the reason the Manage Files path could suggest a
+// different fix than Sync Recorders for the same clock error.
+func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Duration) []timestampReviewRow {
+	allStarts := make([]time.Time, len(inputs))
+	for i, in := range inputs {
+		allStarts[i] = in.start
+	}
+	cy, cm, cd := recorder.ConsensusDate(allStarts)
+
+	var rows []timestampReviewRow
+	for i, in := range inputs {
+		others := make([]time.Time, 0, len(inputs)-1)
+		for j, o := range inputs {
+			if j != i {
+				others = append(others, o.start)
+			}
+		}
+		in := in
+		recheck := func(tol time.Duration) recorder.TimestampIssue {
+			return *recorder.CheckRecorderTimestamp(in.sourceFiles, in.parser, cy, cm, cd, others, tol)
+		}
+		if recorder.CheckRecorderTimestamp(in.sourceFiles, in.parser, cy, cm, cd, others, tolerance) == nil {
+			continue
+		}
+		rows = append(rows, timestampReviewRow{
+			recorderID:  in.recorderID,
+			parser:      in.parser,
+			sourceFiles: in.sourceFiles,
+			check:       recheck(tolerance),
+			recheck:     recheck,
+			apply:       in.apply,
+		})
+	}
+	return rows
+}
+
 // timestampIssueDetail describes a check in plain language, stating the
 // concrete finding - which date field is off and what the others agree on, or
 // how many minutes the first file's time-of-day sits from the nearest
@@ -61,7 +118,7 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 	case recorder.IssueWrongDay:
 		return fmt.Sprintf("first file dated %s — the other recorders agree on %s (day is off)", recDate, conDate)
 	case recorder.IssueAMPM:
-		return fmt.Sprintf("first file at %s is about 12 h from the nearest recorder — looks like an AM/PM mix-up", recTime)
+		return fmt.Sprintf("first file at %s is about 12 h off the other recorders' start — looks like an AM/PM mix-up", recTime)
 	case recorder.IssueOther:
 		sameDate := check.Recorded.Year() == check.ConsensusYear &&
 			check.Recorded.Month() == check.ConsensusMonth &&
@@ -69,8 +126,8 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 		if !sameDate {
 			return fmt.Sprintf("first file dated %s — the other recorders agree on %s", recDate, conDate)
 		}
-		if check.MinutesFromNearest >= 0 {
-			return fmt.Sprintf("first file at %s is %d min from the nearest recorder (tolerance %d min)", recTime, check.MinutesFromNearest, tolMin)
+		if check.MinutesFromMode >= 0 {
+			return fmt.Sprintf("first file at %s is %d min off the other recorders' start time (tolerance %d min)", recTime, check.MinutesFromMode, tolMin)
 		}
 		return "doesn't line up with the other recorders — check manually"
 	default:

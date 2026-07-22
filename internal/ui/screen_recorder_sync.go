@@ -572,48 +572,31 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	}
 	sc.timestampsHandled = true
 
-	allStarts := make([]time.Time, len(eligible))
-	for i, e := range eligible {
-		allStarts[i] = e.start
-	}
-	consensusYear, consensusMonth, consensusDay := recorder.ConsensusDate(allStarts)
-
 	// destDirsByID lets afterFix (below) find a recorder's destDirs from
 	// just the timestampReviewRow applyAndContinue hands it - destDirs
 	// itself isn't part of timestampReviewRow since Manage Files' Retime
 	// has no equivalent (it applies via rclone Locations instead).
 	destDirsByID := make(map[string][]string, len(eligible))
 
-	reviewRows := make([]timestampReviewRow, 0, len(eligible))
-	for i, e := range eligible {
-		others := make([]time.Time, 0, len(eligible)-1)
-		for j, o := range eligible {
-			if j != i {
-				others = append(others, o.start)
-			}
-		}
+	inputs := make([]timestampReviewInput, 0, len(eligible))
+	for _, e := range eligible {
 		parser, sourceFiles, destDirs := e.parser, e.row.sourceFiles, e.row.destDirs
-		// recheck re-runs this recorder against the same consensus and peer
-		// start times at whatever tolerance the review screen's slider is on;
-		// the initial check is just recheck at the starting tolerance.
-		recheck := func(tol time.Duration) recorder.TimestampIssue {
-			return *recorder.CheckRecorderTimestamp(sourceFiles, parser, consensusYear, consensusMonth, consensusDay, others, tol)
-		}
-		if recorder.CheckRecorderTimestamp(sourceFiles, parser, consensusYear, consensusMonth, consensusDay, others, sc.params.timestampTolerance) == nil {
-			continue
-		}
 		destDirsByID[e.row.id] = destDirs
-		reviewRows = append(reviewRows, timestampReviewRow{
+		inputs = append(inputs, timestampReviewInput{
 			recorderID:  e.row.id,
 			parser:      parser,
 			sourceFiles: sourceFiles,
-			check:       recheck(sc.params.timestampTolerance),
-			recheck:     recheck,
+			start:       e.start,
+			// Sync Recorders renames the local destination dirs directly - the
+			// files are always local here - rather than Manage Files' rclone
+			// rename across arbitrary Locations.
 			apply: func(correct func(time.Time) time.Time) error {
 				return recorder.ApplyTimestampFix(destDirs, parser, sourceFiles, correct)
 			},
 		})
 	}
+
+	reviewRows := buildTimestampReviewRows(inputs, sc.params.timestampTolerance)
 	if len(reviewRows) == 0 {
 		sc.timestampsHandled = false
 		next()

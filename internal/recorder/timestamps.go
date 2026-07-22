@@ -79,13 +79,13 @@ type TimestampIssue struct {
 	ConsensusYear  int
 	ConsensusMonth time.Month
 	ConsensusDay   int
-	// MinutesFromNearest is |this recorder's earliest-file time-of-day − the
-	// closest OTHER recorder's|, in minutes, for the verdicts that hinge on
-	// it (a passing time-of-day check, IssueAMPM, and the time-of-day flavor
-	// of IssueOther). It is -1 when no such comparison was made: a date
-	// mismatch short-circuits before it, and a lone recorder (no otherTimes)
-	// has nothing to compare against.
-	MinutesFromNearest int
+	// MinutesFromMode is |this recorder's earliest-file time-of-day − the
+	// mode start time-of-day the other recorders cluster on|, in minutes, for
+	// the verdicts that hinge on it (a passing time-of-day check, IssueAMPM,
+	// and the time-of-day flavor of IssueOther). It is -1 when no such
+	// comparison was made: a date mismatch short-circuits before it, and a
+	// lone recorder (no otherTimes) has nothing to compare against.
+	MinutesFromMode int
 }
 
 // ConsensusDate returns the most common (year, month, day) among starts -
@@ -128,8 +128,9 @@ func minutesSinceMidnight(t time.Time) int {
 // "YYMMDD_..." name before any "tmp_"-prefixed one, so the chronologically-
 // first file can otherwise arrive last) against the session's consensus:
 // consensusYear/Month/Day (see ConsensusDate, computed across every
-// recorder including this one) for its date, and otherTimes - every OTHER
-// recorder's own earliest file this session - for its time-of-day.
+// recorder including this one) for its date, and the mode of otherTimes -
+// every OTHER recorder's own earliest file this session - for its
+// time-of-day.
 //
 // This cross-recorder comparison is required, not just an alternative: a
 // recorder's clock is wrong (or right) for its entire deployment, so every
@@ -164,24 +165,99 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 	}
 
 	// issue seeds every return with the identifying fields and the consensus
-	// date the caller needs to describe a mismatch; MinutesFromNearest starts
-	// at -1 and is only set once the time-of-day comparison actually runs.
+	// date the caller needs to describe a mismatch; MinutesFromMode starts at
+	// -1 and is only set once the time-of-day comparison actually runs.
 	issue := func(kind TimestampIssueKind, suspicious bool, suggested time.Time) *TimestampIssue {
 		return &TimestampIssue{
-			DestRelPath:        earliestRel,
-			Recorded:           earliest,
-			Suspicious:         suspicious,
-			Kind:               kind,
-			Suggested:          suggested,
-			ConsensusYear:      consensusYear,
-			ConsensusMonth:     consensusMonth,
-			ConsensusDay:       consensusDay,
-			MinutesFromNearest: -1,
+			DestRelPath:     earliestRel,
+			Recorded:        earliest,
+			Suspicious:      suspicious,
+			Kind:            kind,
+			Suggested:       suggested,
+			ConsensusYear:   consensusYear,
+			ConsensusMonth:  consensusMonth,
+			ConsensusDay:    consensusDay,
+			MinutesFromMode: -1,
 		}
 	}
 
-	sameDate := earliest.Year() == consensusYear && earliest.Month() == consensusMonth && earliest.Day() == consensusDay
-	if !sameDate {
+	tolMin := int(tolerance / time.Minute)
+	own := minutesSinceMidnight(earliest)
+	dateMatches := earliest.Year() == consensusYear && earliest.Month() == consensusMonth && earliest.Day() == consensusDay
+
+	// todDist is the circular distance between two times-of-day (minutes),
+	// so 23:59 and 00:01 read as 2 min apart, not 1438, and a ±12 h shift
+	// always reads as the maximal 720.
+	todDist := func(a, b int) int {
+		d := a - b
+		if d < 0 {
+			d = -d
+		}
+		if d > 720 {
+			d = 1440 - d
+		}
+		return d
+	}
+
+	// mode is the start time-of-day the largest cluster of OTHER recorders
+	// share - the majority the deployment agrees on - or -1 when this is the
+	// only recorder and there is nothing to compare time-of-day against. It's
+	// the mode, not the nearest neighbor, so two recorders that share the
+	// same AM/PM error can't validate each other: sitting ~12 h from everyone
+	// else, they're each plainly off against the majority. First max wins on
+	// ties (deterministic).
+	mode := -1
+	if len(otherTimes) > 0 {
+		countNear := func(mins int) int {
+			n := 0
+			for _, ot := range otherTimes {
+				if todDist(mins, minutesSinceMidnight(ot)) <= tolMin {
+					n++
+				}
+			}
+			return n
+		}
+		mode = minutesSinceMidnight(otherTimes[0])
+		best := countNear(mode)
+		for _, ot := range otherTimes[1:] {
+			if m := minutesSinceMidnight(ot); countNear(m) > best {
+				best = countNear(m)
+				mode = m
+			}
+		}
+	}
+
+	// finish stamps MinutesFromMode (distance to the mode start-of-day, or -1
+	// when there was no mode) onto every returned issue.
+	finish := func(kind TimestampIssueKind, suspicious bool, suggested time.Time) *TimestampIssue {
+		r := issue(kind, suspicious, suggested)
+		if mode >= 0 {
+			r.MinutesFromMode = todDist(own, mode)
+		}
+		return r
+	}
+
+	// AM/PM is checked first, against the mode, and before the date-field
+	// checks - because the two symptoms are one fault. A recorder set to the
+	// wrong half of the day reads ~12 h off; when the real start is late
+	// evening, that misread also rolls the calendar date across midnight. So
+	// a recorder whose date "looks wrong" is often just 12 h off, and the
+	// single correction is to snap both back: the date to the deployment's
+	// consensus date, the time to its 12 h flip. Diagnosing this here means
+	// such a recorder is called an AM/PM mix-up (with a correct suggestion),
+	// not a mystery date slip left for the user to puzzle out.
+	if mode >= 0 && todDist(own, mode) > tolMin {
+		flippedTOD := (own + 720) % 1440
+		if todDist(flippedTOD, mode) <= tolMin {
+			flipped := time.Date(consensusYear, consensusMonth, consensusDay, flippedTOD/60, flippedTOD%60, earliest.Second(), 0, earliest.Location())
+			return finish(IssueAMPM, true, flipped)
+		}
+	}
+
+	// Not an AM/PM flip. A wrong date now means a genuine date-field error
+	// (wrong year/month/day at setup), corrected by snapping to the consensus
+	// date while keeping the (already-fine) time-of-day.
+	if !dateMatches {
 		diffFields := 0
 		if earliest.Year() != consensusYear {
 			diffFields++
@@ -192,60 +268,26 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 		if earliest.Day() != consensusDay {
 			diffFields++
 		}
-
 		corrected := time.Date(consensusYear, consensusMonth, consensusDay, earliest.Hour(), earliest.Minute(), earliest.Second(), 0, earliest.Location())
 		switch {
 		case diffFields == 1 && earliest.Year() != consensusYear:
-			return issue(IssueWrongYear, true, corrected)
+			return finish(IssueWrongYear, true, corrected)
 		case diffFields == 1 && earliest.Month() != consensusMonth:
-			return issue(IssueWrongMonth, true, corrected)
+			return finish(IssueWrongMonth, true, corrected)
 		case diffFields == 1 && earliest.Day() != consensusDay:
-			return issue(IssueWrongDay, true, corrected)
+			return finish(IssueWrongDay, true, corrected)
 		default:
-			return issue(IssueOther, true, earliest)
+			return finish(IssueOther, true, earliest)
 		}
 	}
 
-	if len(otherTimes) == 0 {
-		// Nothing to judge time-of-day against.
-		return issue(IssueNone, false, earliest)
+	// Date agrees. If the time-of-day still sits outside tolerance of the
+	// mode (and wasn't a clean 12 h flip), it's an offset we can't name -
+	// leave it for the user. Otherwise everything lines up.
+	if mode >= 0 && todDist(own, mode) > tolMin {
+		return finish(IssueOther, true, earliest)
 	}
-
-	// Dates agree; find the closest other recorder's start time-of-day to
-	// compare against, ignoring date entirely (they may be on different
-	// calendar days if this recorder ran fewer/more days than others).
-	own := minutesSinceMidnight(earliest)
-	minDiff := -1
-	var nearest time.Time
-	for _, ot := range otherTimes {
-		d := own - minutesSinceMidnight(ot)
-		if d < 0 {
-			d = -d
-		}
-		if minDiff == -1 || d < minDiff {
-			minDiff = d
-			nearest = ot
-		}
-	}
-	withNearest := func(kind TimestampIssueKind, suspicious bool, suggested time.Time) *TimestampIssue {
-		r := issue(kind, suspicious, suggested)
-		r.MinutesFromNearest = minDiff
-		return r
-	}
-	if time.Duration(minDiff)*time.Minute <= tolerance {
-		return withNearest(IssueNone, false, earliest)
-	}
-
-	flipped := earliest.Add(12 * time.Hour)
-	flippedDiff := minutesSinceMidnight(flipped) - minutesSinceMidnight(nearest)
-	if flippedDiff < 0 {
-		flippedDiff = -flippedDiff
-	}
-	if time.Duration(flippedDiff)*time.Minute <= tolerance {
-		return withNearest(IssueAMPM, true, flipped)
-	}
-
-	return withNearest(IssueOther, true, earliest)
+	return finish(IssueNone, false, earliest)
 }
 
 // ApplyTimestampFix applies correct to every file in files, not just the

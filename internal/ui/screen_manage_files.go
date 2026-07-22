@@ -610,37 +610,19 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 		return
 	}
 
-	allStarts := make([]time.Time, len(eligible))
-	for i, e := range eligible {
-		allStarts[i] = e.start
-	}
-	consensusYear, consensusMonth, consensusDay := recorder.ConsensusDate(allStarts)
 	tolerance := time.Duration(s.cfg.RecorderSettings.TimestampToleranceMinutes) * time.Minute
 
-	var reviewRows []timestampReviewRow
-	for i, e := range eligible {
-		others := make([]time.Time, 0, len(eligible)-1)
-		for j, o := range eligible {
-			if j != i {
-				others = append(others, o.start)
-			}
-		}
+	inputs := make([]timestampReviewInput, 0, len(eligible))
+	for _, e := range eligible {
 		group := e.group
-		// recheck re-runs this recorder against the same consensus and peer
-		// start times at whatever tolerance the review screen's slider is on;
-		// the initial check is just recheck at the starting tolerance.
-		recheck := func(tol time.Duration) recorder.TimestampIssue {
-			return *recorder.CheckRecorderTimestamp(group.Files, group.Parser, consensusYear, consensusMonth, consensusDay, others, tol)
-		}
-		if recorder.CheckRecorderTimestamp(group.Files, group.Parser, consensusYear, consensusMonth, consensusDay, others, tolerance) == nil {
-			continue
-		}
-		reviewRows = append(reviewRows, timestampReviewRow{
+		inputs = append(inputs, timestampReviewInput{
 			recorderID:  group.RecorderID,
 			parser:      group.Parser,
 			sourceFiles: group.Files,
-			check:       recheck(tolerance),
-			recheck:     recheck,
+			start:       e.start,
+			// Manage Files renames across whichever Locations the user picked,
+			// via rclone (local or remote), rather than Sync Recorders' local
+			// os.Rename - the one part of the retime that isn't shared.
 			apply: func(correct func(time.Time) time.Time) error {
 				renames := make(map[string]string, len(group.Files))
 				for _, f := range group.Files {
@@ -665,6 +647,8 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 			},
 		})
 	}
+
+	reviewRows := buildTimestampReviewRows(inputs, tolerance)
 	if len(reviewRows) == 0 {
 		dialog.ShowInformation("Nothing to check",
 			"No recorder directories with a checkable timestamp naming pattern were found under "+from+".", s.win)

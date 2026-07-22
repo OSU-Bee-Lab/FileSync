@@ -116,6 +116,56 @@ func TestCheckRecorderTimestamp(t *testing.T) {
 		}
 	})
 
+	t.Run("AM/PM caught against the mode even when another recorder shares the error", func(t *testing.T) {
+		// Two recorders both set to the wrong half of the day sit ~12 h from
+		// the midday majority but right next to each other (23:46 and 23:59).
+		// A nearest-neighbor check would let them validate each other;
+		// measured against the mode start (~11:5x, the three midday
+		// recorders), each is plainly ~12 h off. The one under test (23:59)
+		// therefore flips to 11:59. This is the diel-deployment case a
+		// nearest-neighbor check silently passed.
+		mode := []time.Time{
+			mustTime("2026-07-10 11:49"),
+			mustTime("2026-07-10 11:54"),
+			mustTime("2026-07-10 11:58"),
+		}
+		files := []SourceFile{{DestRelPath: "a"}}
+		times := map[string]time.Time{"a": mustTime("2026-07-10 23:59")}
+		others := append([]time.Time{mustTime("2026-07-10 23:46")}, mode...)
+		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, others, time.Hour)
+		if check == nil || !check.Suspicious || check.Kind != IssueAMPM {
+			t.Fatalf("expected suspicious IssueAMPM despite the co-errored neighbor, got %+v", check)
+		}
+		if check.Suggested.Hour() != 11 || check.Suggested.Minute() != 59 {
+			t.Fatalf("expected suggested 11:59 (flipped), got %02d:%02d", check.Suggested.Hour(), check.Suggested.Minute())
+		}
+	})
+
+	t.Run("AM/PM that rolled the date across midnight is corrected on both axes", func(t *testing.T) {
+		// A recorder whose real start is just before noon but is set to the
+		// wrong half of the day records its first file just after midnight the
+		// NEXT day (00:01 on the 11th vs the mode's ~11:5x on the 10th). The
+		// date "looks wrong" (day, and here month too if it straddled a month
+		// end), but it's one fault: a 12 h flip. The fix must snap the time to
+		// its flip AND the date back to the consensus, not just shuffle a date
+		// field. This is the grouped date+AM/PM case.
+		mode := []time.Time{
+			mustTime("2026-07-10 11:49"),
+			mustTime("2026-07-10 11:54"),
+			mustTime("2026-07-10 11:58"),
+		}
+		files := []SourceFile{{DestRelPath: "a"}}
+		times := map[string]time.Time{"a": mustTime("2026-07-11 00:01")}
+		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, mode, time.Hour)
+		if check == nil || !check.Suspicious || check.Kind != IssueAMPM {
+			t.Fatalf("expected suspicious IssueAMPM for the midnight-rollover case, got %+v", check)
+		}
+		want := mustTime("2026-07-10 12:01")
+		if !check.Suggested.Equal(want) {
+			t.Fatalf("expected suggestion snapped to %s (consensus date + flipped time), got %s", want, check.Suggested)
+		}
+	})
+
 	t.Run("not suspicious with no other recorders to compare time-of-day against", func(t *testing.T) {
 		files := []SourceFile{{DestRelPath: "a"}}
 		times := map[string]time.Time{"a": mustTime("2026-07-10 04:15")}
