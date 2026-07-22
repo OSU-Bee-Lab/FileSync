@@ -578,6 +578,12 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	}
 	consensusYear, consensusMonth, consensusDay := recorder.ConsensusDate(allStarts)
 
+	// destDirsByID lets afterFix (below) find a recorder's destDirs from
+	// just the timestampReviewRow applyAndContinue hands it - destDirs
+	// itself isn't part of timestampReviewRow since Manage Files' Retime
+	// has no equivalent (it applies via rclone Locations instead).
+	destDirsByID := make(map[string][]string, len(eligible))
+
 	reviewRows := make([]timestampReviewRow, 0, len(eligible))
 	for i, e := range eligible {
 		others := make([]time.Time, 0, len(eligible)-1)
@@ -590,12 +596,16 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 		if check == nil {
 			continue
 		}
+		parser, sourceFiles, destDirs := e.parser, e.row.sourceFiles, e.row.destDirs
+		destDirsByID[e.row.id] = destDirs
 		reviewRows = append(reviewRows, timestampReviewRow{
 			recorderID:  e.row.id,
-			parser:      e.parser,
-			sourceFiles: e.row.sourceFiles,
-			destDirs:    e.row.destDirs,
+			parser:      parser,
+			sourceFiles: sourceFiles,
 			check:       *check,
+			apply: func(correct func(time.Time) time.Time) error {
+				return recorder.ApplyTimestampFix(destDirs, parser, sourceFiles, correct)
+			},
 		})
 	}
 	if len(reviewRows) == 0 {
@@ -604,7 +614,29 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 		return
 	}
 
-	showTimestampReview(sc, reviewRows, next)
+	continueLabel := "End Sync"
+	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
+		continueLabel = "Batch Upload"
+	}
+	exitWarning := "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names."
+	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
+		exitWarning += " Nothing will be uploaded to the remote destination either."
+	}
+
+	showTimestampReview(timestampReviewHost{
+		s:             sc.s,
+		win:           sc.s.win,
+		continueLabel: continueLabel,
+		onContinue:    next,
+		exitLabel:     "Exit Sync",
+		exitWarning:   exitWarning,
+		onExit:        sc.doConfirmEndSync,
+		afterFix: func(row timestampReviewRow, delta time.Duration) {
+			if !sc.params.batchUpload && len(sc.params.uploads) > 0 {
+				reuploadCorrectedFiles(sc, row, destDirsByID[row.recorderID], delta)
+			}
+		},
+	}, reviewRows)
 }
 
 // onVolumeAttached handles a newly attached volume: detects its driver and

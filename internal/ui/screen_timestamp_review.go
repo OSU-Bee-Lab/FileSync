@@ -18,12 +18,19 @@ import (
 )
 
 // timestampReviewRow is one recorder's line on the timestamp review screen.
+// apply performs the correction (renaming sourceFiles per
+// parser.RenameForTimestamp(f, correct(oldTime))) wherever this recorder's
+// files actually live - Sync Recorders always renames local destDirs
+// directly (recorder.ApplyTimestampFix), while Manage Files' Retime applies
+// across whichever Locations (local or remote) the user selected, via
+// rclone (syncengine.ApplyRenames) - so this row doesn't need to know or
+// care which.
 type timestampReviewRow struct {
 	recorderID  string
 	parser      recorder.TimestampParser
 	sourceFiles []recorder.SourceFile
-	destDirs    []string
 	check       recorder.TimestampIssue
+	apply       func(correct func(time.Time) time.Time) error
 }
 
 // timestampIssueLabel describes a check's Kind in plain language for the
@@ -162,36 +169,55 @@ type timestampReviewEntry struct {
 	text   string
 }
 
+// timestampReviewHost supplies the pieces of a caller's screen that
+// showTimestampReview needs but doesn't own: where to draw (s, win), what
+// the Continue/Exit actions actually do, and an optional per-recorder hook
+// run right after ApplyTimestampFix (Sync Recorders uses this to re-upload a
+// corrected file outside batch-upload mode; Manage Files' Retime leaves it
+// nil since it has no uploads to redo).
+type timestampReviewHost struct {
+	s   *state
+	win fyne.Window
+
+	continueLabel string
+	onContinue    func()
+
+	exitLabel   string
+	exitWarning string
+	onExit      func()
+
+	afterFix func(row timestampReviewRow, delta time.Duration)
+}
+
 // timestampReviewScreen holds the live state for the master-detail
 // timestamp review step: a left-hand list of recorders (colored per
 // timestampCardColor) and a right-hand detail pane for whichever one is
 // selected, showing its files and a live rename preview.
 type timestampReviewScreen struct {
-	sc         *recorderSyncScreen
-	onContinue func()
-	entries    []*timestampReviewEntry
-	selected   int
+	host     timestampReviewHost
+	entries  []*timestampReviewEntry
+	selected int
 
 	cards      []*canvas.Rectangle
 	cardLabels []*widget.Label
 	detailBox  *fyne.Container
 }
 
-// showTimestampReview shows the full-screen review step between an idle
-// Sync Recorders session and its next step (Batch Upload or End Sync),
-// reached automatically once every recorder is idle - see
-// recorderSyncScreen.checkAllTimestamps. Continuing applies every checked
-// recorder's correction - parsed from its entry, generalized to a uniform
-// offset from that recorder's own recorded time, and applied to every file
-// from it (see recorder.ApplyTimestampFix) - then calls onContinue.
-func showTimestampReview(sc *recorderSyncScreen, rows []timestampReviewRow, onContinue func()) {
+// showTimestampReview shows the full-screen review step between a caller
+// (Sync Recorders' end-of-session check, or Manage Files' Retime scan) and
+// whatever it does next - see timestampReviewHost. Continuing applies every
+// checked recorder's correction - parsed from its entry, generalized to a
+// uniform offset from that recorder's own recorded time, and applied to
+// every file from it (see recorder.ApplyTimestampFix) - then calls
+// host.onContinue.
+func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow) {
 	sorted := make([]timestampReviewRow, len(rows))
 	copy(sorted, rows)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].check.Suspicious && !sorted[j].check.Suspicious
 	})
 
-	tr := &timestampReviewScreen{sc: sc, onContinue: onContinue}
+	tr := &timestampReviewScreen{host: host}
 	for _, r := range sorted {
 		tr.entries = append(tr.entries, &timestampReviewEntry{
 			row:    r,
@@ -214,33 +240,25 @@ func showTimestampReview(sc *recorderSyncScreen, rows []timestampReviewRow, onCo
 	}
 
 	tr.detailBox = container.NewStack()
-	continueLabel := "End Sync"
-	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
-		continueLabel = "Batch Upload"
-	}
-	continueBtn := widget.NewButton(continueLabel, nil)
+	continueBtn := widget.NewButton(host.continueLabel, nil)
 	continueBtn.Importance = widget.HighImportance
 	continueBtn.OnTapped = tr.applyAndContinue
 
-	// exitBtn mirrors Screen 2's own Exit Sync escape hatch (see
-	// showRecorderSync): it ends the session without applying any of the
+	// exitBtn mirrors the caller's own escape hatch (Sync Recorders' Exit
+	// Sync, Manage Files' Cancel): it leaves without applying any of the
 	// corrections being reviewed here, same as bypassing the check
-	// entirely - it deliberately calls doConfirmEndSync directly, not
-	// applyAndContinue or onContinue, neither of which it wants to run.
-	// Warns first, since it's easy to tap expecting the usual "end the
-	// session" behavior without registering that anything typed into the
-	// review is about to be silently discarded.
-	exitWarning := "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names."
-	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
-		exitWarning += " Nothing will be uploaded to the remote destination either."
-	}
-	exitBtn := widget.NewButton("Exit Sync", func() {
-		showDangerConfirm("Corrections not applied", exitWarning,
-			"Exit Sync", "Return to Review", func(ok bool) {
+	// entirely - it deliberately calls host.onExit directly, not
+	// applyAndContinue or host.onContinue, neither of which it wants to run.
+	// Warns first, since it's easy to tap expecting the usual "leave"
+	// behavior without registering that anything typed into the review is
+	// about to be silently discarded.
+	exitBtn := widget.NewButton(host.exitLabel, func() {
+		showDangerConfirm("Corrections not applied", host.exitWarning,
+			host.exitLabel, "Return to Review", func(ok bool) {
 				if ok {
-					sc.doConfirmEndSync()
+					host.onExit()
 				}
-			}, sc.s.win)
+			}, host.win)
 	})
 	exitBtn.Importance = widget.DangerImportance
 
@@ -259,7 +277,7 @@ func showTimestampReview(sc *recorderSyncScreen, rows []timestampReviewRow, onCo
 		nil, nil,
 		split,
 	)
-	sc.s.setContent(container.NewPadded(content))
+	host.s.setContent(container.NewPadded(content))
 
 	tr.selectRow(0)
 }
@@ -412,13 +430,12 @@ func (tr *timestampReviewScreen) applyAndContinue() {
 	}
 
 	for _, f := range fixes {
-		_ = recorder.ApplyTimestampFix(f.entry.row.destDirs, f.entry.row.parser, f.entry.row.sourceFiles,
-			func(t time.Time) time.Time { return t.Add(f.delta) })
-		if !tr.sc.params.batchUpload && len(tr.sc.params.uploads) > 0 {
-			reuploadCorrectedFiles(tr.sc, f.entry.row, f.delta)
+		_ = f.entry.row.apply(func(t time.Time) time.Time { return t.Add(f.delta) })
+		if tr.host.afterFix != nil {
+			tr.host.afterFix(f.entry.row, f.delta)
 		}
 	}
-	tr.onContinue()
+	tr.host.onContinue()
 }
 
 // selectForEntry switches the detail pane to e (used to surface a parse
@@ -466,9 +483,12 @@ func (c *tappableCard) Tapped(*fyne.PointEvent) {
 // unless this pushes it. The stale, wrongly-named remote copy is left in
 // place rather than deleted, per this app's never-delete rule (see
 // CLAUDE.md) - the user can clean it up manually once the correctly-named
-// copy is confirmed uploaded.
-func reuploadCorrectedFiles(sc *recorderSyncScreen, row timestampReviewRow, delta time.Duration) {
-	if len(row.destDirs) == 0 {
+// copy is confirmed uploaded. destDirs is row's recorder's local
+// destinations (Sync Recorders-only - passed in rather than read off row
+// since timestampReviewRow itself no longer carries it, see
+// checkTimestampsThen's destDirsByID).
+func reuploadCorrectedFiles(sc *recorderSyncScreen, row timestampReviewRow, destDirs []string, delta time.Duration) {
+	if len(destDirs) == 0 {
 		return
 	}
 	subpathParts := splitSubpathUI(sc.params.subpath)
@@ -478,7 +498,7 @@ func reuploadCorrectedFiles(sc *recorderSyncScreen, row timestampReviewRow, delt
 			continue
 		}
 		newRel := row.parser.RenameForTimestamp(sf.DestRelPath, t.Add(delta))
-		localPath := filepath.Join(row.destDirs[0], newRel)
+		localPath := filepath.Join(destDirs[0], newRel)
 		relParts := append([]string{sc.params.experimentName}, subpathParts...)
 		relParts = append(relParts, row.recorderID, newRel)
 		relPath := filepath.Join(relParts...)

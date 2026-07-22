@@ -271,6 +271,36 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	return nil
 }
 
+// ApplyRenames renames files within dir (a directory path relative to loc's
+// root) per renames (oldName -> newName, both bare filenames within dir) -
+// used by Manage Files' Retime feature to apply a recorder timestamp
+// correction (see recorder.ApplyTimestampFix, which does the equivalent
+// directly via os.Rename for Sync Recorders' always-local destinations)
+// uniformly across any kind of Location, local or remote, via rclone's
+// MoveFile. A name missing from this particular Location is skipped rather
+// than treated as an error - not every mirrored Location need hold every
+// file.
+func ApplyRenames(ctx context.Context, loc Location, dir string, renames map[string]string) error {
+	f, err := cache.Get(ctx, loc.rcloneSpec())
+	if err != nil {
+		return err
+	}
+	for oldName, newName := range renames {
+		if oldName == newName {
+			continue
+		}
+		oldRel := path.Join(dir, oldName)
+		newRel := path.Join(dir, newName)
+		if _, err := f.NewObject(ctx, oldRel); err != nil {
+			continue
+		}
+		if err := operations.MoveFile(ctx, f, f, newRel, oldRel); err != nil {
+			return fmt.Errorf("renaming %s to %s at %s: %w", oldRel, newRel, loc.Name, err)
+		}
+	}
+	return nil
+}
+
 // uniqueDstPath appends a numbered suffix to relPath's base name until it no
 // longer collides with an existing object at f, e.g. "foo.mp3" -> "foo
 // (2).mp3" -> "foo (3).mp3".

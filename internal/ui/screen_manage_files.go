@@ -8,6 +8,7 @@ import (
 	"path"
 	"strings"
 	"sync"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -16,8 +17,16 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/rclone/rclone/fs"
 
+	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
+
+// manageOpRetime is the radio label for the dev-gated "Retime" option (see
+// devMode) - checking and correcting recorder clock errors already synced to
+// disk, via the same recorder.CheckRecorderTimestamp/ApplyTimestampFix
+// pathway and review screen Sync Recorders uses (see runManageFilesRetime),
+// just scanning an arbitrary directory recursively instead of a live volume.
+const manageOpRetime = "Retime (check recorder timestamps)"
 
 var (
 	manageColorDeleteBg = color.NRGBA{R: 0xFE, G: 0xCA, B: 0xCA, A: 0xFF} // red wash - permanently removed
@@ -115,8 +124,13 @@ func showManageFiles(s *state) {
 		}
 	}
 
-	// --- operation choice ---
-	opGroup := widget.NewRadioGroup([]string{"Rename / Move / Merge", "Delete"}, nil)
+	// --- operation choice --- Retime is dev-gated (see devMode) since it's
+	// still being stabilized.
+	opOptions := []string{"Rename / Move / Merge", "Delete"}
+	if devMode() {
+		opOptions = append(opOptions, manageOpRetime)
+	}
+	opGroup := widget.NewRadioGroup(opOptions, nil)
 
 	// --- shared path picker: browses the first selected Location, and
 	// writes into whichever of fromEntry/toEntry last had focus. Delete
@@ -483,6 +497,11 @@ func showManageFiles(s *state) {
 		op := opGroup.Selected
 		locs := locationsFromNamesAny(s.cfg.Locations, selectedNames)
 
+		if op == manageOpRetime {
+			runManageFilesRetime(s, locs, from)
+			return
+		}
+
 		if op == "Delete" {
 			if deleteConfirmEntry.Text != from {
 				dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
@@ -540,6 +559,121 @@ func showManageFiles(s *state) {
 		updateMirrorWarning()
 		loadChildren()
 	}
+}
+
+// runManageFilesRetime is the Retime operation (see manageOpRetime): it
+// recursively lists from at the first selected Location (via
+// syncengine.ListRecursive, so this works the same whether that Location is
+// local or remote), groups the results into candidate recorder directories
+// (recorder.GroupTimestampFiles), computes a session-wide consensus date
+// across every one found (recorder.ConsensusDate) exactly as Sync Recorders
+// does for the recorders attached in one session, and - if anything looks
+// suspicious - shows the same review screen (showTimestampReview) before
+// applying anything. The correction, once confirmed, is applied at every
+// selected Location (local or remote alike, via syncengine.ApplyRenames) -
+// mirroring how a recorder's fix already lands at every one of its
+// destDirs in Sync Recorders.
+func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
+	ctx := context.Background()
+	entries, err := syncengine.ListRecursive(ctx, locs[0], from)
+	if err != nil {
+		dialog.ShowError(err, s.win)
+		return
+	}
+	relPaths := make([]string, len(entries))
+	for i, e := range entries {
+		relPaths[i] = e.RelPath
+	}
+	groups := recorder.GroupTimestampFiles(relPaths)
+
+	type eligibleGroup struct {
+		group recorder.TimestampGroup
+		start time.Time
+	}
+	var eligible []eligibleGroup
+	for _, g := range groups {
+		var start time.Time
+		found := false
+		for _, f := range g.Files {
+			if t, ok := g.Parser.ParseTimestamp(f.DestRelPath); ok && (!found || t.Before(start)) {
+				start = t
+				found = true
+			}
+		}
+		if found {
+			eligible = append(eligible, eligibleGroup{g, start})
+		}
+	}
+	if len(eligible) == 0 {
+		dialog.ShowInformation("Nothing to check",
+			"No recorder directories with a checkable timestamp naming pattern were found under "+from+".", s.win)
+		return
+	}
+
+	allStarts := make([]time.Time, len(eligible))
+	for i, e := range eligible {
+		allStarts[i] = e.start
+	}
+	consensusYear, consensusMonth, consensusDay := recorder.ConsensusDate(allStarts)
+	tolerance := time.Duration(s.cfg.RecorderSettings.TimestampToleranceMinutes) * time.Minute
+
+	var reviewRows []timestampReviewRow
+	for i, e := range eligible {
+		others := make([]time.Time, 0, len(eligible)-1)
+		for j, o := range eligible {
+			if j != i {
+				others = append(others, o.start)
+			}
+		}
+		check := recorder.CheckRecorderTimestamp(e.group.Files, e.group.Parser, consensusYear, consensusMonth, consensusDay, others, tolerance)
+		if check == nil {
+			continue
+		}
+		group := e.group
+		reviewRows = append(reviewRows, timestampReviewRow{
+			recorderID:  group.RecorderID,
+			parser:      group.Parser,
+			sourceFiles: group.Files,
+			check:       *check,
+			apply: func(correct func(time.Time) time.Time) error {
+				renames := make(map[string]string, len(group.Files))
+				for _, f := range group.Files {
+					t, ok := group.Parser.ParseTimestamp(f.DestRelPath)
+					if !ok {
+						continue
+					}
+					if newName := group.Parser.RenameForTimestamp(f.DestRelPath, correct(t)); newName != f.DestRelPath {
+						renames[f.DestRelPath] = newName
+					}
+				}
+				if len(renames) == 0 {
+					return nil
+				}
+				var firstErr error
+				for _, loc := range locs {
+					if err := syncengine.ApplyRenames(context.Background(), loc, group.RelDir, renames); err != nil && firstErr == nil {
+						firstErr = err
+					}
+				}
+				return firstErr
+			},
+		})
+	}
+	if len(reviewRows) == 0 {
+		dialog.ShowInformation("Nothing to check",
+			"No recorder directories with a checkable timestamp naming pattern were found under "+from+".", s.win)
+		return
+	}
+
+	showTimestampReview(timestampReviewHost{
+		s:             s,
+		win:           s.win,
+		continueLabel: "Apply",
+		onContinue:    func() { showManageFiles(s) },
+		exitLabel:     "Cancel",
+		exitWarning:   "Cancelling now will not apply any timestamp corrections - every recorder's files keep their original names.",
+		onExit:        func() { showManageFiles(s) },
+	}, reviewRows)
 }
 
 type manageFilesOp int
