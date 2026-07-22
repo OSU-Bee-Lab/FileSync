@@ -126,8 +126,8 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 		if !sameDate {
 			return fmt.Sprintf("first file dated %s — the other recorders agree on %s", recDate, conDate)
 		}
-		if check.MinutesFromMode >= 0 {
-			return fmt.Sprintf("first file at %s is %d min off the other recorders' start time (tolerance %d min)", recTime, check.MinutesFromMode, tolMin)
+		if check.MinutesFromMedian >= 0 {
+			return fmt.Sprintf("first file at %s is %d min off the other recorders' median start time (tolerance %d min)", recTime, check.MinutesFromMedian, tolMin)
 		}
 		return "doesn't line up with the other recorders — check manually"
 	default:
