@@ -157,7 +157,23 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 	if err != nil {
 		return ScanResult{}, err
 	}
-	return scanAgainstDest(ctx, listing, destFolder, srcRelPath, label, progress)
+	return scanAgainstDest(ctx, listing, destFolder, srcRelPath, label, progress, false)
+}
+
+// ScanOneWaySyncWithProgress scans experimentName at src against dst for a
+// strict one-directional push: src is copied onto dst (overwriting whatever
+// differs there), while files that exist only at dst are left untouched —
+// same rclone-copy-never-delete guarantee as every other scan/sync path in
+// this package. Unlike the pairwise/N-way pull scans, a same-path file with
+// different content is never held back as an ActionConflict needing
+// resolution — one-way sync's entire point is "make dst match src," so
+// differing content is just another reason to copy.
+func ScanOneWaySyncWithProgress(ctx context.Context, src, dst Location, experimentName string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+	listing, err := listSource(ctx, src.rcloneSpec(), experimentName, fset, progress)
+	if err != nil {
+		return ScanResult{}, err
+	}
+	return scanAgainstDest(ctx, listing, dst.rcloneSpec(), experimentName, experimentName, progress, true)
 }
 
 // scanTracker accumulates the per-entry and per-directory bookkeeping every
@@ -305,7 +321,7 @@ func (t *scanTracker) finish() ScanResult {
 // would mean N destination round trips. Listing once and comparing against
 // an in-memory map turns that into a single listing plus in-memory
 // comparisons.
-func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPath, label string, progress ScanProgressFunc) (ScanResult, error) {
+func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPath, label string, progress ScanProgressFunc, oneWay bool) (ScanResult, error) {
 	fdst, err := cache.Get(ctx, joinSpec(dstRoot, relPath))
 	if err != nil {
 		return ScanResult{}, err
@@ -336,7 +352,7 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 		if err := ctx.Err(); err != nil {
 			return ScanResult{}, err
 		}
-		entry, err := classifyObject(ctx, dstObjs, srcObj)
+		entry, err := classifyObject(ctx, dstObjs, srcObj, oneWay)
 		if err != nil {
 			return ScanResult{}, err
 		}
@@ -351,7 +367,11 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 // it as identical, or flag it as a conflict needing user resolution. See
 // compareObjects for the size+prefix comparison used when a same-path file
 // already exists at the destination.
-func classifyObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.Object) (ScanEntry, error) {
+//
+// oneWay demotes what would otherwise be ActionConflict to ActionCopy: a
+// one-directional push has no "which side wins" question to ask, since the
+// answer is always "src wins" by definition.
+func classifyObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.Object, oneWay bool) (ScanEntry, error) {
 	relFile := srcObj.Remote()
 	entry := ScanEntry{RelPath: relFile, Size: srcObj.Size(), Action: ActionCopy}
 
@@ -359,6 +379,10 @@ func classifyObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs
 		action, reason, err := compareObjects(ctx, srcObj, dstObj)
 		if err != nil {
 			return ScanEntry{}, err
+		}
+		if action == ActionConflict && oneWay {
+			action = ActionCopy
+			reason = ""
 		}
 		entry.Action = action
 		if action == ActionConflict {

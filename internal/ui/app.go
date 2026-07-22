@@ -45,6 +45,13 @@ type state struct {
 	// they're still populated if the user navigates away and back.
 	syncExperimentsLocationNames []string
 	syncExperimentsExpNames      []string
+	// syncOneWay and syncOneWayFrom/ToName cache the Sync Locations
+	// screen's mode toggle and, when in One Way Sync mode, its chosen
+	// From/To locations — mirrors syncExperimentsLocationNames' role for
+	// the All-Way Sync mode.
+	syncOneWay         bool
+	syncOneWayFromName string
+	syncOneWayToName   string
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to

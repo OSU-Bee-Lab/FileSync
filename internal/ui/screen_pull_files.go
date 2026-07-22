@@ -2,8 +2,6 @@ package ui
 
 import (
 	"context"
-	"fmt"
-	"path"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -20,129 +18,42 @@ import (
 // deployment date, or one recorder directory. Scope selection is
 // deliberately folder-only, not single-file: rclone's fs.NewFs returns
 // ErrorIsFile (rooted at the parent, not the file) when pointed at a bare
-// file path, which syncengine's copy/scan helpers don't special-case -
-// so a single file isn't a safe scope choice here.
+// file path, which syncengine's copy/scan helpers don't special-case - so a
+// single file isn't a safe scope choice here. destFolderBrowser is a natural
+// fit for that constraint, since it only ever shows folders to browse into.
 func showPullFiles(s *state) {
 	names := locationNames(s.cfg.Locations)
 	srcSelect := widget.NewSelect(names, nil)
 
 	var srcLoc *syncengine.Location
-	relPath := ""
-	var scopePath string // "" until the user picks a scope folder to pull
-
-	breadcrumb := widget.NewLabel("experiments/")
-	scopeLabel := widget.NewLabel("No scope chosen yet - tap \"Use this\" on a folder below.")
+	scopeLabel := widget.NewLabel("No source chosen yet.")
 	destLabel := widget.NewLabel("No destination chosen")
 	var destFolder string
 
-	var entries []syncengine.Entry
-	list := widget.NewList(
-		func() int { return len(entries) },
-		func() fyne.CanvasObject {
-			return container.NewBorder(nil, nil, nil, widget.NewButton("Use this", nil), widget.NewButton("", nil))
-		},
-		nil,
-	)
+	scanBtn := widget.NewButton("Scan", nil)
+	scanBtn.Importance = widget.HighImportance
+	scanBtn.Disable()
 
-	upBtn := widget.NewButton("Up", nil)
+	updateScanEnabled := func() {
+		if srcLoc != nil && destFolder != "" {
+			scanBtn.Enable()
+		} else {
+			scanBtn.Disable()
+		}
+	}
 
-	var loadChildren func()
-	loadChildren = func() {
+	browser := newDestFolderBrowser(s.win, false)
+	browser.OnPathChanged = func(relPath string) {
 		if srcLoc == nil {
+			scopeLabel.SetText("No source chosen yet.")
 			return
 		}
 		if relPath == "" {
-			breadcrumb.SetText("Loading experiments/...")
-		} else {
-			breadcrumb.SetText("Loading experiments/" + relPath + "/...")
-		}
-		entries = nil
-		list.Refresh()
-		upBtn.Disable()
-
-		src := *srcLoc
-		path := relPath
-
-		go func() {
-			ctx := context.Background()
-			result, err := syncengine.ListChildren(ctx, src, path)
-
-			fyne.Do(func() {
-				if srcLoc == nil || srcLoc.ID != src.ID || relPath != path {
-					return
-				}
-				if err != nil {
-					if relPath == "" {
-						breadcrumb.SetText("Error loading experiments/")
-					} else {
-						breadcrumb.SetText("Error loading experiments/" + relPath + "/")
-					}
-					showLocationError(s, err, src)
-					return
-				}
-				entries = result
-				if relPath == "" {
-					breadcrumb.SetText("experiments/")
-				} else {
-					breadcrumb.SetText("experiments/" + relPath + "/")
-				}
-				upBtn.Disable()
-				if relPath != "" {
-					upBtn.Enable()
-				}
-				list.Refresh()
-			})
-		}()
-	}
-
-	list.UpdateItem = func(id widget.ListItemID, obj fyne.CanvasObject) {
-		e := entries[id]
-		border := obj.(*fyne.Container)
-		openBtn := border.Objects[1].(*widget.Button)
-		useBtn := border.Objects[0].(*widget.Button)
-
-		label := e.Name
-		if e.IsDir {
-			label = "\U0001F4C1 " + label // folder icon
-		} else {
-			label = fmt.Sprintf("%s  (%s)", label, humanBytes(e.Size))
-		}
-		openBtn.SetText(label)
-		openBtn.OnTapped = func() {
-			if e.IsDir {
-				relPath = joinRel(relPath, e.Name)
-				loadChildren()
-			}
-		}
-
-		if e.IsDir {
-			useBtn.Enable()
-			useBtn.OnTapped = func() {
-				scopePath = joinRel(relPath, e.Name)
-				scopeLabel.SetText("Scope: experiments/" + scopePath)
-			}
-		} else {
-			useBtn.OnTapped = nil
-			useBtn.Disable()
-		}
-	}
-
-	upBtn.OnTapped = func() {
-		relPath = path.Dir(relPath)
-		if relPath == "." {
-			relPath = ""
-		}
-		loadChildren()
-	}
-
-	useCurrentFolderBtn := widget.NewButton("Use current folder as scope", func() {
-		scopePath = relPath
-		if scopePath == "" {
 			scopeLabel.SetText("Scope: entire experiments/ root")
 		} else {
-			scopeLabel.SetText("Scope: experiments/" + scopePath)
+			scopeLabel.SetText("Scope: experiments/" + relPath)
 		}
-	})
+	}
 
 	// checkSrcMissing pops the not-found prompt immediately if srcLoc is a
 	// local location that isn't present on disk (e.g. an unplugged external
@@ -170,10 +81,17 @@ func showPullFiles(s *state) {
 
 	srcSelect.OnChanged = func(name string) {
 		srcLoc = findLocation(s.cfg.Locations, name)
-		relPath = ""
-		scopePath = ""
-		scopeLabel.SetText("No scope chosen yet - tap \"Use this\" on a folder below.")
-		checkSrcMissing(loadChildren)
+		// Switching source starts scope back at the experiments/ root
+		// rather than carrying over a path browsed on the previous
+		// source, which may not even exist there.
+		browser.relPath = ""
+		if srcLoc == nil {
+			browser.SetLocations(nil)
+		} else {
+			browser.SetLocations([]syncengine.Location{*srcLoc})
+		}
+		updateScanEnabled()
+		checkSrcMissing(func() {})
 	}
 
 	chooseDestBtn := widget.NewButton("Choose destination folder...", func() {
@@ -187,20 +105,16 @@ func showPullFiles(s *state) {
 			}
 			destFolder = path
 			destLabel.SetText(destFolder)
+			updateScanEnabled()
 		})
 	})
 
-	scanBtn := widget.NewButton("Scan", func() {
-		if srcLoc == nil {
-			dialog.ShowInformation("Pick a source", "Choose a source location first.", s.win)
-			return
-		}
-		if destFolder == "" {
-			dialog.ShowInformation("Pick a destination", "Choose a destination folder first.", s.win)
+	scanBtn.OnTapped = func() {
+		if srcLoc == nil || destFolder == "" {
 			return
 		}
 		src := *srcLoc
-		chosenRelPath := scopePath
+		chosenRelPath := browser.RelPath()
 		fset := s.cfg.DefaultFilter
 		dest := destFolder
 
@@ -225,26 +139,22 @@ func showPullFiles(s *state) {
 			}}
 			showSyncFlow(s, tasks, func() { showPullFiles(s) })
 		})
-	})
-	scanBtn.Importance = widget.HighImportance
+	}
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle("Pull Files", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewForm(&widget.FormItem{Text: "Source", Widget: srcSelect}),
-			container.NewHBox(upBtn, breadcrumb),
 		),
 		container.NewVBox(
 			widget.NewSeparator(),
 			scopeLabel,
-			useCurrentFolderBtn,
 			container.NewHBox(chooseDestBtn, destLabel),
 			container.NewHBox(scanBtn, backBtn),
 		),
 		nil, nil,
-		list,
+		browser.CanvasObject(),
 	)
 	s.setContent(container.NewPadded(content))
-	upBtn.Disable()
 }
