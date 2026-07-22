@@ -91,16 +91,22 @@ type Job struct {
 // actually runs here, so the set of files acted on can't drift from what
 // was shown.
 func StartSyncExperiments(ctx context.Context, src, dst Location, experimentName string, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
-	return startCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, expected)
+	return startCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, experimentName, expected)
 }
 
-// StartPullFiles copies an arbitrary sub-path from src into destFolder,
-// preserving srcRelPath's structure under destFolder (e.g. pulling
-// "Luke - Zucchini/2026-06-23" into "/Downloads/foo" lands at
-// "/Downloads/foo/Luke - Zucchini/2026-06-23/..."). destFolder is a raw
-// local path, never a saved Location.
-func StartPullFiles(ctx context.Context, src Location, srcRelPath string, destFolder string, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
-	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, expected)
+// StartPullFiles copies an arbitrary sub-path from src into destFolder. When
+// fullIdent is true, srcRelPath's structure is preserved under destFolder
+// (e.g. pulling "Luke - Zucchini/2026-06-23" into "/Downloads/foo" lands at
+// "/Downloads/foo/Luke - Zucchini/2026-06-23/..."); when false, the copy is
+// flattened to just the path beneath srcRelPath (lands directly under
+// "/Downloads/foo/..."). destFolder is a raw local path, never a saved
+// Location.
+func StartPullFiles(ctx context.Context, src Location, srcRelPath string, destFolder string, fullIdent bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+	dstRelPath := ""
+	if fullIdent {
+		dstRelPath = srcRelPath
+	}
+	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, dstRelPath, expected)
 }
 
 // filesFromFilter builds an rclone filter that restricts the copy to
@@ -169,7 +175,7 @@ func copyDirWithRetry(ctx context.Context, fdst, fsrc fs.Fs, onRetry func(attemp
 // file list is used to build a files-from filter so rclone copies only
 // those files without re-scanning source or destination. This turns the
 // scan→copy round-trip from O(2×listing) into O(listing + copies).
-func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath string, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, dstRelPath string, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	ctx, cancel := context.WithCancel(parent)
 	progress := make(chan ProgressSnapshot, 1)
 
@@ -203,12 +209,12 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, relPath strin
 	go func() {
 		defer close(progress)
 
-		fsrc, err := cache.Get(ctx, joinSpec(srcRoot, relPath))
+		fsrc, err := cache.Get(ctx, joinSpec(srcRoot, srcRelPath))
 		if err != nil {
 			progress <- ProgressSnapshot{Status: JobError, Err: err, FilesTotal: expected.CopyCount, BytesTotal: expected.TotalBytes}
 			return
 		}
-		fdst, err := cache.Get(ctx, joinSpec(dstRoot, relPath))
+		fdst, err := cache.Get(ctx, joinSpec(dstRoot, dstRelPath))
 		if err != nil {
 			progress <- ProgressSnapshot{Status: JobError, Err: err, FilesTotal: expected.CopyCount, BytesTotal: expected.TotalBytes}
 			return

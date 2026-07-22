@@ -145,10 +145,13 @@ func listSource(ctx context.Context, srcRoot, relPath string, fset FilterSetting
 
 // ScanPullFilesWithProgress scans an arbitrary sub-path (any depth: a
 // whole experiment, one deployment date, one recorder directory, even a
-// single file) from src into destFolder, preserving srcRelPath's structure
-// under destFolder rather than flattening. destFolder is a raw local path
-// (from an OS folder picker), never a saved Location.
-func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+// single file) from src into destFolder. When fullIdent is true, srcRelPath's
+// structure is preserved under destFolder (e.g. scope "foo/bar" lands at
+// destFolder/foo/bar/...); when false, files land directly under destFolder
+// using only the path beneath srcRelPath (destFolder/...), i.e. flattened.
+// destFolder is a raw local path (from an OS folder picker), never a saved
+// Location.
+func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fullIdent bool, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	label := srcRelPath
 	if label == "" {
 		label = "experiments/"
@@ -157,7 +160,11 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 	if err != nil {
 		return ScanResult{}, err
 	}
-	return scanAgainstDest(ctx, listing, destFolder, srcRelPath, label, progress)
+	dstRelPath := ""
+	if fullIdent {
+		dstRelPath = srcRelPath
+	}
+	return scanAgainstDest(ctx, listing, destFolder, dstRelPath, label, progress)
 }
 
 // scanTracker accumulates the per-entry and per-directory bookkeeping every

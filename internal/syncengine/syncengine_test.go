@@ -191,7 +191,7 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 	fset := DefaultFilterSettings()
 	relPath := "Luke - Zucchini/2026-06-23"
 
-	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, destFolder, fset, nil)
+	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, destFolder, true, fset, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 		t.Fatalf("scan.CopyCount = %d, want 3", scan.CopyCount)
 	}
 
-	_, progress := StartPullFiles(ctx, src, relPath, destFolder, scan)
+	_, progress := StartPullFiles(ctx, src, relPath, destFolder, true, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -209,6 +209,39 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 	// <destFolder>/260623_0900.mp3.
 	assertFileExists(t, filepath.Join(destFolder, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0900.mp3"))
 	assertFileExists(t, filepath.Join(destFolder, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.mp3"))
+}
+
+// TestPullFilesFlattensSubPathWhenFullIdentOff mirrors
+// TestPullFilesPreservesSubPath but with fullIdent off: files must land
+// directly under destFolder using only the path beneath the chosen scope,
+// not destFolder/<scope>/....
+func TestPullFilesFlattensSubPathWhenFullIdentOff(t *testing.T) {
+	srcRoot := t.TempDir()
+	destFolder := filepath.Join(t.TempDir(), "foo") // e.g. "/Downloads/foo"
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src := localLoc(srcRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+	relPath := "Luke - Zucchini/2026-06-23"
+
+	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, destFolder, false, fset, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.CopyCount != 3 {
+		t.Fatalf("scan.CopyCount = %d, want 3", scan.CopyCount)
+	}
+
+	_, progress := StartPullFiles(ctx, src, relPath, destFolder, false, scan)
+	final := drain(t, progress)
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+
+	// Must land at <destFolder>/RecorderA/..., not
+	// <destFolder>/Luke - Zucchini/2026-06-23/RecorderA/....
+	assertFileExists(t, filepath.Join(destFolder, "RecorderA", "260623_0900.mp3"))
+	assertFileExists(t, filepath.Join(destFolder, "RecorderA", "260623_0905.mp3"))
 }
 
 // TestCopyPreserving_NeverDeletesDestinationOnlyFiles is the single most

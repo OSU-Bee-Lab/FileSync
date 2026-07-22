@@ -30,6 +30,9 @@ func showPullFiles(s *state) {
 	destLabel := widget.NewLabel("No destination chosen")
 	var destFolder string
 
+	fullIdentCheck := widget.NewCheck("Use full path (keep source folders under destination)", nil)
+	fullIdentCheck.SetChecked(true)
+
 	scanBtn := widget.NewButton("Scan", nil)
 	scanBtn.Importance = widget.HighImportance
 	scanBtn.Disable()
@@ -117,6 +120,7 @@ func showPullFiles(s *state) {
 		chosenRelPath := browser.RelPath()
 		fset := s.cfg.DefaultFilter
 		dest := destFolder
+		fullIdent := fullIdentCheck.Checked
 
 		label := "experiments/" + chosenRelPath
 		if chosenRelPath == "" {
@@ -131,10 +135,10 @@ func showPullFiles(s *state) {
 				Label: label,
 				Locs:  []syncengine.Location{src},
 				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fset, progress)
+					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fullIdent, fset, progress)
 				},
 				Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-					return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, result)
+					return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, fullIdent, result)
 				},
 			}}
 			showSyncFlow(s, tasks, func() { showPullFiles(s) })
@@ -151,6 +155,7 @@ func showPullFiles(s *state) {
 			widget.NewSeparator(),
 			scopeLabel,
 			container.NewHBox(chooseDestBtn, destLabel),
+			fullIdentCheck,
 			container.NewHBox(scanBtn, backBtn),
 		),
 		nil, nil,
