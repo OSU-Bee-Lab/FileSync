@@ -299,7 +299,7 @@ func showSyncRecorders(s *state) {
 	columns := container.NewHSplit(optionsCol, destCol)
 	columns.SetOffset(0.35)
 
-	top := widget.NewLabelWithStyle("Sync Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	top := widget.NewLabelWithStyle("Offload Recorders", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	bottom := container.NewVBox(
 		syncingToLabel,
 		widget.NewSeparator(),

@@ -226,11 +226,11 @@ func showHome(s *state) {
 		container.NewCenter(titleText),
 	)
 
-	syncExperimentsBtn := widget.NewButton("Sync Experiments", func() { showSyncExperiments(s) })
+	syncExperimentsBtn := widget.NewButton("Sync Locations", func() { showSyncExperiments(s) })
 	syncExperimentsBtn.Importance = widget.HighImportance
 	pullFilesBtn := widget.NewButton("Pull Files", func() { showPullFiles(s) })
 	manageFilesBtn := widget.NewButton("Manage Files", func() { showManageFiles(s) })
-	syncRecordersBtn := widget.NewButton("Sync Recorders", func() { showSyncRecorders(s) })
+	syncRecordersBtn := widget.NewButton("Offload Recorders", func() { showSyncRecorders(s) })
 	syncRecordersBtn.Importance = widget.HighImportance
 	locationsBtn := widget.NewButton("Edit Sync Locations", func() { showLocations(s) })
 	settingsBtn := widget.NewButton("Settings", func() { showSettings(s) })

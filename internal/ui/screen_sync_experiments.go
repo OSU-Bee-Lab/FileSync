@@ -256,7 +256,7 @@ func showSyncExperiments(s *state) {
 
 	content := container.NewBorder(
 		container.NewVBox(
-			widget.NewLabelWithStyle("Sync Experiments", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewLabel("Pick two or more locations to sync."),
 			container.NewPadded(locGroup.CanvasObject()),
 			loading.CanvasObject(),
