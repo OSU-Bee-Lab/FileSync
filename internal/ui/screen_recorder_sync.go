@@ -592,17 +592,23 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 				others = append(others, o.start)
 			}
 		}
-		check := recorder.CheckRecorderTimestamp(e.row.sourceFiles, e.parser, consensusYear, consensusMonth, consensusDay, others, sc.params.timestampTolerance)
-		if check == nil {
+		parser, sourceFiles, destDirs := e.parser, e.row.sourceFiles, e.row.destDirs
+		// recheck re-runs this recorder against the same consensus and peer
+		// start times at whatever tolerance the review screen's slider is on;
+		// the initial check is just recheck at the starting tolerance.
+		recheck := func(tol time.Duration) recorder.TimestampIssue {
+			return *recorder.CheckRecorderTimestamp(sourceFiles, parser, consensusYear, consensusMonth, consensusDay, others, tol)
+		}
+		if recorder.CheckRecorderTimestamp(sourceFiles, parser, consensusYear, consensusMonth, consensusDay, others, sc.params.timestampTolerance) == nil {
 			continue
 		}
-		parser, sourceFiles, destDirs := e.parser, e.row.sourceFiles, e.row.destDirs
 		destDirsByID[e.row.id] = destDirs
 		reviewRows = append(reviewRows, timestampReviewRow{
 			recorderID:  e.row.id,
 			parser:      parser,
 			sourceFiles: sourceFiles,
-			check:       *check,
+			check:       recheck(sc.params.timestampTolerance),
+			recheck:     recheck,
 			apply: func(correct func(time.Time) time.Time) error {
 				return recorder.ApplyTimestampFix(destDirs, parser, sourceFiles, correct)
 			},
@@ -636,7 +642,7 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 				reuploadCorrectedFiles(sc, row, destDirsByID[row.recorderID], delta)
 			}
 		},
-	}, reviewRows)
+	}, reviewRows, sc.params.timestampTolerance)
 }
 
 // onVolumeAttached handles a newly attached volume: detects its driver and

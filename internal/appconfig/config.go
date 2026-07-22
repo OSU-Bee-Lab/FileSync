@@ -63,6 +63,14 @@ type Config struct {
 	ManageFilesLocationIDs []string `json:"manageFilesLocationIds,omitempty"`
 }
 
+// DefaultTimestampToleranceMinutes is the fallback timestamp tolerance used
+// both for a fresh config and to backfill any config saved before the field
+// existed (see Load) - a config missing the key would otherwise load as 0,
+// which flags every recorder whose first-file time-of-day doesn't exactly
+// tie another's. The recorder-settings and review screens reuse this rather
+// than repeating the literal.
+const DefaultTimestampToleranceMinutes = 60
+
 // Default returns the config used the first time FileSync runs on a
 // machine, before any Locations have been added.
 func Default() Config {
@@ -71,7 +79,7 @@ func Default() Config {
 		RecorderSettings: RecorderSettings{
 			AutoDeleteAfterVerify:     true,
 			BatchUpload:               true,
-			TimestampToleranceMinutes: 60,
+			TimestampToleranceMinutes: DefaultTimestampToleranceMinutes,
 		},
 		RecorderInactivityTimeoutMinutes: 5,
 		Checkers:                         syncengine.DefaultCheckers,
@@ -117,6 +125,14 @@ func Load() (Config, error) {
 	}
 	if cfg.Transfers <= 0 {
 		cfg.Transfers = syncengine.DefaultTransfers
+	}
+	// Configs saved before TimestampToleranceMinutes existed hold 0 (the key
+	// is absent), which the timestamp check reads as "zero tolerance" and
+	// uses to flag nearly every recorder. Default() only applies on a truly
+	// first run, so restore the intended default here for existing configs
+	// too - the same backfill Checkers/Transfers get above.
+	if cfg.RecorderSettings.TimestampToleranceMinutes <= 0 {
+		cfg.RecorderSettings.TimestampToleranceMinutes = DefaultTimestampToleranceMinutes
 	}
 	return cfg, nil
 }

@@ -31,22 +31,48 @@ type timestampReviewRow struct {
 	sourceFiles []recorder.SourceFile
 	check       recorder.TimestampIssue
 	apply       func(correct func(time.Time) time.Time) error
+	// recheck re-runs this recorder's timestamp check at a new tolerance,
+	// leaving the (tolerance-independent) consensus date and this recorder's
+	// files untouched. It lets the review screen's tolerance slider re-judge
+	// every recorder live without either caller having to rebuild the screen.
+	recheck func(tolerance time.Duration) recorder.TimestampIssue
 }
 
-// timestampIssueLabel describes a check's Kind in plain language for the
-// review screen.
-func timestampIssueLabel(kind recorder.TimestampIssueKind) string {
-	switch kind {
+// timestampIssueDetail describes a check in plain language, stating the
+// concrete finding - which date field is off and what the others agree on, or
+// how many minutes the first file's time-of-day sits from the nearest
+// recorder against the current tolerance - rather than a vague "doesn't
+// match". tolerance is the value the check was run at, echoed so the reader
+// can see why a given gap did or didn't trip it (and re-judge as they slide
+// it on the review screen).
+func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration) string {
+	loc := check.Recorded.Location()
+	consensus := time.Date(check.ConsensusYear, check.ConsensusMonth, check.ConsensusDay, 0, 0, 0, 0, loc)
+	recDate := check.Recorded.Format("Jan 2, 2006")
+	conDate := consensus.Format("Jan 2, 2006")
+	recTime := check.Recorded.Format("3:04 PM")
+	tolMin := int(tolerance / time.Minute)
+
+	switch check.Kind {
 	case recorder.IssueWrongYear:
-		return "looks off by a year"
+		return fmt.Sprintf("first file dated %s — the other recorders agree on %s (year is off)", recDate, conDate)
 	case recorder.IssueWrongMonth:
-		return "looks off by a month"
+		return fmt.Sprintf("first file dated %s — the other recorders agree on %s (month is off)", recDate, conDate)
 	case recorder.IssueWrongDay:
-		return "looks off by a day"
+		return fmt.Sprintf("first file dated %s — the other recorders agree on %s (day is off)", recDate, conDate)
 	case recorder.IssueAMPM:
-		return "looks like an AM/PM mismatch"
+		return fmt.Sprintf("first file at %s is about 12 h from the nearest recorder — looks like an AM/PM mix-up", recTime)
 	case recorder.IssueOther:
-		return "doesn't match the other recorders - check manually"
+		sameDate := check.Recorded.Year() == check.ConsensusYear &&
+			check.Recorded.Month() == check.ConsensusMonth &&
+			check.Recorded.Day() == check.ConsensusDay
+		if !sameDate {
+			return fmt.Sprintf("first file dated %s — the other recorders agree on %s", recDate, conDate)
+		}
+		if check.MinutesFromNearest >= 0 {
+			return fmt.Sprintf("first file at %s is %d min from the nearest recorder (tolerance %d min)", recTime, check.MinutesFromNearest, tolMin)
+		}
+		return "doesn't line up with the other recorders — check manually"
 	default:
 		return "looks correct"
 	}
@@ -197,6 +223,9 @@ type timestampReviewScreen struct {
 	host     timestampReviewHost
 	entries  []*timestampReviewEntry
 	selected int
+	// tolerance is the live match tolerance the tolerance slider drives; it
+	// starts at the caller-supplied value and every recheck runs against it.
+	tolerance time.Duration
 
 	cards      []*canvas.Rectangle
 	cardLabels []*widget.Label
@@ -210,14 +239,14 @@ type timestampReviewScreen struct {
 // uniform offset from that recorder's own recorded time, and applied to
 // every file from it (see recorder.ApplyTimestampFix) - then calls
 // host.onContinue.
-func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow) {
+func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, tolerance time.Duration) {
 	sorted := make([]timestampReviewRow, len(rows))
 	copy(sorted, rows)
 	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].check.Suspicious && !sorted[j].check.Suspicious
 	})
 
-	tr := &timestampReviewScreen{host: host}
+	tr := &timestampReviewScreen{host: host, tolerance: tolerance}
 	for _, r := range sorted {
 		tr.entries = append(tr.entries, &timestampReviewEntry{
 			row:    r,
@@ -231,7 +260,8 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow) {
 		i := i
 		bg := canvas.NewRectangle(timestampCardColorFor(e))
 		idLabel := widget.NewLabelWithStyle(e.row.recorderID, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		statusLabel := widget.NewLabel(timestampIssueLabel(e.row.check.Kind))
+		statusLabel := widget.NewLabel(timestampIssueDetail(e.row.check, tr.tolerance))
+		statusLabel.Wrapping = fyne.TextWrapWord
 		cell := container.NewStack(bg, container.NewPadded(container.NewVBox(idLabel, statusLabel)))
 		card := newTappableCard(cell, func() { tr.selectRow(i) })
 		leftBox.Add(card)
@@ -266,13 +296,15 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow) {
 	sub := widget.NewLabel("Each recorder's clock is assumed wrong (or right) for its entire session - adjusting one applies the same correction to every file from that recorder.")
 	sub.Wrapping = fyne.TextWrapWord
 
+	toleranceRow := tr.buildToleranceRow()
+
 	left := container.NewBorder(sectionHeader("Recorders"), nil, nil, nil, container.NewVScroll(leftBox))
 	right := container.NewBorder(nil, nil, nil, nil, tr.detailBox)
 	split := container.NewHSplit(left, right)
 	split.SetOffset(0.3)
 
 	content := container.NewBorder(
-		container.NewVBox(header, sub, widget.NewSeparator()),
+		container.NewVBox(header, sub, toleranceRow, widget.NewSeparator()),
 		container.NewHBox(continueBtn, exitBtn),
 		nil, nil,
 		split,
@@ -280,6 +312,63 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow) {
 	host.s.setContent(container.NewPadded(content))
 
 	tr.selectRow(0)
+}
+
+// timestampToleranceSliderMax bounds the review screen's tolerance slider. A
+// recorder's time-of-day only has to land within tolerance of the nearest
+// other recorder, and the AM/PM heuristic already covers the ~12 h case, so
+// anything past a few hours would just wave every recorder through - 180 min
+// is a generous ceiling that still leaves the slider's useful range legible.
+const timestampToleranceSliderMax = 180
+
+// buildToleranceRow builds the live "match tolerance" control: a slider (with
+// a numeric read-out) that re-judges every recorder as it moves, so the
+// researcher can see directly how tight or loose a tolerance flags. The
+// chosen value is persisted so it carries into the next run and the offload
+// path (both read RecorderSettings.TimestampToleranceMinutes).
+func (tr *timestampReviewScreen) buildToleranceRow() fyne.CanvasObject {
+	valueLbl := widget.NewLabel("")
+	setValueLabel := func(min int) {
+		valueLbl.SetText(fmt.Sprintf("%d min", min))
+	}
+
+	slider := widget.NewSlider(0, timestampToleranceSliderMax)
+	slider.Step = 1
+	slider.SetValue(float64(tr.tolerance / time.Minute))
+	setValueLabel(int(tr.tolerance / time.Minute))
+	slider.OnChanged = func(v float64) {
+		min := int(v)
+		setValueLabel(min)
+		tr.applyTolerance(min)
+	}
+
+	label := widget.NewLabel("Match tolerance")
+	return container.NewBorder(nil, nil, label, valueLbl, slider)
+}
+
+// applyTolerance re-runs every recorder's check at the given tolerance
+// (minutes), refreshes the cards and the open detail pane to match, and
+// persists the value. Cards keep their original position rather than
+// re-sorting, so a recorder the reader is watching doesn't jump as its
+// verdict flips. A recorder the user has already given a manual start time
+// (adjust) keeps that text - only untouched rows adopt the fresh suggestion.
+func (tr *timestampReviewScreen) applyTolerance(minutes int) {
+	tr.tolerance = time.Duration(minutes) * time.Minute
+	tr.host.s.cfg.RecorderSettings.TimestampToleranceMinutes = minutes
+	tr.host.s.saveConfig()
+
+	for i, e := range tr.entries {
+		if e.row.recheck != nil {
+			e.row.check = e.row.recheck(tr.tolerance)
+		}
+		if !e.adjust {
+			e.text = e.row.check.Suggested.Format("2006-01-02 15:04")
+		}
+		tr.cards[i].FillColor = timestampCardColorFor(e)
+		tr.cards[i].Refresh()
+		tr.cardLabels[i].SetText(timestampIssueDetail(e.row.check, tr.tolerance))
+	}
+	tr.rebuildDetail()
 }
 
 // selectRow switches the detail pane to entries[i] and refreshes every left
@@ -306,8 +395,9 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	e := tr.entries[tr.selected]
 
 	header := widget.NewLabelWithStyle(
-		fmt.Sprintf("%s — %s", e.row.recorderID, timestampIssueLabel(e.row.check.Kind)),
+		fmt.Sprintf("%s — %s", e.row.recorderID, timestampIssueDetail(e.row.check, tr.tolerance)),
 		fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	header.Wrapping = fyne.TextWrapWord
 
 	entry := widget.NewEntry()
 	entry.SetText(e.text)

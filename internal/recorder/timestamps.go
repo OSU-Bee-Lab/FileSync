@@ -72,6 +72,20 @@ type TimestampIssue struct {
 	// IssueAMPM, or just Recorded unchanged for IssueNone/IssueOther (no
 	// confident guess - left for the user to type their own).
 	Suggested time.Time
+	// ConsensusYear/Month/Day is the session-wide agreed recording date this
+	// recorder was checked against (see ConsensusDate), carried through so a
+	// caller can spell out the actual mismatch ("first file is Jul 1, others
+	// agree on Jun 30") instead of a vague "doesn't match".
+	ConsensusYear  int
+	ConsensusMonth time.Month
+	ConsensusDay   int
+	// MinutesFromNearest is |this recorder's earliest-file time-of-day − the
+	// closest OTHER recorder's|, in minutes, for the verdicts that hinge on
+	// it (a passing time-of-day check, IssueAMPM, and the time-of-day flavor
+	// of IssueOther). It is -1 when no such comparison was made: a date
+	// mismatch short-circuits before it, and a lone recorder (no otherTimes)
+	// has nothing to compare against.
+	MinutesFromNearest int
 }
 
 // ConsensusDate returns the most common (year, month, day) among starts -
@@ -149,6 +163,23 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 		return nil
 	}
 
+	// issue seeds every return with the identifying fields and the consensus
+	// date the caller needs to describe a mismatch; MinutesFromNearest starts
+	// at -1 and is only set once the time-of-day comparison actually runs.
+	issue := func(kind TimestampIssueKind, suspicious bool, suggested time.Time) *TimestampIssue {
+		return &TimestampIssue{
+			DestRelPath:        earliestRel,
+			Recorded:           earliest,
+			Suspicious:         suspicious,
+			Kind:               kind,
+			Suggested:          suggested,
+			ConsensusYear:      consensusYear,
+			ConsensusMonth:     consensusMonth,
+			ConsensusDay:       consensusDay,
+			MinutesFromNearest: -1,
+		}
+	}
+
 	sameDate := earliest.Year() == consensusYear && earliest.Month() == consensusMonth && earliest.Day() == consensusDay
 	if !sameDate {
 		diffFields := 0
@@ -165,19 +196,19 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 		corrected := time.Date(consensusYear, consensusMonth, consensusDay, earliest.Hour(), earliest.Minute(), earliest.Second(), 0, earliest.Location())
 		switch {
 		case diffFields == 1 && earliest.Year() != consensusYear:
-			return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suspicious: true, Kind: IssueWrongYear, Suggested: corrected}
+			return issue(IssueWrongYear, true, corrected)
 		case diffFields == 1 && earliest.Month() != consensusMonth:
-			return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suspicious: true, Kind: IssueWrongMonth, Suggested: corrected}
+			return issue(IssueWrongMonth, true, corrected)
 		case diffFields == 1 && earliest.Day() != consensusDay:
-			return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suspicious: true, Kind: IssueWrongDay, Suggested: corrected}
+			return issue(IssueWrongDay, true, corrected)
 		default:
-			return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suspicious: true, Kind: IssueOther, Suggested: earliest}
+			return issue(IssueOther, true, earliest)
 		}
 	}
 
 	if len(otherTimes) == 0 {
 		// Nothing to judge time-of-day against.
-		return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suggested: earliest}
+		return issue(IssueNone, false, earliest)
 	}
 
 	// Dates agree; find the closest other recorder's start time-of-day to
@@ -196,8 +227,13 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 			nearest = ot
 		}
 	}
+	withNearest := func(kind TimestampIssueKind, suspicious bool, suggested time.Time) *TimestampIssue {
+		r := issue(kind, suspicious, suggested)
+		r.MinutesFromNearest = minDiff
+		return r
+	}
 	if time.Duration(minDiff)*time.Minute <= tolerance {
-		return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suggested: earliest}
+		return withNearest(IssueNone, false, earliest)
 	}
 
 	flipped := earliest.Add(12 * time.Hour)
@@ -206,10 +242,10 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 		flippedDiff = -flippedDiff
 	}
 	if time.Duration(flippedDiff)*time.Minute <= tolerance {
-		return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suspicious: true, Kind: IssueAMPM, Suggested: flipped}
+		return withNearest(IssueAMPM, true, flipped)
 	}
 
-	return &TimestampIssue{DestRelPath: earliestRel, Recorded: earliest, Suspicious: true, Kind: IssueOther, Suggested: earliest}
+	return withNearest(IssueOther, true, earliest)
 }
 
 // ApplyTimestampFix applies correct to every file in files, not just the

@@ -625,16 +625,22 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 				others = append(others, o.start)
 			}
 		}
-		check := recorder.CheckRecorderTimestamp(e.group.Files, e.group.Parser, consensusYear, consensusMonth, consensusDay, others, tolerance)
-		if check == nil {
+		group := e.group
+		// recheck re-runs this recorder against the same consensus and peer
+		// start times at whatever tolerance the review screen's slider is on;
+		// the initial check is just recheck at the starting tolerance.
+		recheck := func(tol time.Duration) recorder.TimestampIssue {
+			return *recorder.CheckRecorderTimestamp(group.Files, group.Parser, consensusYear, consensusMonth, consensusDay, others, tol)
+		}
+		if recorder.CheckRecorderTimestamp(group.Files, group.Parser, consensusYear, consensusMonth, consensusDay, others, tolerance) == nil {
 			continue
 		}
-		group := e.group
 		reviewRows = append(reviewRows, timestampReviewRow{
 			recorderID:  group.RecorderID,
 			parser:      group.Parser,
 			sourceFiles: group.Files,
-			check:       *check,
+			check:       recheck(tolerance),
+			recheck:     recheck,
 			apply: func(correct func(time.Time) time.Time) error {
 				renames := make(map[string]string, len(group.Files))
 				for _, f := range group.Files {
@@ -673,7 +679,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 		exitLabel:     "Cancel",
 		exitWarning:   "Cancelling now will not apply any timestamp corrections - every recorder's files keep their original names.",
 		onExit:        func() { showManageFiles(s) },
-	}, reviewRows)
+	}, reviewRows, tolerance)
 }
 
 type manageFilesOp int

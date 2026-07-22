@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/OSU-Bee-Lab/filesync/internal/appconfig"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
@@ -186,7 +187,7 @@ func showSyncRecorders(s *state) {
 
 	toleranceMinutes := s.cfg.RecorderSettings.TimestampToleranceMinutes
 	if toleranceMinutes <= 0 {
-		toleranceMinutes = 60
+		toleranceMinutes = appconfig.DefaultTimestampToleranceMinutes
 	}
 	toleranceEntry := widget.NewEntry()
 	toleranceEntry.SetText(strconv.Itoa(toleranceMinutes))
