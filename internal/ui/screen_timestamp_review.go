@@ -287,6 +287,11 @@ type timestampReviewScreen struct {
 	cards      []*canvas.Rectangle
 	cardLabels []*widget.Label
 	detailBox  *fyne.Container
+	// summaryLbl states, at a glance, how many recorders look off - so an
+	// all-clear check still lands on this screen with an explicit "everything
+	// lines up" rather than a wall of gray rows the user has to interpret. It
+	// refreshes live as the tolerance slider changes what's flagged.
+	summaryLbl *widget.Label
 }
 
 // showTimestampReview shows the full-screen review step between a caller
@@ -353,6 +358,10 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	sub := widget.NewLabel("Each recorder's clock is assumed wrong (or right) for its entire session - adjusting one applies the same correction to every file from that recorder.")
 	sub.Wrapping = fyne.TextWrapWord
 
+	tr.summaryLbl = widget.NewLabelWithStyle("", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	tr.summaryLbl.Wrapping = fyne.TextWrapWord
+	tr.refreshSummary()
+
 	toleranceRow := tr.buildToleranceRow()
 
 	left := container.NewBorder(sectionHeader("Recorders"), nil, nil, nil, container.NewVScroll(leftBox))
@@ -361,7 +370,7 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	split.SetOffset(0.3)
 
 	content := container.NewBorder(
-		container.NewVBox(header, sub, toleranceRow, widget.NewSeparator()),
+		container.NewVBox(header, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
 		container.NewHBox(continueBtn, exitBtn),
 		nil, nil,
 		split,
@@ -425,7 +434,30 @@ func (tr *timestampReviewScreen) applyTolerance(minutes int) {
 		tr.cards[i].Refresh()
 		tr.cardLabels[i].SetText(timestampIssueDetail(e.row.check, tr.tolerance))
 	}
+	tr.refreshSummary()
 	tr.rebuildDetail()
+}
+
+// refreshSummary restates how many recorders currently look off. An all-clear
+// check gets an explicit confirmation (so the screen still shows, and reads as
+// "nothing to do" rather than an unexplained list); otherwise it names the
+// count that need a look.
+func (tr *timestampReviewScreen) refreshSummary() {
+	if tr.summaryLbl == nil {
+		return
+	}
+	flagged := 0
+	for _, e := range tr.entries {
+		if e.row.check.Suspicious {
+			flagged++
+		}
+	}
+	total := len(tr.entries)
+	if flagged == 0 {
+		tr.summaryLbl.SetText(fmt.Sprintf("All %d recorder start times line up — nothing needs correcting. Continue, or set a new start time on any recorder to override.", total))
+		return
+	}
+	tr.summaryLbl.SetText(fmt.Sprintf("%d of %d recorders look off (highlighted) — review each and set a new start time where needed.", flagged, total))
 }
 
 // selectRow switches the detail pane to entries[i] and refreshes every left
