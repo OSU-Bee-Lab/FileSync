@@ -248,9 +248,11 @@ func showHome(s *state) {
 		widget.NewSeparator(),
 		syncRecordersBtn,
 		syncExperimentsBtn,
-		pullFilesBtn,
 		manageFilesBtn,
 	)
+	if devMode() {
+		body.Add(pullFilesBtn)
+	}
 	body.Add(locationsBtn)
 	body.Add(settingsBtn)
 	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))

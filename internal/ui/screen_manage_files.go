@@ -90,14 +90,13 @@ func (e *focusEntry) FocusLost() {
 	}
 }
 
-// showManageFiles is the dev-gated Manage Files flow: direct rename,
-// move/merge, and delete operations against experiment data on one or more
-// selected Locations. See CLAUDE.md's Manage Files exception — this is a
-// deliberate, user-driven carve-out from the app's otherwise copy-only
-// sync engine, gated the same way as Pull Files (devMode) and requiring an
-// explicit preview/collision-resolution/confirm sequence before anything
-// is applied. Preview is not optional: pressing "Preview" always lands on
-// showManageFilesPreview before anything can be applied, no matter which
+// showManageFiles is the Manage Files flow: direct rename, move/merge, and
+// delete operations against experiment data on one or more selected
+// Locations. See CLAUDE.md's Manage Files exception — this is a deliberate,
+// user-driven carve-out from the app's otherwise copy-only sync engine,
+// requiring an explicit preview/collision-resolution/confirm sequence
+// before anything is applied. Preview is not optional: pressing "Preview"
+// always lands on showManageFilesPreview before anything can be applied, no matter which
 // operation or how simple it looks.
 func showManageFiles(s *state) {
 	names := locationNames(s.cfg.Locations)
