@@ -253,7 +253,9 @@ func (r *nwayResolver) setChoice(key nwayConflictKey, choice nwayChoice) {
 func (r *nwayResolver) rowSummary(expName, relPath, reason string) string {
 	choice := r.choices[nwayConflictKey{expName: expName, relPath: relPath}]
 	if !choice.decided() {
-		return fmt.Sprintf("⚠ conflict — %s", reason)
+		// The reason is shown in the row's warning-icon tooltip, not inline,
+		// so this stays short enough never to overrun the file name.
+		return "⚠ needs resolution"
 	}
 	switch choice.kind {
 	case nwayChoiceKeepOne:

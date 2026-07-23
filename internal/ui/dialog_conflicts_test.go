@@ -223,7 +223,10 @@ func TestNWayResolver_RowSummary(t *testing.T) {
 	r, locs := resolverFixture()
 	key := nwayConflictKey{expName: "exp-a", relPath: "r/three-way.mp3"}
 
-	if got := r.rowSummary("exp-a", "r/three-way.mp3", "different size and content"); got != "⚠ conflict — different size and content" {
+	// Undecided stays short and reason-free: the reason is surfaced in the
+	// row's warning-icon tooltip instead, so a long reason can never overrun
+	// the file name in the row.
+	if got := r.rowSummary("exp-a", "r/three-way.mp3", "different size and content"); got != "⚠ needs resolution" {
 		t.Errorf("undecided summary = %q", got)
 	}
 	r.choices[key] = nwayChoice{kind: nwayChoiceKeepOne, winner: locs[0]}

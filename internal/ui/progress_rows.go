@@ -39,7 +39,7 @@ func (ps *progressScreen) makeBarList(rows *[]barRow, isSelected func(barRow) bo
 			if isSelected != nil {
 				sel = isSelected(row)
 			}
-			updateBackingBarItem(obj, row.label, row.summary, row.progress, row.err, row.hasError, row.isFolder, sel, ps.s.win)
+			updateBackingBarItem(obj, row.label, row.summary, row.progress, row.err, row.hasError, row.isFolder, sel, ps.s.win, row.conflictReason)
 			setItemFade(obj, row.fade)
 			if row.gray {
 				tintItemBg(obj, color.NRGBA{R: 243, G: 244, B: 246, A: 255})
@@ -110,15 +110,15 @@ func (ps *progressScreen) tempEntriesForFolder(exp *expUIState) []syncengine.Sca
 	return filtered
 }
 
-// conflictRowSummary captions a conflict file row: the plain scan reason by
-// default, or the richer N-way resolution summary (and its clickable
-// relPath) when this session is an N-way scan.
-func (ps *progressScreen) conflictRowSummary(exp *expUIState, f *fileUIState) (summary, relPath string) {
-	summary = fmt.Sprintf("⚠ conflict — %s", f.conflictReason)
+// conflictRowSummary captions a conflict file row: a short status for the
+// right-aligned summary (the resolution state in an N-way session, or just
+// "conflict"), plus the full reason (shown in the row's warning-icon tooltip,
+// not inline, so it can't overrun the file name) and the clickable relPath.
+func (ps *progressScreen) conflictRowSummary(exp *expUIState, f *fileUIState) (summary, reason, relPath string) {
 	if ps.extras.nway == nil {
-		return summary, ""
+		return "⚠ conflict", f.conflictReason, ""
 	}
-	return ps.extras.nway.rowSummary(exp.label, f.relPath, f.conflictReason), f.relPath
+	return ps.extras.nway.rowSummary(exp.label, f.relPath, f.conflictReason), f.conflictReason, f.relPath
 }
 
 // computeFileRows splits the selected folder's files into to-sync and
@@ -153,11 +153,12 @@ func (ps *progressScreen) computeFileRows() (unsynced, synced []barRow) {
 				continue
 			}
 			if f.action == syncengine.ActionConflict {
-				summary, relPath := ps.conflictRowSummary(exp, f)
+				summary, reason, relPath := ps.conflictRowSummary(exp, f)
 				unsynced = append(unsynced, barRow{
 					label:           f.name,
 					summary:         summary,
 					conflictRelPath: relPath,
+					conflictReason:  reason,
 				})
 				continue
 			}
@@ -179,7 +180,7 @@ func (ps *progressScreen) computeFileRows() (unsynced, synced []barRow) {
 			case syncengine.ActionSkipIdentical:
 				synced = append(synced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size), gray: true})
 			case syncengine.ActionConflict:
-				unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: fmt.Sprintf("⚠ conflict — %s", e.ConflictReason)})
+				unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: "⚠ conflict", conflictReason: e.ConflictReason})
 			default:
 				unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size)})
 			}

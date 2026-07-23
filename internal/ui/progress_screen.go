@@ -237,7 +237,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 			}
 			summary := fmt.Sprintf("%d%%", int(prog*100))
 			isSelected := ps.selectedExpIdx == int(id)
-			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win)
+			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win, "")
 		},
 	)
 

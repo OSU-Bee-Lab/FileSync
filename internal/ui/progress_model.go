@@ -118,6 +118,10 @@ type barRow struct {
 	// the user can click to open the N-way resolver at (N-way sessions only,
 	// and only once the owning experiment's scan has completed).
 	conflictRelPath string
+	// conflictReason, when non-empty, marks this as a conflict row: the row
+	// renders with an orange wash and a warning icon whose hover tooltip is
+	// this text (the reason the scan couldn't confidently match the copies).
+	conflictReason string
 }
 
 // isFullySkipped reports whether every file in the folder was already present

@@ -80,7 +80,14 @@ func createBackingBarItem(win fyne.Window) fyne.CanvasObject {
 	errBtn.Importance = widget.DangerImportance
 	errBtn.Hide()
 
-	trailing := container.NewHBox(errBtn, summaryLabel)
+	// warnIcon is hidden by default; updateBackingBarItem shows it on conflict
+	// rows and sets its hover tooltip to the conflict reason (the full detail
+	// is also in the resolver modal), keeping the long reason off the row so it
+	// can't overlap the file name.
+	warnIcon := newHoverIcon(win, theme.WarningIcon())
+	warnIcon.Hide()
+
+	trailing := container.NewHBox(errBtn, warnIcon, summaryLabel)
 	content := container.NewBorder(nil, nil, nil, trailing, nameLabel)
 	paddedContent := container.NewPadded(content)
 
@@ -97,7 +104,7 @@ func createBackingBarItem(win fyne.Window) fyne.CanvasObject {
 	return item
 }
 
-func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, progress float64, itemErr error, hasError bool, isFolder bool, isSelected bool, win fyne.Window) {
+func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, progress float64, itemErr error, hasError bool, isFolder bool, isSelected bool, win fyne.Window, warnTip string) {
 	containerObj := obj.(*fyne.Container)
 	bg := containerObj.Objects[0].(*canvas.Rectangle)
 	fill := containerObj.Objects[1].(*canvas.Rectangle)
@@ -107,7 +114,16 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 	nameLabel := borderContainer.Objects[0].(*hoverLabel)
 	trailing := borderContainer.Objects[1].(*fyne.Container)
 	errBtn := trailing.Objects[0].(*widget.Button)
-	summaryLabel := trailing.Objects[1].(*widget.Label)
+	warnIcon := trailing.Objects[1].(*hoverIcon)
+	summaryLabel := trailing.Objects[2].(*widget.Label)
+
+	if warnTip != "" {
+		warnIcon.setTip(warnTip)
+		warnIcon.Show()
+	} else {
+		warnIcon.reset()
+		warnIcon.Hide()
+	}
 
 	if nameLabel.Text != labelText {
 		// Only reset hover state when the name actually changes - i.e. this
@@ -140,6 +156,11 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 	} else if hasError {
 		bgColor = color.NRGBA{R: 254, G: 243, B: 199, A: 255}
 		fillColor = color.NRGBA{R: 253, G: 186, B: 116, A: 255}
+	} else if warnTip != "" {
+		// Conflict row: orange wash so it stands out in the list; the reason
+		// itself lives in the warning icon's hover tooltip and the resolver.
+		bgColor = color.NRGBA{R: 255, G: 237, B: 213, A: 255}
+		fillColor = color.Transparent
 	} else {
 		bgColor = color.White
 		if progress >= 1.0 {
@@ -183,13 +204,16 @@ func updateDividerItem(obj fyne.CanvasObject, text string) {
 	nameLabel := borderContainer.Objects[0].(*hoverLabel)
 	trailing := borderContainer.Objects[1].(*fyne.Container)
 	errBtn := trailing.Objects[0].(*widget.Button)
-	summaryLabel := trailing.Objects[1].(*widget.Label)
+	warnIcon := trailing.Objects[1].(*hoverIcon)
+	summaryLabel := trailing.Objects[2].(*widget.Label)
 
 	if nameLabel.Text != text {
 		nameLabel.reset()
 	}
 	nameLabel.SetText(text)
 	summaryLabel.SetText("")
+	warnIcon.reset()
+	warnIcon.Hide()
 	errBtn.OnTapped = nil
 	errBtn.Hide()
 

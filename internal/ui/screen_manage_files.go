@@ -869,7 +869,7 @@ func manageBarList(win fyne.Window, rows *[]barRow, tintFor func(barRow) color.C
 			}
 			row := (*rows)[id]
 			sel := isSelected != nil && isSelected(row)
-			updateBackingBarItem(obj, row.label, row.summary, 0, nil, false, row.isFolder, sel, win)
+			updateBackingBarItem(obj, row.label, row.summary, 0, nil, false, row.isFolder, sel, win, "")
 			if tintFor != nil {
 				if c := tintFor(row); c != nil {
 					tintItemBg(obj, c)

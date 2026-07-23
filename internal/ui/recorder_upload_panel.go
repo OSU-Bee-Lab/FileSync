@@ -68,7 +68,7 @@ func newRecorderUploadPanel(win fyne.Window) *recorderUploadPanel {
 				prog = float64(e.bytesDone) / float64(e.bytesTotal)
 			}
 			summary := fmt.Sprintf("%s / %s", humanBytes(e.bytesDone), humanBytes(e.bytesTotal))
-			updateBackingBarItem(obj, e.label(), summary, prog, nil, false, false, false, p.win)
+			updateBackingBarItem(obj, e.label(), summary, prog, nil, false, false, false, p.win, "")
 		},
 	)
 	p.uploadedList = widget.NewList(
@@ -80,7 +80,7 @@ func newRecorderUploadPanel(win fyne.Window) *recorderUploadPanel {
 			if e.err != nil {
 				summary = "Failed"
 			}
-			updateBackingBarItem(obj, e.label(), summary, 1.0, e.err, e.err != nil, false, false, p.win)
+			updateBackingBarItem(obj, e.label(), summary, 1.0, e.err, e.err != nil, false, false, p.win, "")
 		},
 	)
 	return p
