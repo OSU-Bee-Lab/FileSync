@@ -551,14 +551,17 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 	var extras syncFlowExtras
 	if mode == syncengine.NWayQuickScan {
 		extras = syncFlowExtras{
-			// Happy path: once the diff completes cleanly, jump straight into
-			// the forward-leg transfer preview so the user reviews the actual
-			// source → destination split before committing.
-			onScanDone: func() { runOneWayTransfers(s, src, dsts, relPath, results[0], mode) },
+			// Happy path: once the diff completes cleanly, build the forward-leg
+			// transfer plan but stop at "Ready to Sync" (autoSync=false) so the
+			// user reviews the actual source → destination split and presses
+			// Sync before anything copies — same confirmation All-Way's quick
+			// path gets.
+			onScanDone: func() { runOneWayTransfers(s, src, dsts, relPath, results[0], mode, false) },
 			// Fallback: if the scan errored, onScanDone is skipped and this
-			// screen renders normally so the user can see the error — Sync
-			// still needs to work if pressed manually.
-			onNWaySync:   func() { runOneWayTransfers(s, src, dsts, relPath, results[0], mode) },
+			// screen renders normally so the user can see the error — pressing
+			// Sync manually here has already served as the confirmation, so it
+			// starts immediately (autoSync=true).
+			onNWaySync:   func() { runOneWayTransfers(s, src, dsts, relPath, results[0], mode, true) },
 			syncingTitle: syncingTitle,
 			quickScan:    true,
 		}
@@ -567,7 +570,10 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 			resolutions := resolver.buildResolutions()
 			proceed := func() {
 				applyNWayResolutions(s, names, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
-					runOneWayTransfers(s, src, dsts, relPath, resolved[0], mode)
+					// The user already reviewed the scan and resolved every
+					// conflict before pressing Sync, so the transfer starts
+					// immediately (autoSync=true), same as All-Way's full path.
+					runOneWayTransfers(s, src, dsts, relPath, resolved[0], mode, true)
 				})
 			}
 			if resolver.hasDeletes() {
@@ -594,7 +600,7 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 // destination→destination leg is ever built; a conflict resolved "keep a
 // destination's version" leaves that file with a destination source, which the
 // forward-leg filter then drops (the file is skipped, never written back).
-func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Location, relPath string, result syncengine.NWayScanResult, mode syncengine.NWayScanMode) {
+func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Location, relPath string, result syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
 	result = syncengine.FilterNWayToSourcePresent(result, src.ID)
 	forceSrc := func(bestSoFar, candidate syncengine.Location) bool {
 		return candidate.ID == src.ID
@@ -623,23 +629,8 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 			},
 		})
 	}
-	syncingTitle := "Full Syncing"
-	if mode == syncengine.NWayQuickScan {
-		syncingTitle = "Quick Syncing"
-	}
-	if len(tasks) == 0 {
-		msg := "Every file in the source folder already exists at the selected location(s)."
-		if mode == syncengine.NWayQuickScan {
-			msg += " This quick sync can determine if the files are present, but not if the files are identical. Run a Full Scan to check file contents."
-		}
-		showSyncFlowExtras(s, nil, func() { showSyncExperiments(s) }, syncFlowExtras{
-			finishedTitle:   "Already in sync!",
-			finishedMessage: msg,
-		})
-		return
-	}
-	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
-		syncFlowExtras{autoSync: true, syncingTitle: syncingTitle, quickScan: mode == syncengine.NWayQuickScan})
+	runSyncTransferTasks(s, tasks, mode, autoSync,
+		"Every file in the source folder already exists at the selected location(s).")
 }
 
 // runNWayScan runs the N-way scan live inside the shared scan/sync screen:
@@ -729,13 +720,46 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) }, extras)
 }
 
+// runSyncTransferTasks is the shared tail both All-Way (runNWayTransfers) and
+// One-Way (runOneWayTransfers) funnel into once their per-leg transfer tasks
+// are built, so confirmation behaves identically for both. autoSync=false
+// stops at "Ready to Sync" for the user to review the source→dest split and
+// press Sync — this is the mandatory confirmation step every scan gets;
+// autoSync=true starts the copy immediately and is used only after the user
+// has already reviewed and confirmed (e.g. after Full Scan's conflict
+// resolution). emptyMsg captions the nothing-to-copy case and, under a quick
+// scan, gains the "presence only, run a Full Scan to compare contents" caveat.
+func runSyncTransferTasks(s *state, tasks []scanTask, mode syncengine.NWayScanMode, autoSync bool, emptyMsg string) {
+	quick := mode == syncengine.NWayQuickScan
+	syncingTitle := "Full Syncing"
+	if quick {
+		syncingTitle = "Quick Syncing"
+	}
+	if len(tasks) == 0 {
+		if quick {
+			emptyMsg += " This quick sync can determine if the files are present, but not if the files are identical. Run a Full Scan to check file contents."
+		}
+		// Render the normal finished-sync chrome (see showSyncFlowExtras'
+		// zero-task path) rather than a blocking dialog. This can be reached
+		// from onScanDone while the prior scan screen is still mid-scan (Back
+		// disabled, no further phase transition coming for it) — a plain dialog
+		// would leave that screen stuck showing "Scanning..."; setContent here
+		// replaces it outright.
+		showSyncFlowExtras(s, nil, func() { showSyncExperiments(s) }, syncFlowExtras{
+			finishedTitle:   "Already in sync!",
+			finishedMessage: emptyMsg,
+		})
+		return
+	}
+	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
+		syncFlowExtras{autoSync: autoSync, syncingTitle: syncingTitle, quickScan: quick})
+}
+
 // runNWayTransfers builds the minimal transfer plan for every experiment and
 // hands the resulting (source, dest, files) jobs to the existing scan/
 // progress UI, one task per (experiment, direction) pair so its Experiments
-// column shows exactly which files move which way. autoSync starts the copy
-// immediately (used when the plan was already reviewed and confirmed, e.g.
-// after Full Scan's conflict resolution) rather than stopping at "Ready to
-// Sync" for the user to review the split first.
+// column shows exactly which files move which way. autoSync is threaded
+// through to runSyncTransferTasks (see there).
 func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
 	var tasks []scanTask
 	for i, name := range expNames {
@@ -754,29 +778,8 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 			})
 		}
 	}
-	if len(tasks) == 0 {
-		msg := "All files in these locations already exist in the selected locations."
-		if mode == syncengine.NWayQuickScan {
-			msg += " This quick sync can determine if the files are present, but not if the files are identical. Run a Full Sync to check file contents."
-		}
-		// Render the normal finished-sync chrome (see showSyncFlowExtras'
-		// zero-task path) rather than a blocking dialog. This is reached
-		// from onScanDone while the prior scan screen is still mid-scan
-		// (Back disabled, no further phase transition coming for it) — a
-		// plain dialog would leave that screen stuck showing "Scanning...";
-		// setContent here replaces it outright.
-		showSyncFlowExtras(s, nil, func() { showSyncExperiments(s) }, syncFlowExtras{
-			finishedTitle:   "Already in sync!",
-			finishedMessage: msg,
-		})
-		return
-	}
-	syncingTitle := "Full Syncing"
-	if mode == syncengine.NWayQuickScan {
-		syncingTitle = "Quick Syncing"
-	}
-	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
-		syncFlowExtras{autoSync: autoSync, syncingTitle: syncingTitle, quickScan: mode == syncengine.NWayQuickScan})
+	runSyncTransferTasks(s, tasks, mode, autoSync,
+		"All files in these locations already exist in the selected locations.")
 }
 
 // applyNWayResolutions executes any real Rename/Delete resolutions
