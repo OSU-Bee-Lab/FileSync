@@ -91,8 +91,11 @@ type SourceListing struct {
 
 // listSource walks <srcRoot>/<relPath> (through fset's filter) exactly
 // once, collecting every file and directory it finds. It performs no
-// comparison against any destination.
-func listSource(ctx context.Context, srcRoot, relPath string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
+// comparison against any destination. reachAnchor, when non-empty, is an
+// rclone spec whose reachability makes a missing <srcRoot> (with an empty
+// relPath) benign-empty instead of an error — used by SubLocation-based
+// destinations whose leaf folder hasn't been created yet.
+func listSource(ctx context.Context, srcRoot, relPath, reachAnchor string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
 	ctx, err := withFilter(ctx, fset)
 	if err != nil {
 		return SourceListing{}, err
@@ -124,17 +127,27 @@ func listSource(ctx context.Context, srcRoot, relPath string, fset FilterSetting
 		}
 		return nil
 	})
-	// A missing <srcRoot>/<relPath> is only benign when srcRoot itself is
-	// reachable and relPath is the piece that's missing - e.g. a
-	// destination location whose experiment folder rclone hasn't created
-	// yet, same treatment as scanAgainstDest below: an empty listing, not
-	// an error, since the folder will simply be created on copy. If
-	// srcRoot itself doesn't exist or can't be reached, that's a real
-	// failure (an unreachable/misconfigured location) and must still
-	// surface as an error rather than being silently treated as empty.
-	if err != nil && errors.Is(err, fs.ErrorDirNotFound) && relPath != "" {
-		if _, rootErr := listDir(ctx, srcRoot); rootErr == nil {
-			err = nil
+	// A missing <srcRoot>/<relPath> is only benign when the enclosing root is
+	// reachable and the leaf is the piece that's missing - e.g. a destination
+	// location whose experiment folder rclone hasn't created yet, same
+	// treatment as scanAgainstDest below: an empty listing, not an error,
+	// since the folder will simply be created on copy. If the enclosing root
+	// itself doesn't exist or can't be reached, that's a real failure (an
+	// unreachable/misconfigured location) and must still surface as an error
+	// rather than being silently treated as empty.
+	//
+	// The enclosing root is srcRoot when relPath names the missing leaf, or
+	// reachAnchor when srcRoot itself is the missing leaf (a SubLocation whose
+	// folded-in sub-path hasn't been created yet, scanned with relPath == "").
+	if err != nil && errors.Is(err, fs.ErrorDirNotFound) {
+		anchor := reachAnchor
+		if relPath != "" {
+			anchor = srcRoot
+		}
+		if anchor != "" {
+			if _, rootErr := listDir(ctx, anchor); rootErr == nil {
+				err = nil
+			}
 		}
 	}
 	if err != nil {
@@ -156,7 +169,7 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 	if label == "" {
 		label = "experiments/"
 	}
-	listing, err := listSource(ctx, src.rcloneSpec(), srcRelPath, fset, progress)
+	listing, err := listSource(ctx, src.rcloneSpec(), srcRelPath, src.reachAnchor, fset, progress)
 	if err != nil {
 		return ScanResult{}, err
 	}

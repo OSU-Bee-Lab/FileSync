@@ -72,6 +72,16 @@ type Location struct {
 	// with slice order in appconfig.Config.Locations, which is what
 	// BuildNWayTransferPlan actually iterates for its tie-break.
 	Priority int `json:"priority,omitempty"`
+
+	// reachAnchor is an rclone spec that must be reachable for a "directory
+	// not found" at this location's own root to count as benign-empty (a
+	// folder that simply hasn't been created yet) rather than a hard listing
+	// error. It's only set by SubLocation, where the base Location's root is
+	// the anchor and the folded-in sub-path is the leaf that may not exist
+	// yet — the destination-side analogue of listSource's relPath != "" case.
+	// Unexported so it's never persisted; meaningful only for the lifetime of
+	// one scan session.
+	reachAnchor string
 }
 
 // rcloneSpec returns the fs.NewFs-ready path string for this location, e.g.
@@ -105,6 +115,10 @@ func SubLocation(loc Location, relPath string) Location {
 	sub := loc
 	sub.RootPath = path.Join(loc.RootPath, relPath)
 	sub.ID = loc.ID + "/" + relPath
+	// Anchor benign-empty handling on the base location's root: if the folded
+	// sub-path doesn't exist yet (a destination folder about to be created on
+	// copy) but the base root is reachable, that's empty, not a listing error.
+	sub.reachAnchor = loc.rcloneSpec()
 	return sub
 }
 

@@ -153,7 +153,7 @@ func ScanNWayWithProgress(ctx context.Context, locs []Location, relPath string, 
 		wg.Add(1)
 		go func(i int, loc Location) {
 			defer wg.Done()
-			listings[i], errs[i] = listSource(ctx, loc.rcloneSpec(), relPath, fset, listProgress(i))
+			listings[i], errs[i] = listSource(ctx, loc.rcloneSpec(), relPath, loc.reachAnchor, fset, listProgress(i))
 		}(i, loc)
 	}
 	wg.Wait()

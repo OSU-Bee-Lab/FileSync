@@ -328,15 +328,19 @@ func showSyncExperimentsOneWay(s *state) {
 		srcLabel.SetText(srcFolder)
 	}
 
-	syncBtn := widget.NewButton("Sync", nil)
-	syncBtn.Importance = widget.HighImportance
-	syncBtn.Disable()
+	quickScanBtn := widget.NewButton("Quick Scan", nil)
+	quickScanBtn.Importance = widget.HighImportance
+	quickScanBtn.Disable()
+	fullScanBtn := widget.NewButton("Full Scan", nil)
+	fullScanBtn.Disable()
 
 	updateSyncEnabled := func() {
 		if dstLoc != nil && srcFolder != "" {
-			syncBtn.Enable()
+			quickScanBtn.Enable()
+			fullScanBtn.Enable()
 		} else {
-			syncBtn.Disable()
+			quickScanBtn.Disable()
+			fullScanBtn.Disable()
 		}
 	}
 
@@ -407,7 +411,7 @@ func showSyncExperimentsOneWay(s *state) {
 		})
 	})
 
-	syncBtn.OnTapped = func() {
+	startScan := func(mode syncengine.NWayScanMode) {
 		if dstLoc == nil || srcFolder == "" {
 			return
 		}
@@ -425,9 +429,11 @@ func showSyncExperimentsOneWay(s *state) {
 		checkDstMissing(func() {
 			src := syncengine.LocalFolderLocation("Source folder", srcFolder)
 			dstSub := syncengine.SubLocation(dst, dstRelPath)
-			runOneWayScan(s, src, dstSub, label)
+			runOneWayScan(s, src, dstSub, label, mode)
 		})
 	}
+	quickScanBtn.OnTapped = func() { startScan(syncengine.NWayQuickScan) }
+	fullScanBtn.OnTapped = func() { startScan(syncengine.NWayFullScan) }
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
@@ -441,7 +447,7 @@ func showSyncExperimentsOneWay(s *state) {
 		container.NewVBox(
 			widget.NewSeparator(),
 			destLabel,
-			container.NewHBox(syncBtn, backBtn),
+			container.NewHBox(quickScanBtn, fullScanBtn, backBtn),
 		),
 		nil, nil,
 		browser.CanvasObject(),
@@ -466,24 +472,34 @@ const oneWayPseudoName = ""
 // leg of the resulting transfer plan, discarding any destination→source leg,
 // so this can never write back into the local source folder no matter how a
 // conflict is resolved (see runOneWayTransfers).
-func runOneWayScan(s *state, src, dst syncengine.Location, label string) {
+//
+// mode mirrors All-Way exactly: NWayFullScan reads bytes and gates the sync
+// behind per-file conflict resolution; NWayQuickScan checks presence only,
+// can never produce a conflict, so no resolver is built and pressing sync
+// goes straight to the transfer preview (see runNWayScan).
+func runOneWayScan(s *state, src, dst syncengine.Location, label string, mode syncengine.NWayScanMode) {
 	fset := s.cfg.DefaultFilter
 	locs := []syncengine.Location{src, dst}
 	names := []string{oneWayPseudoName}
 
-	resolver := newNWayResolver(names)
+	var resolver *nwayResolver
+	if mode == syncengine.NWayFullScan {
+		resolver = newNWayResolver(names)
+	}
 	results := make([]syncengine.NWayScanResult, 1)
 
 	tasks := []scanTask{{
 		Label: label,
 		Locs:  locs,
 		Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-			result, err := syncengine.ScanNWayWithProgress(ctx, locs, oneWayPseudoName, fset, progress, syncengine.NWayFullScan)
+			result, err := syncengine.ScanNWayWithProgress(ctx, locs, oneWayPseudoName, fset, progress, mode)
 			if err != nil {
 				return syncengine.ScanResult{}, err
 			}
 			results[0] = result
-			resolver.results[0] = result
+			if resolver != nil {
+				resolver.results[0] = result
+			}
 			return syncengine.NWayDisplayScanResult(result), nil
 		},
 		// Start is deliberately nil, same as runNWayScan: Sync is replaced by
@@ -491,24 +507,45 @@ func runOneWayScan(s *state, src, dst syncengine.Location, label string) {
 		// (filtered to the forward leg only) in a fresh session.
 	}}
 
-	onSync := func() {
-		resolutions := resolver.buildResolutions()
-		proceed := func() {
-			applyNWayResolutions(s, names, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
-				runOneWayTransfers(s, src, dst, label, resolved[0])
-			})
-		}
-		if resolver.hasDeletes() {
-			showIrreversibleDeleteConfirm(s,
-				"This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.",
-				"Delete and Sync", proceed)
-			return
-		}
-		proceed()
+	syncingTitle := "Full Syncing"
+	if mode == syncengine.NWayQuickScan {
+		syncingTitle = "Quick Syncing"
 	}
 
-	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
-		syncFlowExtras{nway: resolver, onNWaySync: onSync, syncingTitle: "Syncing"})
+	var extras syncFlowExtras
+	if mode == syncengine.NWayQuickScan {
+		extras = syncFlowExtras{
+			// Happy path: once the diff completes cleanly, jump straight into
+			// the forward-leg transfer preview so the user reviews the actual
+			// source → dest split before committing.
+			onScanDone: func() { runOneWayTransfers(s, src, dst, label, results[0], mode) },
+			// Fallback: if the scan errored, onScanDone is skipped and this
+			// screen renders normally so the user can see the error — Sync
+			// still needs to work if pressed manually.
+			onNWaySync:   func() { runOneWayTransfers(s, src, dst, label, results[0], mode) },
+			syncingTitle: syncingTitle,
+			quickScan:    true,
+		}
+	} else {
+		onSync := func() {
+			resolutions := resolver.buildResolutions()
+			proceed := func() {
+				applyNWayResolutions(s, names, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
+					runOneWayTransfers(s, src, dst, label, resolved[0], mode)
+				})
+			}
+			if resolver.hasDeletes() {
+				showIrreversibleDeleteConfirm(s,
+					"This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.",
+					"Delete and Sync", proceed)
+				return
+			}
+			proceed()
+		}
+		extras = syncFlowExtras{nway: resolver, onNWaySync: onSync, syncingTitle: syncingTitle}
+	}
+
+	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) }, extras)
 }
 
 // runOneWayTransfers builds the minimal transfer plan the same way
@@ -518,7 +555,7 @@ func runOneWayScan(s *state, src, dst syncengine.Location, label string) {
 // source folder — dropping any such entry here means that choice simply
 // skips the file (never touches the source folder) instead, keeping the
 // push strictly one-way regardless of how a conflict was resolved.
-func runOneWayTransfers(s *state, src, dst syncengine.Location, label string, result syncengine.NWayScanResult) {
+func runOneWayTransfers(s *state, src, dst syncengine.Location, label string, result syncengine.NWayScanResult, mode syncengine.NWayScanMode) {
 	pairs := syncengine.BuildNWayTransferPlan(result, syncengine.PreferLocalSource)
 	var tasks []scanTask
 	for _, pair := range pairs {
@@ -537,15 +574,23 @@ func runOneWayTransfers(s *state, src, dst syncengine.Location, label string, re
 			},
 		})
 	}
+	syncingTitle := "Full Syncing"
+	if mode == syncengine.NWayQuickScan {
+		syncingTitle = "Quick Syncing"
+	}
 	if len(tasks) == 0 {
+		msg := "Every file in the source folder already exists at the destination."
+		if mode == syncengine.NWayQuickScan {
+			msg += " This quick sync can determine if the files are present, but not if the files are identical. Run a Full Scan to check file contents."
+		}
 		showSyncFlowExtras(s, nil, func() { showSyncExperiments(s) }, syncFlowExtras{
 			finishedTitle:   "Already in sync!",
-			finishedMessage: "Every file in the source folder already exists at the destination.",
+			finishedMessage: msg,
 		})
 		return
 	}
 	showSyncFlowExtras(s, tasks, func() { showSyncExperiments(s) },
-		syncFlowExtras{autoSync: true, syncingTitle: "Syncing"})
+		syncFlowExtras{autoSync: true, syncingTitle: syncingTitle, quickScan: mode == syncengine.NWayQuickScan})
 }
 
 // runNWayScan runs the N-way scan live inside the shared scan/sync screen:
