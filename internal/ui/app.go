@@ -47,11 +47,13 @@ type state struct {
 	syncExperimentsExpNames      []string
 	// syncOneWay and the fields below cache the Sync Locations screen's
 	// mode toggle and, in One Way Sync mode, its chosen source folder and
-	// destination location/folder — mirrors syncExperimentsLocationNames'
-	// role for the All-Way Sync mode.
+	// destination locations/folder — mirrors syncExperimentsLocationNames'
+	// role for the All-Way Sync mode. One Way pushes the source folder onto
+	// one or more destination locations at once (all at the same relPath),
+	// so the destination is a set of location names, not a single one.
 	syncOneWay           bool
 	syncOneWayFromFolder string
-	syncOneWayToName     string
+	syncOneWayToNames    []string
 	syncOneWayToRelPath  string
 }
 

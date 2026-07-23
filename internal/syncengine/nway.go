@@ -387,6 +387,42 @@ func BuildNWayTransferPlan(result NWayScanResult, preferSource func(bestSoFar, c
 	return pairs
 }
 
+// FilterNWayToSourcePresent returns a copy of result keeping only files that
+// exist at the location whose ID is srcID, with the summary counts recomputed
+// to match. It's what makes One-Way Sync a strict push of the source folder's
+// own contents: a path present only at a destination (never at the source) is
+// dropped entirely, so it's never propagated between destinations, flagged as
+// a conflict the user has to resolve, or touched by a rename/delete
+// resolution. Files the source has are kept verbatim (same States, same
+// Status), so an unresolved source-vs-destination conflict still surfaces.
+func FilterNWayToSourcePresent(result NWayScanResult, srcID string) NWayScanResult {
+	out := result
+	out.Files = nil
+	out.InSyncCount, out.MissingSomeCount, out.ConflictCount = 0, 0, 0
+	for _, f := range result.Files {
+		srcPresent := false
+		for _, st := range f.States {
+			if st.Location.ID == srcID && st.Exists {
+				srcPresent = true
+				break
+			}
+		}
+		if !srcPresent {
+			continue
+		}
+		out.Files = append(out.Files, f)
+		switch f.Status {
+		case FileInSync:
+			out.InSyncCount++
+		case FileMissingSome:
+			out.MissingSomeCount++
+		case FileConflict:
+			out.ConflictCount++
+		}
+	}
+	return out
+}
+
 // ScanResultFromNWayTransfers converts one NWayTransferPair's files into a
 // ScanResult shaped exactly like a pairwise scan's output (every entry
 // ActionCopy), so the existing StartSyncExperiments/filesFromFilter copy

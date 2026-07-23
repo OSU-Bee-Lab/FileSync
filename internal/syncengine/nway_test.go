@@ -281,6 +281,92 @@ func TestBuildNWayTransferPlan_FanOutNotCrossProduct(t *testing.T) {
 	}
 }
 
+func TestFilterNWayToSourcePresent(t *testing.T) {
+	src := Location{ID: "src", Name: "src", Kind: LocationLocal}
+	dstA := Location{ID: "a", Name: "a", Kind: LocationRemote}
+	dstB := Location{ID: "b", Name: "b", Kind: LocationRemote}
+
+	result := NWayScanResult{
+		Locations: []Location{src, dstA, dstB},
+		Files: []FileConvergencePlan{
+			{ // source has it, some dest missing -> kept
+				RelPath: "keep_missing.mp3", Status: FileMissingSome,
+				States: []FileLocationState{
+					{Location: src, Exists: true, Size: 10},
+					{Location: dstA, Exists: false},
+					{Location: dstB, Exists: true, Size: 10},
+				},
+			},
+			{ // source has it, dest differs -> kept (conflict survives)
+				RelPath: "keep_conflict.mp3", Status: FileConflict,
+				States: []FileLocationState{
+					{Location: src, Exists: true, Size: 10},
+					{Location: dstA, Exists: true, Size: 20},
+					{Location: dstB, Exists: false},
+				},
+			},
+			{ // source absent, only among destinations -> dropped
+				RelPath: "drop_destonly.mp3", Status: FileConflict,
+				States: []FileLocationState{
+					{Location: src, Exists: false},
+					{Location: dstA, Exists: true, Size: 30},
+					{Location: dstB, Exists: true, Size: 40},
+				},
+			},
+		},
+		MissingSomeCount: 1,
+		ConflictCount:    2,
+	}
+
+	got := FilterNWayToSourcePresent(result, src.ID)
+
+	if names := relPathsOf(got.Files); len(names) != 2 ||
+		names[0] != "keep_conflict.mp3" && names[0] != "keep_missing.mp3" {
+		t.Fatalf("kept files = %v, want the two source-present files only", names)
+	}
+	for _, f := range got.Files {
+		if f.RelPath == "drop_destonly.mp3" {
+			t.Fatal("destination-only file was not dropped")
+		}
+	}
+	if got.MissingSomeCount != 1 || got.ConflictCount != 1 {
+		t.Fatalf("recomputed counts = missing %d, conflict %d; want 1 and 1",
+			got.MissingSomeCount, got.ConflictCount)
+	}
+}
+
+// TestOneWayForwardOnlyFanOut mirrors what runOneWayTransfers relies on: after
+// filtering to source-present files and forcing the source as the copy source,
+// every built pair originates at the source (never destination->source or
+// destination->destination), so a strict one-way push never writes back.
+func TestOneWayForwardOnlyFanOut(t *testing.T) {
+	src := Location{ID: "src", Name: "src", Kind: LocationLocal}
+	dstA := Location{ID: "a", Name: "a", Kind: LocationLocal} // local, higher-priority-looking
+	dstB := Location{ID: "b", Name: "b", Kind: LocationRemote}
+
+	result := NWayScanResult{
+		Locations: []Location{src, dstA, dstB},
+		Files: []FileConvergencePlan{
+			{ // present at src and local dstA, missing at dstB
+				RelPath: "f.mp3", Status: FileMissingSome,
+				States: []FileLocationState{
+					{Location: src, Exists: true, Size: 10},
+					{Location: dstA, Exists: true, Size: 10},
+					{Location: dstB, Exists: false},
+				},
+			},
+		},
+	}
+
+	forceSrc := func(bestSoFar, candidate Location) bool { return candidate.ID == src.ID }
+	pairs := BuildNWayTransferPlan(FilterNWayToSourcePresent(result, src.ID), forceSrc)
+	for _, p := range pairs {
+		if p.Source.ID != src.ID {
+			t.Errorf("pair source = %s, want src (forced) — a non-src source would be dropped and the file skipped", p.Source.ID)
+		}
+	}
+}
+
 func TestBuildNWayTransferPlan_SkipsConflicts(t *testing.T) {
 	locA := Location{ID: "a", Name: "a"}
 	locB := Location{ID: "b", Name: "b"}
