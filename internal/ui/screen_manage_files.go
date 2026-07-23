@@ -124,12 +124,7 @@ func showManageFiles(s *state) {
 		}
 	}
 
-	// --- operation choice --- Retime is dev-gated (see devMode) since it's
-	// still being stabilized.
-	opOptions := []string{"Rename / Move / Merge", "Delete"}
-	if devMode() {
-		opOptions = append(opOptions, manageOpRetime)
-	}
+	opOptions := []string{"Rename / Move / Merge", "Delete", manageOpRetime}
 	opGroup := widget.NewRadioGroup(opOptions, nil)
 
 	// --- shared path picker: browses the first selected Location, and

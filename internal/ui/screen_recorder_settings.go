@@ -177,9 +177,7 @@ func showSyncRecorders(s *state) {
 	batchUploadHint := widget.NewLabel("(faster when syncing many files - uploads everything at once instead of as each file lands.)")
 	batchUploadHint.Wrapping = fyne.TextWrapWord
 
-	// Bad-timestamp detection is dev-only for now (see devMode) - it's still
-	// being stabilized, so it stays hidden from release builds until then.
-	detectTimestampsCheck := widget.NewCheck("Detect bad recorder timestamps (dev)", nil)
+	detectTimestampsCheck := widget.NewCheck("Detect bad recorder timestamps", nil)
 	detectTimestampsCheck.SetChecked(s.cfg.RecorderSettings.DetectBadTimestamps)
 	// The match tolerance itself is set live on the timestamp review screen
 	// (with a slider that re-judges every recorder as it moves), not here -
@@ -189,9 +187,6 @@ func showSyncRecorders(s *state) {
 	detectTimestampsHint.Wrapping = fyne.TextWrapWord
 
 	detectTimestampsBox := container.NewVBox(detectTimestampsCheck, detectTimestampsHint)
-	if !devMode() {
-		detectTimestampsBox.Hide()
-	}
 
 	startBtn := widget.NewButton("Sync Here", nil)
 	startBtn.Importance = widget.HighImportance
@@ -342,7 +337,7 @@ func startRecorderSync(s *state, relPath string, autoDeleteCheck, batchUploadChe
 		experimentName:      expName,
 		autoDelete:          autoDeleteCheck.Checked,
 		batchUpload:         batchUploadCheck.Checked && len(uploads) > 0,
-		detectBadTimestamps: devMode() && detectTimestampsCheck.Checked,
+		detectBadTimestamps: detectTimestampsCheck.Checked,
 		timestampTolerance:  time.Duration(tolerance) * time.Minute,
 	})
 }
