@@ -612,6 +612,11 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 		exitWarning += " Nothing will be uploaded to the remote destination either."
 	}
 
+	// Leaving Screen 2 for the review screen now, same as the Batch Upload
+	// path (see doConfirmBatchUpload) - the inactivity watcher has nothing
+	// left to watch here (no recorders on this screen) and must not keep
+	// running to pop its dialog on top of it.
+	sc.cancelWatch()
 	showTimestampReview(timestampReviewHost{
 		s:             sc.s,
 		win:           sc.s.win,
@@ -829,8 +834,15 @@ func (sc *recorderSyncScreen) confirmBatchUpload() {
 // Reached only once params.batchUpload is set and every row is idle (see
 // refreshCancelBtn), so there is nothing to warn about interrupting.
 func (sc *recorderSyncScreen) doConfirmBatchUpload() {
+	// Stop the inactivity watcher now, on leaving Screen 2, rather than
+	// waiting for onDone (which only fires once the batch-upload/Sync
+	// Complete screen that follows is itself left) - otherwise the
+	// "Sync paused due to inactivity" watcher keeps polling and can pop its
+	// dialog on top of those later screens, repeatedly, since a canceled
+	// watchCtx is what actually stops recorderInactivityWatcher.run.
+	sc.cancelWatch()
 	locs := append(append([]syncengine.Location{}, sc.params.destinations...), sc.params.uploads...)
-	runBatchUploadScan(sc.s, sc.endSync, locs, sc.params.experimentName, sc.batchUploadPaths)
+	runBatchUploadScan(sc.s, func() { showSyncExperiments(sc.s) }, locs, sc.params.experimentName, sc.batchUploadPaths)
 }
 
 // runBatchUploadScan is runNWayScan (screen_sync_experiments.go) narrowed
