@@ -166,6 +166,12 @@ type nwayChoice struct {
 	kind      nwayChoiceKind
 	winner    syncengine.Location   // keep-one only
 	deleteLoc []syncengine.Location // delete only
+	// renameTo maps a location ID to the new base filename that location's
+	// copy takes under a keep-all choice. Seeded from defaultRenameNames
+	// (foo_1.ext, foo_2.ext, … assigned arbitrarily) and editable per copy in
+	// the resolver; every entry must be non-empty, distinct, and not collide
+	// with a file already in that directory (see renameNameErr).
+	renameTo map[string]string
 }
 
 // decided reports whether this choice fully resolves its conflict.
@@ -230,10 +236,90 @@ func (r *nwayResolver) conflictCount() int {
 	return len(r.conflicts())
 }
 
+// existingNamesIn returns the set of file base names already present in the
+// same directory as the conflicting file, across every scanned location — the
+// names a keep-all rename must avoid so it can't collide with a real file.
+// The conflicting file's own name is included, so renaming a copy back to it
+// is correctly rejected.
+func (r *nwayResolver) existingNamesIn(key nwayConflictKey) map[string]bool {
+	out := map[string]bool{}
+	dir := path.Dir(key.relPath)
+	for i, name := range r.expNames {
+		if name != key.expName || i >= len(r.results) {
+			continue
+		}
+		for _, f := range r.results[i].Files {
+			if path.Dir(f.RelPath) == dir {
+				out[path.Base(f.RelPath)] = true
+			}
+		}
+	}
+	return out
+}
+
+// defaultRenameNames assigns foo_1.ext, foo_2.ext, … across the present copies
+// (arbitrarily — only distinctness matters), skipping any suffix whose name is
+// already taken in that directory.
+func (r *nwayResolver) defaultRenameNames(c nwayConflict) map[string]string {
+	taken := r.existingNamesIn(c.key)
+	out := make(map[string]string, len(c.versions))
+	n := 1
+	for _, v := range c.versions {
+		for {
+			name := syncengine.SuggestConflictRenameNameN(c.key.relPath, n)
+			n++
+			if !taken[name] {
+				out[v.loc.ID] = name
+				taken[name] = true
+				break
+			}
+		}
+	}
+	return out
+}
+
+// renameNameErr validates one keep-all rename entry, returning a short
+// human-readable problem, or "" when the name is usable.
+func (r *nwayResolver) renameNameErr(c nwayConflict, locID string, choice nwayChoice) string {
+	name := strings.TrimSpace(choice.renameTo[locID])
+	switch {
+	case name == "":
+		return "name required"
+	case strings.ContainsAny(name, `/\`):
+		return "can't contain a path separator"
+	case r.existingNamesIn(c.key)[name]:
+		return "a file with this name already exists here"
+	}
+	for _, v := range c.versions {
+		if v.loc.ID != locID && strings.TrimSpace(choice.renameTo[v.loc.ID]) == name {
+			return "same as another copy's new name"
+		}
+	}
+	return ""
+}
+
+// renameNamesValid reports whether every copy's keep-all name is usable.
+// Non-keep-all choices are trivially valid.
+func (r *nwayResolver) renameNamesValid(c nwayConflict, choice nwayChoice) bool {
+	if choice.kind != nwayChoiceKeepAll {
+		return true
+	}
+	for _, v := range c.versions {
+		if r.renameNameErr(c, v.loc.ID, choice) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// unresolvedCount counts conflicts still needing attention: undecided ones,
+// plus keep-all choices whose edited names aren't yet usable — so Sync stays
+// gated until every rename is valid, not merely chosen.
 func (r *nwayResolver) unresolvedCount() int {
 	n := 0
 	for _, c := range r.conflicts() {
-		if !r.choices[c.key].decided() {
+		choice := r.choices[c.key]
+		if !choice.decided() || !r.renameNamesValid(c, choice) {
 			n++
 		}
 	}
@@ -284,6 +370,30 @@ func (r *nwayResolver) hasDeletes() bool {
 	return false
 }
 
+// pendingDeletes lists every file copy a decided delete choice will
+// permanently remove, as "<path> — from <locations>" lines, so the
+// irreversible-action prompt can name exactly what's about to be destroyed
+// rather than just how many files.
+func (r *nwayResolver) pendingDeletes() []string {
+	var out []string
+	for _, c := range r.conflicts() {
+		choice := r.choices[c.key]
+		if choice.kind != nwayChoiceDelete || !choice.decided() {
+			continue
+		}
+		names := make([]string, len(choice.deleteLoc))
+		for i, loc := range choice.deleteLoc {
+			names[i] = loc.Name
+		}
+		full := c.key.relPath
+		if c.key.expName != "" {
+			full = path.Join(c.key.expName, c.key.relPath)
+		}
+		out = append(out, fmt.Sprintf("%s — from %s", full, strings.Join(names, ", ")))
+	}
+	return out
+}
+
 // hasActionable reports whether any decided choice requires real work
 // (overwrite, rename, delete) — used to enable Sync even when the scan
 // found nothing else to copy.
@@ -314,13 +424,18 @@ func (r *nwayResolver) buildResolutions() []syncengine.NWayConflictResolution {
 				WinnerLocationID: choice.winner.ID,
 			})
 		case nwayChoiceKeepAll:
+			fallback := r.defaultRenameNames(c)
 			for _, v := range c.versions {
+				newName := strings.TrimSpace(choice.renameTo[v.loc.ID])
+				if newName == "" {
+					newName = fallback[v.loc.ID]
+				}
 				out = append(out, syncengine.NWayConflictResolution{
 					ExpName:           c.key.expName,
 					RelPath:           c.key.relPath,
 					Kind:              syncengine.NWayRename,
 					TargetLocationIDs: []string{v.loc.ID},
-					NewName:           syncengine.SuggestConflictRenameNameAt(c.key.relPath, v.loc.Name),
+					NewName:           newName,
 				})
 			}
 		case nwayChoiceSkip:
@@ -370,7 +485,14 @@ func (r *nwayResolver) applyChoiceToUnresolved(choice nwayChoice) {
 				continue
 			}
 		}
-		r.choices[c.key] = choice
+		applied := choice
+		if choice.kind == nwayChoiceKeepAll {
+			// Rename names are per-file (foo_1.ext derives from foo.ext), so
+			// each conflict gets its own defaults rather than the source
+			// conflict's names, which would be wrong for a different filename.
+			applied.renameTo = r.defaultRenameNames(c)
+		}
+		r.choices[c.key] = applied
 	}
 	if r.onChange != nil {
 		r.onChange()
@@ -449,7 +571,8 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 	choiceFromSelection := func(selected string, deleteSel []syncengine.Location) nwayChoice {
 		switch selected {
 		case optKeepAll:
-			return nwayChoice{kind: nwayChoiceKeepAll}
+			// Seed each copy's editable name with foo_1.ext, foo_2.ext, …
+			return nwayChoice{kind: nwayChoiceKeepAll, renameTo: r.defaultRenameNames(current())}
 		case optSkip:
 			return nwayChoice{kind: nwayChoiceSkip}
 		case optDelete:
@@ -472,11 +595,51 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 		subArea.Objects = nil
 		switch choice.kind {
 		case nwayChoiceKeepAll:
-			for _, v := range current().versions {
-				preview := widget.NewLabel(fmt.Sprintf("%s's copy → %s", v.loc.Name,
-					syncengine.SuggestConflictRenameNameAt(current().key.relPath, v.loc.Name)))
-				preview.Truncation = fyne.TextTruncateEllipsis
-				subArea.Add(preview)
+			// One editable name per copy. Editing updates the choice in place
+			// (and re-gates Sync via setChoice → onChange) without calling
+			// render(), which would rebuild the entries and steal focus
+			// mid-typing. refreshAll re-validates every row on any keystroke,
+			// since one entry's text can resolve or create another's clash.
+			c := current()
+			var refreshAll []func()
+			for _, v := range c.versions {
+				v := v
+				entry := widget.NewEntry()
+				entry.SetText(choice.renameTo[v.loc.ID])
+
+				errText := canvas.NewText("", destructiveRed)
+				errText.TextSize = 11
+
+				refreshErr := func() {
+					msg := r.renameNameErr(c, v.loc.ID, r.choices[c.key])
+					errText.Text = msg
+					errText.Refresh()
+				}
+				refreshAll = append(refreshAll, refreshErr)
+
+				entry.OnChanged = func(s string) {
+					if rendering {
+						return
+					}
+					cur := r.choices[c.key]
+					names := make(map[string]string, len(cur.renameTo)+1)
+					for k, val := range cur.renameTo {
+						names[k] = val
+					}
+					names[v.loc.ID] = s
+					cur.renameTo = names
+					r.setChoice(c.key, cur)
+					for _, f := range refreshAll {
+						f()
+					}
+				}
+
+				caption := widget.NewLabel(v.loc.Name + "'s copy →")
+				caption.Truncation = fyne.TextTruncateEllipsis
+				subArea.Add(container.NewBorder(nil, errText, caption, nil, entry))
+			}
+			for _, f := range refreshAll {
+				f()
 			}
 		case nwayChoiceDelete:
 			warning := canvas.NewText("Delete is permanent and cannot be undone.", destructiveRed)
@@ -643,11 +806,38 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 // confirmLabel let each caller name what's actually being deleted (e.g. a
 // file count) and what confirming actually does (N-way conflict resolution
 // continues into a sync; Manage Files just deletes).
-func showIrreversibleDeleteConfirm(s *state, message, confirmLabel string, onConfirm func()) {
+// items, when non-empty, are listed under the message so the user sees exactly
+// which files (and at which locations) are about to be destroyed, rather than
+// only a count.
+func showIrreversibleDeleteConfirm(s *state, message string, items []string, confirmLabel string, onConfirm func()) {
 	msg := canvas.NewText(message, destructiveRed)
 	msg.TextStyle = fyne.TextStyle{Bold: true}
+	content := container.NewVBox(msg)
+
+	if len(items) > 0 {
+		const maxRows = 200
+		shown, hidden := items, 0
+		if len(shown) > maxRows {
+			hidden = len(shown) - maxRows
+			shown = shown[:maxRows]
+		}
+		list := container.NewVBox()
+		for _, it := range shown {
+			l := widget.NewLabel(it)
+			l.Truncation = fyne.TextTruncateEllipsis
+			list.Add(l)
+		}
+		if hidden > 0 {
+			list.Add(widget.NewLabel(fmt.Sprintf("…and %d more", hidden)))
+		}
+		scroll := container.NewVScroll(list)
+		scroll.SetMinSize(fyne.NewSize(460, 200))
+		content.Add(widget.NewSeparator())
+		content.Add(scroll)
+	}
+
 	d := dialog.NewCustomConfirm("Delete is irreversible", confirmLabel, "Cancel",
-		container.NewVBox(msg), func(confirmed bool) {
+		content, func(confirmed bool) {
 			if confirmed {
 				onConfirm()
 			}

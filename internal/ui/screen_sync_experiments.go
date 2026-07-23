@@ -577,9 +577,10 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 				})
 			}
 			if resolver.hasDeletes() {
+				deletes := resolver.pendingDeletes()
 				showIrreversibleDeleteConfirm(s,
-					"This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.",
-					"Delete and Sync", proceed)
+					fmt.Sprintf("This will permanently delete %d file cop(y/ies) from the chosen location(s). This cannot be undone.", len(deletes)),
+					deletes, "Delete and Sync", proceed)
 				return
 			}
 			proceed()
@@ -707,9 +708,10 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 				})
 			}
 			if resolver.hasDeletes() {
+				deletes := resolver.pendingDeletes()
 				showIrreversibleDeleteConfirm(s,
-					"This will permanently delete the selected file(s) from the chosen location(s). This cannot be undone.",
-					"Delete and Sync", proceed)
+					fmt.Sprintf("This will permanently delete %d file cop(y/ies) from the chosen location(s). This cannot be undone.", len(deletes)),
+					deletes, "Delete and Sync", proceed)
 				return
 			}
 			proceed()

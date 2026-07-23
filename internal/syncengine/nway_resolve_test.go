@@ -221,18 +221,26 @@ func TestRenameThenRescan_PropagatesAsOrdinaryMissingFile(t *testing.T) {
 	}
 }
 
-func TestSuggestConflictRenameNameAt_DistinctPerLocationAndSanitized(t *testing.T) {
-	a := SuggestConflictRenameNameAt("r/f.mp3", "Lab NAS")
-	b := SuggestConflictRenameNameAt("r/f.mp3", "SharePoint: Bees/2026")
-	if a == b {
-		t.Fatalf("names for different locations must differ, both were %q", a)
+func TestSuggestConflictRenameNameN_SuffixesAndKeepsExtension(t *testing.T) {
+	if got := SuggestConflictRenameNameN("r/f.mp3", 1); got != "f_1.mp3" {
+		t.Errorf("n=1 -> %q, want f_1.mp3", got)
 	}
-	if !strings.HasPrefix(a, "f (Lab NAS conflict copy ") || !strings.HasSuffix(a, ").mp3") {
-		t.Errorf("unexpected shape: %q", a)
+	if got := SuggestConflictRenameNameN("r/f.mp3", 2); got != "f_2.mp3" {
+		t.Errorf("n=2 -> %q, want f_2.mp3", got)
 	}
-	for _, c := range []string{"/", "\\", ":", "*", "?", "<", ">", "|"} {
-		if strings.Contains(b, c) {
-			t.Errorf("sanitized name %q still contains %q", b, c)
-		}
+	// Distinct suffixes must yield distinct names — two differing copies
+	// renamed to the same name would just recreate the conflict.
+	if SuggestConflictRenameNameN("r/f.mp3", 1) == SuggestConflictRenameNameN("r/f.mp3", 2) {
+		t.Error("different suffixes produced the same name")
+	}
+	// Base name is returned, never a path.
+	if strings.Contains(SuggestConflictRenameNameN("a/b/c.wav", 3), "/") {
+		t.Error("suggested name must be a bare filename, not a path")
+	}
+	if got := SuggestConflictRenameNameN("noext", 1); got != "noext_1" {
+		t.Errorf("extensionless -> %q, want noext_1", got)
+	}
+	if got := SuggestConflictRenameName("r/f.mp3"); got != "f_1.mp3" {
+		t.Errorf("single-copy default -> %q, want f_1.mp3", got)
 	}
 }

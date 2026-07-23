@@ -219,6 +219,76 @@ func TestNWayResolver_ApplyChoiceToUnresolved(t *testing.T) {
 	}
 }
 
+func TestNWayResolver_KeepAllRenameNames(t *testing.T) {
+	r, locs := resolverFixture()
+	var three nwayConflict
+	for _, c := range r.conflicts() {
+		if c.key.relPath == "r/three-way.mp3" {
+			three = c
+		}
+	}
+
+	// Defaults are foo_N.ext across the present copies, all distinct, and
+	// never collide with a file already in that directory.
+	names := r.defaultRenameNames(three)
+	if len(names) != 3 {
+		t.Fatalf("got %d default names, want one per present copy", len(names))
+	}
+	seen := map[string]bool{}
+	for _, loc := range locs {
+		n := names[loc.ID]
+		if n == "" || seen[n] {
+			t.Fatalf("default names must be distinct and non-empty, got %v", names)
+		}
+		seen[n] = true
+	}
+	if !seen["three-way_1.mp3"] || !seen["three-way_2.mp3"] || !seen["three-way_3.mp3"] {
+		t.Errorf("expected three-way_1/2/3.mp3, got %v", names)
+	}
+
+	choice := nwayChoice{kind: nwayChoiceKeepAll, renameTo: names}
+	if !r.renameNamesValid(three, choice) {
+		t.Error("freshly generated defaults should validate")
+	}
+
+	// Duplicate name across two copies is rejected on both.
+	dup := map[string]string{locs[0].ID: "x.mp3", locs[1].ID: "x.mp3", locs[2].ID: "y.mp3"}
+	dupChoice := nwayChoice{kind: nwayChoiceKeepAll, renameTo: dup}
+	if r.renameNamesValid(three, dupChoice) {
+		t.Error("duplicate names must be invalid")
+	}
+	if r.renameNameErr(three, locs[0].ID, dupChoice) == "" {
+		t.Error("expected an error on the duplicated entry")
+	}
+
+	// Colliding with an existing file in the same directory is rejected.
+	clash := map[string]string{locs[0].ID: "ok.mp3", locs[1].ID: "a.mp3", locs[2].ID: "b.mp3"}
+	if r.renameNamesValid(three, nwayChoice{kind: nwayChoiceKeepAll, renameTo: clash}) {
+		t.Error("a name matching an existing file in the directory must be invalid")
+	}
+
+	// Empty and path-separator names are rejected.
+	for _, bad := range []string{"", "  ", "sub/f.mp3", `sub\f.mp3`} {
+		m := map[string]string{locs[0].ID: bad, locs[1].ID: "a.mp3", locs[2].ID: "b.mp3"}
+		if r.renameNameErr(three, locs[0].ID, nwayChoice{kind: nwayChoiceKeepAll, renameTo: m}) == "" {
+			t.Errorf("name %q should have been rejected", bad)
+		}
+	}
+
+	// Sync stays gated while a keep-all choice has unusable names, even though
+	// the choice itself is "decided".
+	r.choices[three.key] = dupChoice
+	if r.unresolvedCount() == 0 {
+		t.Error("invalid rename names must keep the conflict counted as unresolved")
+	}
+	r.choices[three.key] = choice
+	before := r.unresolvedCount()
+	r.choices[three.key] = nwayChoice{kind: nwayChoiceSkip}
+	if r.unresolvedCount() != before {
+		t.Error("a valid keep-all should count as resolved, same as skip")
+	}
+}
+
 func TestNWayResolver_RowSummary(t *testing.T) {
 	r, locs := resolverFixture()
 	key := nwayConflictKey{expName: "exp-a", relPath: "r/three-way.mp3"}

@@ -1244,7 +1244,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 			}
 			message := fmt.Sprintf("This will permanently delete %s selected file(s) across the %d location(s). This cannot be undone.",
 				commaInt(fileCount), locCount)
-			showIrreversibleDeleteConfirm(s, message, "Delete Permanently", run)
+			showIrreversibleDeleteConfirm(s, message, nil, "Delete Permanently", run)
 			return
 		}
 		run()

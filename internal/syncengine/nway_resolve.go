@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path"
 	"strings"
-	"time"
 
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/operations"
@@ -132,32 +131,24 @@ func ApplyOverwriteResolutions(result NWayScanResult, resolutions []NWayConflict
 	return resolved
 }
 
-// SuggestConflictRenameName returns a default new base filename (with
-// extension) for a renamed conflict copy, e.g.
-// "foo (conflict copy 2026-07-09).mp3" — a starting point the user is free
-// to edit before confirming, not the only option.
+// SuggestConflictRenameNameN returns the default new base filename (with
+// extension) for the nth renamed copy of a conflicting file, e.g.
+// SuggestConflictRenameNameN("r/foo.mp3", 2) == "foo_2.mp3". Keep-all-versions
+// resolutions assign these arbitrarily across the present copies — the point
+// is only that every copy ends up with a distinct name (renaming two differing
+// copies to the same name would just recreate the conflict under that name).
+// It's a starting point the user edits in the resolver, not the only option.
+func SuggestConflictRenameNameN(relPath string, n int) string {
+	ext := path.Ext(relPath)
+	base := strings.TrimSuffix(path.Base(relPath), ext)
+	return fmt.Sprintf("%s_%d%s", base, n, ext)
+}
+
+// SuggestConflictRenameName is the single-copy default, equivalent to the
+// first suffix. Used as the fallback when a resolution carries no explicit
+// NewName.
 func SuggestConflictRenameName(relPath string) string {
-	ext := path.Ext(relPath)
-	base := strings.TrimSuffix(path.Base(relPath), ext)
-	return fmt.Sprintf("%s (conflict copy %s)%s", base, time.Now().Format("2006-01-02"), ext)
-}
-
-// SuggestConflictRenameNameAt is SuggestConflictRenameName with the source
-// location's name baked in, e.g. "foo (Lab NAS conflict copy 2026-07-09).mp3".
-// Used by keep-all-versions resolutions, where every location's copy is
-// renamed and must end up with a distinct name — renaming two differing
-// copies to the same name would just recreate the conflict under that name.
-func SuggestConflictRenameNameAt(relPath, locationName string) string {
-	ext := path.Ext(relPath)
-	base := strings.TrimSuffix(path.Base(relPath), ext)
-	return fmt.Sprintf("%s (%s conflict copy %s)%s", base, sanitizeNameForFilename(locationName), time.Now().Format("2006-01-02"), ext)
-}
-
-// sanitizeNameForFilename strips characters from a user-chosen location name
-// that are path separators or otherwise unsafe in a filename on at least one
-// of the synced backends.
-func sanitizeNameForFilename(name string) string {
-	return strings.NewReplacer("/", "-", "\\", "-", ":", "-", "*", "-", "?", "-", "\"", "'", "<", "(", ">", ")", "|", "-").Replace(name)
+	return SuggestConflictRenameNameN(relPath, 1)
 }
 
 // RenameConflictFile renames relPath at loc to newRelPath, in place at the
