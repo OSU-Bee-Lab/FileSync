@@ -30,7 +30,7 @@ func showPullFiles(s *state) {
 	destLabel := widget.NewLabel("No destination chosen")
 	var destFolder string
 
-	fullIdentCheck := widget.NewCheck("Use full path (keep source folders under destination)", nil)
+	fullIdentCheck := widget.NewCheck("Use full ident", nil)
 	fullIdentCheck.SetChecked(true)
 
 	scanBtn := widget.NewButton("Scan", nil)
@@ -52,9 +52,9 @@ func showPullFiles(s *state) {
 			return
 		}
 		if relPath == "" {
-			scopeLabel.SetText("Scope: entire experiments/ root")
+			scopeLabel.SetText("Pulling: entire experiments/ root")
 		} else {
-			scopeLabel.SetText("Scope: experiments/" + relPath)
+			scopeLabel.SetText("Pulling: experiments/" + relPath)
 		}
 	}
 
