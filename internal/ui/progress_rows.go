@@ -110,13 +110,68 @@ func (ps *progressScreen) tempEntriesForFolder(exp *expUIState) []syncengine.Sca
 	return filtered
 }
 
+// recomputeUnresolved refreshes the cached set of conflicts still awaiting a
+// usable decision. Called from every list-refresh entry point so file, folder
+// and experiment rows read one consistent snapshot. Without an N-way resolver
+// there's nothing to resolve conflicts with, so every conflict stays
+// unresolved.
+func (ps *progressScreen) recomputeUnresolved() {
+	if ps.extras.nway == nil {
+		ps.unresolved, ps.haveResolver = nil, false
+		return
+	}
+	ps.unresolved, ps.haveResolver = ps.extras.nway.unresolvedKeys(), true
+}
+
+// isUnresolvedConflict reports whether f is a conflict still needing a
+// decision — what drives the orange wash and its roll-up onto the folder and
+// experiment rows above it.
+func (ps *progressScreen) isUnresolvedConflict(expLabel string, f *fileUIState) bool {
+	if f.action != syncengine.ActionConflict {
+		return false
+	}
+	if !ps.haveResolver {
+		return true
+	}
+	return ps.unresolved[nwayConflictKey{expName: expLabel, relPath: f.relPath}]
+}
+
+// unresolvedInExp counts conflicts still awaiting a decision anywhere in one
+// experiment, for the experiment row's own orange wash.
+func (ps *progressScreen) unresolvedInExp(exp *expUIState) int {
+	if !ps.haveResolver {
+		return exp.totalConflicts
+	}
+	n := 0
+	for k := range ps.unresolved {
+		if k.expName == exp.label {
+			n++
+		}
+	}
+	return n
+}
+
+// unresolvedWarnTip captions the warning icon on a folder or experiment row
+// that has unresolved conflicts beneath it. Empty when there are none, which
+// is also what clears the row's orange wash.
+func unresolvedWarnTip(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n == 1 {
+		return "1 unresolved conflict"
+	}
+	return fmt.Sprintf("%d unresolved conflicts", n)
+}
+
 // conflictRowSummary captions a conflict file row: a short status for the
-// right-aligned summary (the resolution state in an N-way session, or just
-// "conflict"), plus the full reason (shown in the row's warning-icon tooltip,
-// not inline, so it can't overrun the file name) and the clickable relPath.
+// right-aligned summary (the chosen resolution, or nothing while undecided —
+// the warning icon and orange wash already say "conflict"), plus the full
+// reason (shown in the icon's tooltip, never inline, so it can't overrun the
+// file name) and the clickable relPath.
 func (ps *progressScreen) conflictRowSummary(exp *expUIState, f *fileUIState) (summary, reason, relPath string) {
 	if ps.extras.nway == nil {
-		return "⚠ conflict", f.conflictReason, ""
+		return "", f.conflictReason, ""
 	}
 	return ps.extras.nway.rowSummary(exp.label, f.relPath, f.conflictReason), f.conflictReason, f.relPath
 }
@@ -154,6 +209,11 @@ func (ps *progressScreen) computeFileRows() (unsynced, synced []barRow) {
 			}
 			if f.action == syncengine.ActionConflict {
 				summary, reason, relPath := ps.conflictRowSummary(exp, f)
+				// Once resolved the row drops its warning icon and orange wash
+				// and just states the chosen outcome.
+				if !ps.isUnresolvedConflict(exp.label, f) {
+					reason = ""
+				}
 				unsynced = append(unsynced, barRow{
 					label:           f.name,
 					summary:         summary,
@@ -222,14 +282,11 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 				prog = float64(bytesDone) / float64(bytesTotal)
 			}
 			summary := fmt.Sprintf("%d / %d files", filesDone, filesTotal)
-			conflicts := 0
+			unresolved := 0
 			for _, f := range fold.files {
-				if f.action == syncengine.ActionConflict {
-					conflicts++
+				if ps.isUnresolvedConflict(exp.label, f) {
+					unresolved++
 				}
-			}
-			if conflicts > 0 {
-				summary = fmt.Sprintf("⚠ %d · %s", conflicts, summary)
 			}
 			unsynced = append(unsynced, barRow{
 				label:    fold.path,
@@ -238,20 +295,22 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 				hasError: fold.hasError,
 				isFolder: true,
 				refIdx:   i,
+				// Orange wash rolls up from the files: the folder stays flagged
+				// until every conflict inside it has a decision.
+				conflictReason: unresolvedWarnTip(unresolved),
 			})
 		}
 	} else {
 		for i, row := range exp.tempFolders {
 			total := row.CopyCount + row.SkipCount + row.ConflictCount
-			summary := fmt.Sprintf("%d / %d files", row.SkipCount, total)
-			if row.ConflictCount > 0 {
-				summary = fmt.Sprintf("⚠ %d · %s", row.ConflictCount, summary)
-			}
 			unsynced = append(unsynced, barRow{
 				label:    row.Path,
-				summary:  summary,
+				summary:  fmt.Sprintf("%d / %d files", row.SkipCount, total),
 				isFolder: true,
 				refIdx:   i,
+				// Mid-scan nothing can be resolved yet, so every conflict found
+				// so far counts as outstanding.
+				conflictReason: unresolvedWarnTip(row.ConflictCount),
 			})
 		}
 	}
@@ -259,6 +318,7 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 }
 
 func (ps *progressScreen) refreshFiles() {
+	ps.recomputeUnresolved()
 	ps.fileUnsyncedRows, ps.fileSyncedRows = ps.computeFileRows()
 	ps.applyFilesMode(len(ps.fileUnsyncedRows) > 0, len(ps.fileSyncedRows) > 0)
 	ps.fileUnsyncedList.Refresh()
@@ -266,6 +326,7 @@ func (ps *progressScreen) refreshFiles() {
 }
 
 func (ps *progressScreen) refreshFolders() {
+	ps.recomputeUnresolved()
 	ps.foldUnsyncedRows, ps.foldSyncedRows = ps.computeFolderRows()
 	ps.applyFoldMode(len(ps.foldUnsyncedRows) > 0, len(ps.foldSyncedRows) > 0)
 	ps.foldUnsyncedList.Refresh()

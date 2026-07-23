@@ -312,18 +312,24 @@ func (r *nwayResolver) renameNamesValid(c nwayConflict, choice nwayChoice) bool 
 	return true
 }
 
-// unresolvedCount counts conflicts still needing attention: undecided ones,
-// plus keep-all choices whose edited names aren't yet usable — so Sync stays
-// gated until every rename is valid, not merely chosen.
-func (r *nwayResolver) unresolvedCount() int {
-	n := 0
+// unresolvedKeys is the set of conflicts still needing attention: undecided
+// ones, plus keep-all choices whose edited names aren't yet usable. Rows use
+// it to stay orange until everything beneath them is settled.
+func (r *nwayResolver) unresolvedKeys() map[nwayConflictKey]bool {
+	out := map[nwayConflictKey]bool{}
 	for _, c := range r.conflicts() {
 		choice := r.choices[c.key]
 		if !choice.decided() || !r.renameNamesValid(c, choice) {
-			n++
+			out[c.key] = true
 		}
 	}
-	return n
+	return out
+}
+
+// unresolvedCount counts conflicts still needing attention — so Sync stays
+// gated until every rename is valid, not merely chosen.
+func (r *nwayResolver) unresolvedCount() int {
+	return len(r.unresolvedKeys())
 }
 
 func (r *nwayResolver) setChoice(key nwayConflictKey, choice nwayChoice) {
@@ -339,9 +345,10 @@ func (r *nwayResolver) setChoice(key nwayConflictKey, choice nwayChoice) {
 func (r *nwayResolver) rowSummary(expName, relPath, reason string) string {
 	choice := r.choices[nwayConflictKey{expName: expName, relPath: relPath}]
 	if !choice.decided() {
-		// The reason is shown in the row's warning-icon tooltip, not inline,
-		// so this stays short enough never to overrun the file name.
-		return "⚠ needs resolution"
+		// Nothing inline: the row already carries a warning icon (hover it for
+		// the reason) and an orange wash, so any text here would just be a
+		// second, redundant warning marker.
+		return ""
 	}
 	switch choice.kind {
 	case nwayChoiceKeepOne:

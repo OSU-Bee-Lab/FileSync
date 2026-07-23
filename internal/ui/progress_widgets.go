@@ -157,10 +157,12 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 		bgColor = color.NRGBA{R: 254, G: 243, B: 199, A: 255}
 		fillColor = color.NRGBA{R: 253, G: 186, B: 116, A: 255}
 	} else if warnTip != "" {
-		// Conflict row: orange wash so it stands out in the list; the reason
-		// itself lives in the warning icon's hover tooltip and the resolver.
+		// Unresolved conflict (or a folder/experiment containing one): orange
+		// wash so it stands out, with a deeper orange fill so a folder row's
+		// progress is still legible on top of it. The reason/count lives in
+		// the warning icon's hover tooltip and in the resolver.
 		bgColor = color.NRGBA{R: 255, G: 237, B: 213, A: 255}
-		fillColor = color.Transparent
+		fillColor = color.NRGBA{R: 253, G: 186, B: 116, A: 255}
 	} else {
 		bgColor = color.White
 		if progress >= 1.0 {

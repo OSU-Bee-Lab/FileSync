@@ -293,11 +293,11 @@ func TestNWayResolver_RowSummary(t *testing.T) {
 	r, locs := resolverFixture()
 	key := nwayConflictKey{expName: "exp-a", relPath: "r/three-way.mp3"}
 
-	// Undecided stays short and reason-free: the reason is surfaced in the
-	// row's warning-icon tooltip instead, so a long reason can never overrun
-	// the file name in the row.
-	if got := r.rowSummary("exp-a", "r/three-way.mp3", "different size and content"); got != "⚠ needs resolution" {
-		t.Errorf("undecided summary = %q", got)
+	// Undecided contributes no inline text at all: the row's warning icon
+	// (hover for the reason) and orange wash already mark it, so any summary
+	// here would be a second, redundant warning marker.
+	if got := r.rowSummary("exp-a", "r/three-way.mp3", "different size and content"); got != "" {
+		t.Errorf("undecided summary = %q, want empty", got)
 	}
 	r.choices[key] = nwayChoice{kind: nwayChoiceKeepOne, winner: locs[0]}
 	if got := r.rowSummary("exp-a", "r/three-way.mp3", "x"); got != "✓ keeping Lab NAS's version" {

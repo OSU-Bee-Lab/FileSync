@@ -83,6 +83,14 @@ type progressScreen struct {
 	expStates       []*expUIState
 	scanResults     []syncengine.ScanResult
 
+	// unresolved is the cached set of conflicts still awaiting a usable
+	// decision, and haveResolver whether this session has an N-way resolver at
+	// all. Recomputed by recomputeUnresolved at each list-refresh entry point
+	// so file, folder and experiment rows all read one consistent snapshot
+	// instead of each re-walking the scan results per row.
+	unresolved   map[nwayConflictKey]bool
+	haveResolver bool
+
 	// activeCancel cancels every task/job currently in flight for the
 	// current run (scan or sync). Created on the UI goroutine before the
 	// run's worker goroutine is launched — see progress_run.go.
@@ -237,7 +245,10 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 			}
 			summary := fmt.Sprintf("%d%%", int(prog*100))
 			isSelected := ps.selectedExpIdx == int(id)
-			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win, "")
+			// Orange wash rolls all the way up: an experiment stays flagged
+			// while any conflict anywhere inside it is still undecided.
+			warn := unresolvedWarnTip(ps.unresolvedInExp(exp))
+			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win, warn)
 		},
 	)
 
@@ -655,6 +666,7 @@ func (ps *progressScreen) renderMetrics(m syncMetrics) {
 func (ps *progressScreen) refreshLists() {
 	ps.syncErrorLabelForSelection()
 
+	ps.recomputeUnresolved()
 	ps.expList.Refresh()
 	// Only refresh foldList & fileList if the selected exp is static or
 	// changed. If we are in scan running and it's active, refresh.
