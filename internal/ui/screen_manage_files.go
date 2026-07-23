@@ -789,7 +789,7 @@ func (lp *manageFilesLocPlan) folderRows(op manageFilesOp) (rows []barRow, keys 
 		}
 		rows = append(rows, barRow{
 			label:    manageSidePrefix(key.side) + dir,
-			summary:  fmt.Sprintf("%d file(s) · %s", a.count, humanBytes(a.bytes)),
+			summary:  fmt.Sprintf("%s · %s", plural(a.count, "file", ""), humanBytes(a.bytes)),
 			isFolder: true,
 			refIdx:   i,
 		})
@@ -1092,7 +1092,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 
 				locRows = make([]barRow, len(plans))
 				for i, lp := range plans {
-					summary := fmt.Sprintf("%d file(s) · %s", lp.fileCount(req.op), humanBytes(lp.totalBytes(req.op)))
+					summary := fmt.Sprintf("%s · %s", plural(lp.fileCount(req.op), "file", ""), humanBytes(lp.totalBytes(req.op)))
 					locRows[i] = barRow{label: lp.loc.Name, summary: summary, err: lp.err, hasError: lp.err != nil, refIdx: i}
 				}
 				locList.Refresh()
@@ -1109,7 +1109,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 				}
 
 				if collisionCount > 0 {
-					collisionsBtn.SetText(fmt.Sprintf("Resolve %d collision(s)…", collisionCount))
+					collisionsBtn.SetText(fmt.Sprintf("Resolve %s…", plural(collisionCount, "collision", "")))
 					collisionsBtn.Show()
 				} else {
 					collisionsBtn.Hide()
@@ -1242,8 +1242,8 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					fileCount = n
 				}
 			}
-			message := fmt.Sprintf("This will permanently delete %s selected file(s) across the %d location(s). This cannot be undone.",
-				commaInt(fileCount), locCount)
+			message := fmt.Sprintf("This will permanently delete %s selected %s across %s. This cannot be undone.",
+				commaInt(fileCount), pluralWord(fileCount, "file", ""), plural(locCount, "location", ""))
 			showIrreversibleDeleteConfirm(s, message, nil, "Delete Permanently", run)
 			return
 		}

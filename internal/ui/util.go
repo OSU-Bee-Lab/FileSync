@@ -56,6 +56,28 @@ func requireNonEmpty(win fyne.Window, value, title, msg string) bool {
 	return true
 }
 
+// pluralWord returns just the singular or plural form of a noun for a count,
+// with no number attached — for callers that format the count themselves
+// (e.g. through commaInt). pluralForm may be empty for the regular case,
+// where the singular plus "s" is used; pass it explicitly for irregulars
+// ("file copy" / "file copies").
+func pluralWord(n int, singular, pluralForm string) string {
+	if n == 1 {
+		return singular
+	}
+	if pluralForm == "" {
+		return singular + "s"
+	}
+	return pluralForm
+}
+
+// plural formats a count with its noun, picking the singular or plural form
+// so user-facing text never has to hedge with "(s)" — "1 conflict", not
+// "1 conflict(s)".
+func plural(n int, singular, pluralForm string) string {
+	return fmt.Sprintf("%d %s", n, pluralWord(n, singular, pluralForm))
+}
+
 func humanBytes(n int64) string {
 	const unit = 1024
 	if n < unit {

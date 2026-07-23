@@ -158,10 +158,7 @@ func unresolvedWarnTip(n int) string {
 	if n <= 0 {
 		return ""
 	}
-	if n == 1 {
-		return "1 unresolved conflict"
-	}
-	return fmt.Sprintf("%d unresolved conflicts", n)
+	return plural(n, "unresolved conflict", "")
 }
 
 // conflictRowSummary captions a conflict file row: a short status for the

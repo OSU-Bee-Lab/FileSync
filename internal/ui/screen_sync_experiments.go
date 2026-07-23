@@ -232,9 +232,9 @@ func showSyncExperimentsAllWay(s *state) {
 					return // selection changed mid-load; a newer refresh is in flight
 				}
 				if finalErr != nil {
-					statusLabel.SetText(fmt.Sprintf("%d experiment(s) found (one or more locations failed to list: %v)", len(finalUnion), finalErr))
+					statusLabel.SetText(fmt.Sprintf("%s found (one or more locations failed to list: %v)", plural(len(finalUnion), "experiment", ""), finalErr))
 				} else {
-					statusLabel.SetText(fmt.Sprintf("%d experiment(s) found across %d location(s)", len(finalUnion), len(locs)))
+					statusLabel.SetText(fmt.Sprintf("%s found across %s", plural(len(finalUnion), "experiment", ""), plural(len(locs), "location", "")))
 				}
 			})
 		}()
@@ -579,7 +579,7 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 			if resolver.hasDeletes() {
 				deletes := resolver.pendingDeletes()
 				showIrreversibleDeleteConfirm(s,
-					fmt.Sprintf("This will permanently delete %d file cop(y/ies) from the chosen location(s). This cannot be undone.", len(deletes)),
+					fmt.Sprintf("This will permanently delete %s. This cannot be undone.", plural(len(deletes), "file copy", "file copies")),
 					deletes, "Delete and Sync", proceed)
 				return
 			}
@@ -631,7 +631,8 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 		})
 	}
 	runSyncTransferTasks(s, tasks, mode, autoSync,
-		"Every file in the source folder already exists at the selected location(s).")
+		fmt.Sprintf("Every file in the source folder already exists at the selected %s.",
+			pluralWord(len(dsts), "location", "")))
 }
 
 // runNWayScan runs the N-way scan live inside the shared scan/sync screen:
@@ -710,7 +711,7 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 			if resolver.hasDeletes() {
 				deletes := resolver.pendingDeletes()
 				showIrreversibleDeleteConfirm(s,
-					fmt.Sprintf("This will permanently delete %d file cop(y/ies) from the chosen location(s). This cannot be undone.", len(deletes)),
+					fmt.Sprintf("This will permanently delete %s. This cannot be undone.", plural(len(deletes), "file copy", "file copies")),
 					deletes, "Delete and Sync", proceed)
 				return
 			}

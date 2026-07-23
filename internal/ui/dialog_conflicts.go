@@ -97,9 +97,9 @@ func showConflictsPrompt(s *state, conflicts []conflictRow, onProceed func()) {
 	scroll.SetMinSize(fyne.NewSize(520, 320))
 
 	header := widget.NewLabel(fmt.Sprintf(
-		"%d file(s) couldn't be confidently matched between source and destination.\n"+
+		"%s couldn't be confidently matched between source and destination.\n"+
 			"These will NOT be copied — review them, then choose how to proceed.",
-		len(conflicts)))
+		plural(len(conflicts), "file", "")))
 	header.Wrapping = fyne.TextWrapWord
 
 	var d dialog.Dialog

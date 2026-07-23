@@ -450,9 +450,9 @@ func (ps *progressScreen) gateNWaySync() {
 	unresolved := ps.extras.nway.unresolvedCount()
 	switch {
 	case unresolved > 0:
-		ps.titleLabel.SetText(fmt.Sprintf("Scan complete — %d conflict(s) to resolve", unresolved))
+		ps.titleLabel.SetText(fmt.Sprintf("Scan complete — %s to resolve", plural(unresolved, "conflict", "")))
 		ps.syncBtn.Hide()
-		ps.resolveBtn.SetText(fmt.Sprintf("Resolve %d conflict(s)…", unresolved))
+		ps.resolveBtn.SetText(fmt.Sprintf("Resolve %s…", plural(unresolved, "conflict", "")))
 		ps.resolveBtn.Show()
 	case ps.extras.nway.conflictCount() > 0:
 		ps.resolveBtn.SetText("Review conflict resolutions")
