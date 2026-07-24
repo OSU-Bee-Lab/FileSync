@@ -144,25 +144,27 @@ func showSettings(s *state) {
 
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
+	scroll := container.NewVScroll(container.NewVBox(
+		debugCheck, debugHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Recorder Sync inactivity timeout (minutes)"), inactivityEntry, inactivityHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Checkers"), checkersEntry, checkersHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Bandwidth limit (MiB/s)"), bwLimitEntry, bwLimitHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Transfers"), transfersEntry, transfersHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Retries"), retriesForever, retriesEntry, retriesHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Connections"), http2Check, http2Hint,
+	))
+
 	content := container.NewBorder(
 		container.NewVBox(widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), widget.NewSeparator()),
 		backBtn,
 		nil, nil,
-		container.NewVBox(
-			debugCheck, debugHint,
-			widget.NewSeparator(),
-			widget.NewLabel("Recorder Sync inactivity timeout (minutes)"), inactivityEntry, inactivityHint,
-			widget.NewSeparator(),
-			widget.NewLabel("Checkers"), checkersEntry, checkersHint,
-			widget.NewSeparator(),
-			widget.NewLabel("Bandwidth limit (MiB/s)"), bwLimitEntry, bwLimitHint,
-			widget.NewSeparator(),
-			widget.NewLabel("Transfers"), transfersEntry, transfersHint,
-			widget.NewSeparator(),
-			widget.NewLabel("Retries"), retriesForever, retriesEntry, retriesHint,
-			widget.NewSeparator(),
-			widget.NewLabel("Connections"), http2Check, http2Hint,
-		),
+		scroll,
 	)
 	s.setContent(container.NewPadded(content))
 }
