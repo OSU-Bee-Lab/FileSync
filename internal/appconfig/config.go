@@ -76,6 +76,13 @@ type Config struct {
 	// last-selected Locations across restarts, the same way
 	// RecorderSettings.DestinationLocationIDs does for Sync Recorders.
 	ManageFilesLocationIDs []string `json:"manageFilesLocationIds,omitempty"`
+	// SyncExperimentsLocationIDs persists the Sync Locations screen's
+	// last-selected Locations for All-Way Sync across restarts, the same way
+	// ManageFilesLocationIDs does for Manage Files.
+	SyncExperimentsLocationIDs []string `json:"syncExperimentsLocationIds,omitempty"`
+	// SyncOneWayLocationIDs persists the Sync Locations screen's
+	// last-selected destination Locations for One Way Sync across restarts.
+	SyncOneWayLocationIDs []string `json:"syncOneWayLocationIds,omitempty"`
 }
 
 // DefaultTimestampToleranceMinutes is the fallback timestamp tolerance used

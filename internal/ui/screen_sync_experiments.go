@@ -65,7 +65,19 @@ func showSyncExperimentsAllWay(s *state) {
 	statusLabel := widget.NewLabel("")
 	loading := newLoadingBar()
 
+	if len(s.syncExperimentsLocationNames) == 0 {
+		s.syncExperimentsLocationNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncExperimentsLocationIDs)
+	}
 	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...))
+
+	// setLocationNames caches the selection for the session (as before) and
+	// persists it to cfg so it's restored the next time the app opens,
+	// mirroring ManageFilesLocationIDs' pattern for Manage Files.
+	setLocationNames := func(names []string) {
+		s.syncExperimentsLocationNames = names
+		s.cfg.SyncExperimentsLocationIDs = idsFromLocations(locationsFromNamesAny(s.cfg.Locations, names))
+		s.saveConfig()
+	}
 
 	var quickScanBtn, fullScanBtn *widget.Button
 	var expGroup *widget.CheckGroup
@@ -137,7 +149,7 @@ func showSyncExperimentsAllWay(s *state) {
 					}
 				}
 				locGroup.SetSelected(keep)
-				s.syncExperimentsLocationNames = keep
+				setLocationNames(keep)
 				refresh()
 			}, refresh)
 			return
@@ -241,7 +253,7 @@ func showSyncExperimentsAllWay(s *state) {
 	}
 
 	locGroup.OnChanged = func(sel []string) {
-		s.syncExperimentsLocationNames = sel
+		setLocationNames(sel)
 		refresh()
 	}
 	if len(locGroup.Selected()) >= 1 {
@@ -274,7 +286,7 @@ func showSyncExperimentsAllWay(s *state) {
 					}
 				}
 				locGroup.SetSelected(keep)
-				s.syncExperimentsLocationNames = keep
+				setLocationNames(keep)
 				updateScanBtn()
 			}, startScan)
 			return
@@ -335,11 +347,23 @@ func showSyncExperimentsOneWay(s *state) {
 	fullScanBtn := widget.NewButton("Full Scan", nil)
 	fullScanBtn.Disable()
 
+	if len(s.syncOneWayToNames) == 0 {
+		s.syncOneWayToNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncOneWayLocationIDs)
+	}
 	locGroup := newToggleGroup(names, append([]string{}, s.syncOneWayToNames...))
 	browser := newDestFolderBrowser(s.win, true)
 
 	selectedLocs := func() []syncengine.Location {
 		return locationsFromNamesAny(s.cfg.Locations, locGroup.Selected())
+	}
+
+	// setToNames caches the selection for the session (as before) and
+	// persists it to cfg so it's restored the next time the app opens,
+	// mirroring setLocationNames in showSyncExperimentsAllWay.
+	setToNames := func(names []string) {
+		s.syncOneWayToNames = names
+		s.cfg.SyncOneWayLocationIDs = idsFromLocations(locationsFromNamesAny(s.cfg.Locations, names))
+		s.saveConfig()
 	}
 
 	updateSyncEnabled := func() {
@@ -386,7 +410,7 @@ func showSyncExperimentsOneWay(s *state) {
 					}
 				}
 				locGroup.SetSelected(keep)
-				s.syncOneWayToNames = keep
+				setToNames(keep)
 				browser.SetLocations(selectedLocs())
 				updateSyncEnabled()
 				updateDestLabel()
@@ -397,7 +421,7 @@ func showSyncExperimentsOneWay(s *state) {
 	}
 
 	locGroup.OnChanged = func(sel []string) {
-		s.syncOneWayToNames = sel
+		setToNames(sel)
 		browser.SetLocations(selectedLocs())
 		updateSyncEnabled()
 		updateDestLabel()
