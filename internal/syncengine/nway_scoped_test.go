@@ -2,11 +2,23 @@ package syncengine
 
 import (
 	"context"
+	"fmt"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"testing"
 )
+
+// manyRecorderPaths builds n file paths, one per recorder directory, under
+// parent (or directly under the root when parent is empty).
+func manyRecorderPaths(parent string, n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = path.Join(parent, fmt.Sprintf("Recorder%02d", i), "a.mp3")
+	}
+	return out
+}
 
 func TestCoveringDirs(t *testing.T) {
 	tests := []struct {
@@ -38,6 +50,21 @@ func TestCoveringDirs(t *testing.T) {
 			name:  "a sibling sharing a name prefix is not mistaken for a descendant",
 			paths: []string{"d/RecorderA/a.mp3", "d/RecorderA2/b.mp3"},
 			want:  []string{"d/RecorderA", "d/RecorderA2"},
+		},
+		{
+			name:  "more than maxScanScopes siblings collapse to their parent",
+			paths: manyRecorderPaths("2026-06-30", maxScanScopes+1),
+			want:  []string{"2026-06-30"},
+		},
+		{
+			name:  "only the deepest level is lifted, and only as far as needed",
+			paths: append(manyRecorderPaths("2026-06-30/nested", maxScanScopes+1), "2026-05-01/RecorderA/a.mp3"),
+			want:  []string{"2026-05-01/RecorderA", "2026-06-30/nested"},
+		},
+		{
+			name:  "lifting all the way to the root gives up and asks for a full walk",
+			paths: manyRecorderPaths("", maxScanScopes+1),
+			want:  nil,
 		},
 	}
 

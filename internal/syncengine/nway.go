@@ -210,12 +210,28 @@ func ScanNWayScopedWithProgress(ctx context.Context, locs []Location, relPath st
 	return diffNWay(ctx, locs, listings, relPath, progress, mode)
 }
 
-// CoveringDirs returns the minimal set of directories that together contain
-// every path in relPaths, suitable as ScanNWayScopedWithProgress scopes: the
-// parent of each path, with any directory that already sits under another in
-// the set dropped. A nil return means "no useful narrowing" — either relPaths
-// was empty, or at least one path sits directly at the root, so only a walk
-// of the whole root covers it.
+// maxScanScopes bounds how many subtrees CoveringDirs will hand back, and so
+// (times the number of locations) how many concurrent listings a scoped scan
+// fans out into. Measured against a real SharePoint remote, scope *count*
+// costs remarkably little once the listings run concurrently — 16 scopes ran
+// ~2.0s against ~1.5s for one — because the dominant per-scope cost is
+// constructing the rclone Fs, and those overlap. What the cap is really for
+// is the tail: an experiment laid out with hundreds of leaf directories
+// would otherwise fan out into hundreds of simultaneous listings and get
+// throttled, losing far more than the narrowing ever won. Eight keeps the
+// common shapes exact (a handful of recorder directories) while collapsing
+// anything pathological up to a shallower ancestor, which costs only the
+// extra breadth of one listing.
+const maxScanScopes = 8
+
+// CoveringDirs returns a small set of directories that together contain every
+// path in relPaths, suitable as ScanNWayScopedWithProgress scopes: the parent
+// of each path, with any directory that already sits under another in the set
+// dropped, then lifted toward the root while more than maxScanScopes remain.
+//
+// A nil return means "no useful narrowing" — relPaths was empty, at least one
+// path sits directly at the root, or lifting ran all the way up — and the
+// caller should walk the whole root.
 func CoveringDirs(relPaths []string) []string {
 	seen := make(map[string]bool, len(relPaths))
 	for _, p := range relPaths {
@@ -233,6 +249,21 @@ func CoveringDirs(relPaths []string) []string {
 	for d := range seen {
 		dirs = append(dirs, d)
 	}
+	dirs = minimalDirs(dirs)
+	for len(dirs) > maxScanScopes {
+		if dirs = liftDeepest(dirs); dirs == nil {
+			return nil
+		}
+	}
+	return dirs
+}
+
+// minimalDirs drops every directory that duplicates or already sits under
+// another one in dirs, returning the rest sorted. Deduplicating matters as
+// much as the ancestor test: liftDeepest lifts whole levels at once, so
+// merging siblings only actually shrinks the set once their now-identical
+// parents collapse into one.
+func minimalDirs(dirs []string) []string {
 	// Sorted ascending, an ancestor always precedes its descendants
 	// ("a/b" < "a/b/c"), so one pass keeping only paths not already covered
 	// by something kept leaves exactly the minimal set.
@@ -241,7 +272,7 @@ func CoveringDirs(relPaths []string) []string {
 	for _, d := range dirs {
 		covered := false
 		for _, keep := range out {
-			if strings.HasPrefix(d, keep+"/") {
+			if d == keep || strings.HasPrefix(d, keep+"/") {
 				covered = true
 				break
 			}
@@ -251,6 +282,35 @@ func CoveringDirs(relPaths []string) []string {
 		}
 	}
 	return out
+}
+
+// liftDeepest replaces every deepest directory in dirs with its parent and
+// re-minimizes, shrinking the set by merging siblings. Returns nil once that
+// would lift something to the root (at which point only a whole-root walk
+// covers it). Each call strictly reduces the maximum depth, so repeated
+// calls terminate.
+func liftDeepest(dirs []string) []string {
+	depth := func(d string) int { return strings.Count(d, "/") }
+	maxDepth := 0
+	for _, d := range dirs {
+		if n := depth(d); n > maxDepth {
+			maxDepth = n
+		}
+	}
+
+	lifted := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		if depth(d) < maxDepth {
+			lifted = append(lifted, d)
+			continue
+		}
+		parent := parentDir(d)
+		if parent == "" {
+			return nil
+		}
+		lifted = append(lifted, parent)
+	}
+	return minimalDirs(lifted)
 }
 
 // diffNWay computes, for every relative path seen at any of the listings,
