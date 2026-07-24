@@ -424,19 +424,32 @@ func FilterNWayToSourcePresent(result NWayScanResult, srcID string) NWayScanResu
 }
 
 // ScanResultFromNWayTransfers converts one NWayTransferPair's files into a
-// ScanResult shaped exactly like a pairwise scan's output (every entry
-// ActionCopy), so the existing StartSyncExperiments/filesFromFilter copy
-// machinery drives it verbatim — N-way sync's only novel contribution is
-// the planning above (ScanNWay/BuildNWayTransferPlan); execution reuses the
-// pairwise job code unchanged.
-func ScanResultFromNWayTransfers(pair NWayTransferPair) ScanResult {
+// ScanResult shaped like a pairwise scan's output: every pair.Files entry is
+// ActionCopy, so the existing StartSyncExperiments/filesFromFilter copy
+// machinery (which only ever acts on ActionCopy entries) drives it verbatim —
+// N-way sync's only novel contribution is the planning above (ScanNWay/
+// BuildNWayTransferPlan); execution reuses the pairwise job code unchanged.
+//
+// scan is the NWayScanResult the pair was built from; every FileInSync path
+// in it is present at every location scanned, including this pair's source
+// and destination, so it's carried along as an inert ActionSkipIdentical
+// entry. filesFromFilter and the copy engine ignore non-ActionCopy entries,
+// so this is display-only: it's what lets the Ready-to-Sync/Syncing screens
+// keep showing "Already synced" instead of losing it once the transfer plan
+// (copy-only by nature) replaces the full scan result as this task's data.
+func ScanResultFromNWayTransfers(scan NWayScanResult, pair NWayTransferPair) ScanResult {
 	result := ScanResult{
-		Entries:   make([]ScanEntry, len(pair.Files)),
+		Entries:   make([]ScanEntry, 0, len(pair.Files)+len(scan.Files)),
 		CopyCount: len(pair.Files),
 	}
-	for i, f := range pair.Files {
-		result.Entries[i] = ScanEntry{RelPath: f.RelPath, Size: f.Size, Action: ActionCopy}
+	for _, f := range pair.Files {
+		result.Entries = append(result.Entries, ScanEntry{RelPath: f.RelPath, Size: f.Size, Action: ActionCopy})
 		result.TotalBytes += f.Size
+	}
+	for _, plan := range scan.Files {
+		if plan.Status == FileInSync {
+			result.Entries = append(result.Entries, nwayDisplayEntry(plan))
+		}
 	}
 	return result
 }

@@ -49,13 +49,27 @@ func (ps *progressScreen) makeBarList(rows *[]barRow, isSelected func(barRow) bo
 }
 
 // buildSplit wires two section lists into a VSplit and returns a function
-// that shows one or both panels depending on which groups have rows.
-func buildSplit(unsyncedList, syncedList *widget.List) (fyne.CanvasObject, func(hasUnsynced, hasSynced bool)) {
-	unsyncedPanel := container.NewBorder(sectionHeader("Current Sync"), nil, nil, nil, unsyncedList)
+// that shows one or both panels depending on which groups have rows. Once a
+// sync is actually running (or finished/cancelled — see progressScreen.
+// isSyncing), collapseSynced drops the "Already synced" panel and, since the
+// unsynced list is then the only thing left, its "Current Sync" header too —
+// there's nothing left to distinguish it from, so the label is just wasted
+// space at that point.
+func buildSplit(unsyncedList, syncedList *widget.List) (fyne.CanvasObject, func(hasUnsynced, hasSynced, collapseSynced bool)) {
+	unsyncedHeader := sectionHeader("Current Sync")
+	unsyncedPanel := container.NewBorder(unsyncedHeader, nil, nil, nil, unsyncedList)
 	syncedPanel := container.NewBorder(sectionHeader("Already synced"), nil, nil, nil, syncedList)
 	split := container.NewVSplit(unsyncedPanel, syncedPanel)
 	split.SetOffset(0.5)
-	applyMode := func(hasUnsynced, hasSynced bool) {
+	applyMode := func(hasUnsynced, hasSynced, collapseSynced bool) {
+		if collapseSynced {
+			unsyncedHeader.Hide()
+			unsyncedPanel.Show()
+			syncedPanel.Hide()
+			split.SetOffset(1.0)
+			return
+		}
+		unsyncedHeader.Show()
 		switch {
 		case hasUnsynced && hasSynced:
 			unsyncedPanel.Show()
@@ -247,10 +261,12 @@ func (ps *progressScreen) computeFileRows() (unsynced, synced []barRow) {
 }
 
 // computeFolderRows splits the selected experiment's folders into unsynced
-// (has files to copy) and already-synced (all files identical) groups. The
-// split is only known once exp.folders is populated (scan complete); while
-// the scan is still running, tempFolders all show in the unsynced group.
-// refIdx maps each row back to its folder index so selection works.
+// (has files to copy) and already-synced (all files identical) groups. Once
+// exp.folders is populated (scan complete) this is the final split; while the
+// scan is still running, a tempFolders row is bucketed the same way from its
+// counts so far — it can still move to unsynced later if the scan turns up a
+// new file in it. refIdx maps each row back to its folder index so selection
+// works.
 func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 	if ps.selectedExpIdx < 0 || ps.selectedExpIdx >= len(ps.expStates) {
 		return nil, nil
@@ -300,6 +316,20 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 	} else {
 		for i, row := range exp.tempFolders {
 			total := row.CopyCount + row.SkipCount + row.ConflictCount
+			// Mid-scan, a folder with nothing to copy and no conflict found so
+			// far reads as already-synced, same as isFullySkipped once the scan
+			// completes. It can still move to unsynced later if the scan turns
+			// up a new file in it — same live re-bucketing the Files panel does.
+			if row.CopyCount == 0 && row.ConflictCount == 0 && row.SkipCount > 0 {
+				synced = append(synced, barRow{
+					label:    row.Path,
+					summary:  fmt.Sprintf("%d / %d files", row.SkipCount, total),
+					isFolder: true,
+					gray:     true,
+					refIdx:   i,
+				})
+				continue
+			}
 			unsynced = append(unsynced, barRow{
 				label:    row.Path,
 				summary:  fmt.Sprintf("%d / %d files", row.SkipCount, total),
@@ -317,7 +347,7 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 func (ps *progressScreen) refreshFiles() {
 	ps.recomputeUnresolved()
 	ps.fileUnsyncedRows, ps.fileSyncedRows = ps.computeFileRows()
-	ps.applyFilesMode(len(ps.fileUnsyncedRows) > 0, len(ps.fileSyncedRows) > 0)
+	ps.applyFilesMode(len(ps.fileUnsyncedRows) > 0, len(ps.fileSyncedRows) > 0, ps.isSyncing())
 	ps.fileUnsyncedList.Refresh()
 	ps.fileSyncedList.Refresh()
 }
@@ -325,7 +355,7 @@ func (ps *progressScreen) refreshFiles() {
 func (ps *progressScreen) refreshFolders() {
 	ps.recomputeUnresolved()
 	ps.foldUnsyncedRows, ps.foldSyncedRows = ps.computeFolderRows()
-	ps.applyFoldMode(len(ps.foldUnsyncedRows) > 0, len(ps.foldSyncedRows) > 0)
+	ps.applyFoldMode(len(ps.foldUnsyncedRows) > 0, len(ps.foldSyncedRows) > 0, ps.isSyncing())
 	ps.foldUnsyncedList.Refresh()
 	ps.foldSyncedList.Refresh()
 }

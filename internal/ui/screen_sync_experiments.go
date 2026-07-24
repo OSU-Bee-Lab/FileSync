@@ -617,7 +617,7 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 		if pair.Source.ID != src.ID || !dstIDs[pair.Dest.ID] {
 			continue
 		}
-		transferResult := syncengine.ScanResultFromNWayTransfers(pair)
+		transferResult := syncengine.ScanResultFromNWayTransfers(result, pair)
 		dest := pair.Dest
 		tasks = append(tasks, scanTask{
 			Label: oneWayScanLabel([]syncengine.Location{dest}, relPath),
@@ -768,7 +768,7 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 	for i, name := range expNames {
 		pairs := syncengine.BuildNWayTransferPlan(results[i], syncengine.PreferLocalSource)
 		for _, pair := range pairs {
-			result := syncengine.ScanResultFromNWayTransfers(pair)
+			result := syncengine.ScanResultFromNWayTransfers(results[i], pair)
 			tasks = append(tasks, scanTask{
 				Label: fmt.Sprintf("%s: %s → %s", name, pair.Source.Name, pair.Dest.Name),
 				Locs:  []syncengine.Location{pair.Source, pair.Dest},

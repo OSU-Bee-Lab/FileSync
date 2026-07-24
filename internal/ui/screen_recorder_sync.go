@@ -912,7 +912,7 @@ func runBatchUploadTransfers(s *state, onDone func(), name string, result syncen
 		if len(pair.Files) == 0 {
 			continue
 		}
-		transferResult := syncengine.ScanResultFromNWayTransfers(pair)
+		transferResult := syncengine.ScanResultFromNWayTransfers(result, pair)
 		tasks = append(tasks, scanTask{
 			Label: fmt.Sprintf("%s: %s → %s", name, pair.Source.Name, pair.Dest.Name),
 			Locs:  []syncengine.Location{pair.Source, pair.Dest},

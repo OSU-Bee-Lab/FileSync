@@ -147,7 +147,7 @@ func scanAndCopyNWay(t *testing.T, ctx context.Context, locs []Location, name st
 	display := NWayDisplayScanResult(result)
 
 	for _, pair := range BuildNWayTransferPlan(result, PreferLocalSource) {
-		expected := ScanResultFromNWayTransfers(pair)
+		expected := ScanResultFromNWayTransfers(NWayScanResult{}, pair)
 		_, progress := StartSyncExperiments(ctx, pair.Source, pair.Dest, name, expected)
 		final := drain(t, progress)
 		if final.Status != JobDone {
@@ -304,7 +304,7 @@ func TestProgressReachesCompletion(t *testing.T) {
 	if len(pairs) != 1 {
 		t.Fatalf("got %d transfer pairs, want 1", len(pairs))
 	}
-	_, progress := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(pairs[0]))
+	_, progress := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(NWayScanResult{}, pairs[0]))
 	final := drain(t, progress)
 
 	if final.Status != JobDone {
@@ -343,7 +343,7 @@ func TestCancelDoesNotHang(t *testing.T) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	_, progress := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(pairs[0]))
+	_, progress := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(NWayScanResult{}, pairs[0]))
 	cancel()
 
 	final := drain(t, progress)
@@ -462,7 +462,7 @@ func TestSyncExperimentsAfterFullSync_NoCopyOptimization(t *testing.T) {
 	if len(pairs) != 1 {
 		t.Fatalf("got %d transfer pairs, want 1", len(pairs))
 	}
-	_, progress1 := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(pairs[0]))
+	_, progress1 := StartSyncExperiments(ctx, pairs[0].Source, pairs[0].Dest, "Luke - Zucchini", ScanResultFromNWayTransfers(NWayScanResult{}, pairs[0]))
 	if final := drain(t, progress1); final.Status != JobDone {
 		t.Fatalf("first backup status = %v, want JobDone (err=%v)", final.Status, final.Err)
 	}

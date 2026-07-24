@@ -421,7 +421,7 @@ func TestScanResultFromNWayTransfers(t *testing.T) {
 			{RelPath: "r/b.mp3", Size: 20},
 		},
 	}
-	scan := ScanResultFromNWayTransfers(pair)
+	scan := ScanResultFromNWayTransfers(NWayScanResult{}, pair)
 	if scan.CopyCount != 2 || scan.TotalBytes != 30 {
 		t.Fatalf("scan = %+v, want CopyCount=2 TotalBytes=30", scan)
 	}
@@ -429,6 +429,38 @@ func TestScanResultFromNWayTransfers(t *testing.T) {
 		if e.Action != ActionCopy {
 			t.Errorf("entry %s has Action=%v, want ActionCopy", e.RelPath, e.Action)
 		}
+	}
+}
+
+// TestScanResultFromNWayTransfers_CarriesInSyncEntries confirms already-in-
+// sync files from the source scan ride along as inert ActionSkipIdentical
+// entries so the Ready-to-Sync/Syncing screens can still show "Already
+// synced" even though the transfer plan itself only ever contains copies.
+func TestScanResultFromNWayTransfers_CarriesInSyncEntries(t *testing.T) {
+	pair := NWayTransferPair{
+		Files: []NWayTransfer{{RelPath: "r/a.mp3", Size: 10}},
+	}
+	scan := NWayScanResult{
+		Files: []FileConvergencePlan{
+			{RelPath: "r/a.mp3", Status: FileMissingSome},
+			{RelPath: "r/b.mp3", Status: FileInSync, States: []FileLocationState{{Exists: true, Size: 20}}},
+		},
+	}
+	result := ScanResultFromNWayTransfers(scan, pair)
+	if result.CopyCount != 1 || result.TotalBytes != 10 {
+		t.Fatalf("result = %+v, want CopyCount=1 TotalBytes=10 (in-sync entries must not inflate the copy total)", result)
+	}
+	var sawSkip bool
+	for _, e := range result.Entries {
+		if e.RelPath == "r/b.mp3" {
+			sawSkip = true
+			if e.Action != ActionSkipIdentical {
+				t.Errorf("in-sync entry has Action=%v, want ActionSkipIdentical", e.Action)
+			}
+		}
+	}
+	if !sawSkip {
+		t.Fatalf("expected an ActionSkipIdentical entry for the in-sync file, got %+v", result.Entries)
 	}
 }
 
