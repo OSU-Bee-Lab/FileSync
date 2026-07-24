@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"strings"
 
@@ -24,6 +25,13 @@ import (
 // real subfolders, lets them type a folder that doesn't exist yet and
 // descend into it; nothing is created on disk here - rclone copy creates
 // any missing destination directories itself once the sync actually runs.
+//
+// It backs all five in-app browse call sites: recorder-sync's destination
+// picker, Sync Experiments (one-way), Manage Locations' Browse dialog, Pull
+// Files, and Manage Files' From/To picker. Most browse the union of one or
+// more Locations via the streaming Union* listers; Manage Files instead sets
+// a custom lister (see the lister field) so it lists exactly one Location via
+// syncengine.ListChildren with its own not-found tolerance and error routing.
 type destFolderBrowser struct {
 	// OnPathChanged fires whenever RelPath() changes - browsing up/down,
 	// or a keystroke in the add-folder row. There's no separate
@@ -42,7 +50,8 @@ type destFolderBrowser struct {
 	// showFiles controls whether files (not just subfolders) appear in the
 	// listing. Off by default (see the package comment on showPullFiles);
 	// on for Manage Locations' Browse dialog (context to confirm the
-	// candidate path is right) and for Pull Files (selectFiles below).
+	// candidate path is right), Pull Files (selectFiles below), and Manage
+	// Files.
 	showFiles bool
 
 	// selectFiles controls whether a shown file is tappable to select it
@@ -53,10 +62,42 @@ type destFolderBrowser struct {
 	// only - "Set as Location" only ever adopts a directory.
 	selectFiles bool
 
+	// showFileSize appends a "(size)" suffix to each file row - on for
+	// Manage Files (where the size helps confirm the right file/folder to
+	// move or delete), off elsewhere.
+	showFileSize bool
+
 	// selectedFile is the tapped file's name within the current relPath,
 	// or "" if none is selected. Cleared by any navigation (reload) since
 	// a selection only makes sense within the folder it was made in.
 	selectedFile string
+
+	// lister, when non-nil, replaces the default multi-Location union
+	// listing (reload's Union* calls) with a fully custom one. Manage Files
+	// sets it to list a single reference Location via
+	// syncengine.ListChildren, tolerating a not-found/is-a-file path (naming
+	// a new destination, or selecting a bare file) as an empty listing while
+	// still routing a hard error (e.g. an expired remote token) to reconnect
+	// - behavior the union path deliberately doesn't have (it silently skips
+	// a Location it can't list). It is handed the reload's scan generation
+	// (guard UI updates with listingDone/listingFailed, which drop stale
+	// generations) and the relPath to list, and owns its own goroutine.
+	lister func(gen int, relPath string)
+
+	// breadcrumbPrefix precedes RelPath() in the breadcrumb. Empty (the
+	// default) keeps the legacy "/"+rel form; Manage Files sets
+	// "experiments/" so the breadcrumb reads from that schema root.
+	breadcrumbPrefix string
+
+	// breadcrumbNote is an optional trailing note on the breadcrumb (e.g.
+	// Manage Files' " (new folder)" when a "To" path doesn't exist yet), set
+	// by a custom lister and cleared on every navigation.
+	breadcrumbNote string
+
+	// addFolderStatus is the status-line message shown while the add-folder
+	// row is open. Defaults to the recorder/experiment-sync wording; Manage
+	// Files overrides it (its folders are created on Apply, not a sync).
+	addFolderStatus string
 
 	locs    []syncengine.Location
 	relPath string
@@ -83,7 +124,7 @@ type destFolderBrowser struct {
 }
 
 func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser {
-	b := &destFolderBrowser{win: win, allowCreate: allowCreate}
+	b := &destFolderBrowser{win: win, allowCreate: allowCreate, addFolderStatus: "Folder will be created on first sync."}
 
 	b.breadcrumb = widget.NewLabel("")
 	b.statusLbl = widget.NewLabel("")
@@ -143,6 +184,17 @@ func (b *destFolderBrowser) IsFileSelected() bool {
 	return b.selectedFile != ""
 }
 
+// NavigateTo re-anchors the browser at relPath and re-lists it, as if the
+// user had browsed there - used when an external field (Manage Files' typed
+// From/To entry, or a target switch) is the source of truth for where to
+// browse. Trailing/leading slashes are tolerated.
+func (b *destFolderBrowser) NavigateTo(relPath string) {
+	b.relPath = strings.Trim(strings.TrimSpace(relPath), "/")
+	b.closeAddFolder()
+	b.reload()
+	b.notifyPathChanged()
+}
+
 // selectFile is a file row's tap handler when selectFiles is on: it toggles
 // name as the selection within the current folder (tapping the same file
 // again deselects it, falling back to the folder scope). Files have no
@@ -170,6 +222,15 @@ func (b *destFolderBrowser) SetLocations(locs []syncengine.Location) {
 	b.notifyPathChanged()
 }
 
+// SetBrowseLocations updates the Location set without reloading or firing
+// OnPathChanged, for a caller (Manage Files) that lists through a custom
+// lister and drives reload itself. It only refreshes the add-folder row's
+// enabled state, which depends on there being at least one Location.
+func (b *destFolderBrowser) SetBrowseLocations(locs []syncengine.Location) {
+	b.locs = locs
+	b.list.Refresh()
+}
+
 func (b *destFolderBrowser) descend(name string) {
 	b.relPath = joinRel(b.relPath, name)
 	b.closeAddFolder()
@@ -195,7 +256,7 @@ func (b *destFolderBrowser) showAddFolder() {
 	b.addingFolder = true
 	b.addFolderText = ""
 	b.needsFocus = true
-	b.statusLbl.SetText("Folder will be created on first sync.")
+	b.statusLbl.SetText(b.addFolderStatus)
 	b.list.Refresh()
 }
 
@@ -220,6 +281,15 @@ func (b *destFolderBrowser) commitNewFolder() {
 	b.descend(name)
 }
 
+// fileLabel is the display text for a file row - the name, plus a "(size)"
+// suffix when showFileSize is on.
+func (b *destFolderBrowser) fileLabel(e syncengine.Entry) string {
+	if b.showFileSize {
+		return fmt.Sprintf("%s  (%s)", e.Name, humanBytes(e.Size))
+	}
+	return e.Name
+}
+
 func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObject) {
 	stack := obj.(*fyne.Container)
 	btn := stack.Objects[0].(*widget.Button)
@@ -235,17 +305,18 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 			btn.OnTapped = func() { b.descend(e.Name) }
 		} else if b.selectFiles {
 			name := e.Name
+			label := b.fileLabel(e)
 			if b.selectedFile == name {
 				btn.Importance = widget.HighImportance
-				btn.SetText("✅ " + name)
+				btn.SetText("✅ " + label)
 			} else {
 				btn.Importance = widget.MediumImportance
-				btn.SetText("\U0001F4C4 " + name)
+				btn.SetText("\U0001F4C4 " + label)
 			}
 			btn.OnTapped = func() { b.selectFile(name) }
 		} else {
 			btn.Importance = widget.MediumImportance
-			btn.SetText("\U0001F4C4 " + e.Name)
+			btn.SetText("\U0001F4C4 " + b.fileLabel(e))
 			btn.OnTapped = nil
 		}
 		btn.Enable()
@@ -292,11 +363,31 @@ func (b *destFolderBrowser) notifyPathChanged() {
 // includes an in-progress add-folder keystroke), so the breadcrumb tracks
 // what "Syncing to:" reports rather than lagging a keystroke behind it.
 func (b *destFolderBrowser) updateBreadcrumbText() {
-	if rel := b.RelPath(); rel != "" {
+	rel := b.RelPath()
+	if b.breadcrumbPrefix != "" {
+		b.breadcrumb.SetText(b.breadcrumbPrefix + rel + b.breadcrumbNote)
+		return
+	}
+	if rel != "" {
 		b.breadcrumb.SetText("/" + rel)
 	} else {
 		b.breadcrumb.SetText("/")
 	}
+}
+
+// setBreadcrumbNote sets the trailing breadcrumb note (see breadcrumbNote)
+// and repaints the breadcrumb. Called by a custom lister once it knows a
+// "To" path names a folder that doesn't exist yet.
+func (b *destFolderBrowser) setBreadcrumbNote(note string) {
+	b.breadcrumbNote = note
+	b.updateBreadcrumbText()
+}
+
+// setBreadcrumbOverride replaces the breadcrumb text outright (e.g. Manage
+// Files' "Select a Location above first." when nothing is selected to
+// browse), bypassing the usual prefix+path formatting.
+func (b *destFolderBrowser) setBreadcrumbOverride(text string) {
+	b.breadcrumb.SetText(text)
 }
 
 // updateBackBtn enables/disables navigating up based on the committed
@@ -309,12 +400,49 @@ func (b *destFolderBrowser) updateBackBtn() {
 	}
 }
 
+// listingDone publishes a custom lister's result for scan generation gen,
+// dropping it (and returning false) if a newer reload has superseded it. A
+// nil entries slice is a valid empty listing. Hides the loading bar. Must be
+// called on the UI goroutine.
+func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry) bool {
+	if gen != b.scanGen {
+		return false
+	}
+	b.entries = entries
+	b.list.Refresh()
+	b.loading.Hide()
+	return true
+}
+
+// listingFailed marks a custom lister's scan as finished-with-error for
+// generation gen (hides the loading bar), returning false if it's stale so
+// the caller can skip surfacing an error for a superseded listing.
+func (b *destFolderBrowser) listingFailed(gen int) bool {
+	if gen != b.scanGen {
+		return false
+	}
+	b.loading.Hide()
+	return true
+}
+
 func (b *destFolderBrowser) reload() {
 	b.selectedFile = ""
+	b.breadcrumbNote = ""
 	b.updateBreadcrumbText()
 	b.updateBackBtn()
 	b.scanGen++
 	gen := b.scanGen
+
+	// A custom lister (Manage Files) owns listing entirely from here.
+	if b.lister != nil {
+		b.entries = nil
+		b.list.Refresh()
+		b.statusLbl.SetText("")
+		b.loading.Show()
+		b.lister(gen, b.relPath)
+		return
+	}
+
 	locs := b.locs
 	relPath := b.relPath
 

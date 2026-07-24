@@ -14,7 +14,6 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/rclone/rclone/fs"
 
@@ -128,63 +127,21 @@ func showManageFiles(s *state) {
 	opOptions := []string{"Rename / Move / Merge", "Delete", manageOpRetime}
 	opGroup := widget.NewRadioGroup(opOptions, nil)
 
-	// --- shared path picker: browses the first selected Location, and
-	// writes into whichever of fromEntry/toEntry last had focus. Delete
-	// only ever targets "From". ---
+	// --- shared path picker: two destFolderBrowser instances (one per
+	// From/To target), swapped in a single slot. This routes Manage Files
+	// through the same browser widget the other four browse call sites use,
+	// instead of a bespoke list/breadcrumb/add-row/highlight reimplementation.
+	// Each browser mirrors its chosen path into its own From/To entry via
+	// OnPathChanged; Delete only ever targets "From". ---
 	deleteConfirmEntry := widget.NewEntry()
 	deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
 
-	pickerTarget := "From" // "From" or "To" - which entry the picker/breadcrumb currently targets
-	// pickerHeaderLabel replaces the usual static sectionHeader title with
-	// the live "From"/"To" target, so the browser's own banner (not a
-	// separate row beneath it) tells the user which field it's populating.
+	pickerTarget := "From" // "From" or "To" - which target the picker currently populates
+	// pickerHeaderLabel is the browser's own banner (not a separate row
+	// beneath it), naming the field the visible browser populates.
 	pickerHeaderBg := canvas.NewRectangle(color.NRGBA{R: 240, G: 242, B: 245, A: 255})
 	pickerHeaderLabel := widget.NewLabelWithStyle("From", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	pickerHeader := container.NewStack(pickerHeaderBg, container.NewPadded(pickerHeaderLabel))
-	relPath := "" // path currently browsed in the picker
-	breadcrumb := widget.NewLabel("experiments/")
-
-	var fromEntry, toEntry *widget.Entry
-	targetEntry := func() *widget.Entry {
-		if pickerTarget == "To" {
-			return toEntry
-		}
-		return fromEntry
-	}
-
-	// selectFile fills the current target (From/To) with a tapped file's
-	// full relative path - unlike a directory tap, it never navigates the
-	// picker (a file has no children to browse into). Assigned once
-	// validateFromPath exists below; only ever called from the running UI,
-	// well after that assignment happens.
-	var selectFile func(relPath string)
-
-	// addingFolder/addFolderText/needsFocus back the trailing "+ New Folder"
-	// row, shown only while picking "To" - typing a destination that
-	// doesn't exist yet is the point there (rclone creates it on Apply);
-	// "From" must always be an existing path, so it never gets this row.
-	// Same pattern as destFolderBrowser's own add-folder row.
-	var entries []syncengine.Entry
-	addingFolder := false
-	addFolderText := ""
-	needsFocus := false
-
-	list := widget.NewList(
-		func() int {
-			if pickerTarget == "To" {
-				return len(entries) + 1
-			}
-			return len(entries)
-		},
-		func() fyne.CanvasObject {
-			bg := canvas.NewRectangle(color.Transparent)
-			entry := widget.NewEntry()
-			entry.Hide()
-			return container.NewStack(bg, widget.NewButton("", nil), entry)
-		},
-		nil,
-	)
-	upBtn := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), nil)
 
 	refLoc := func() *syncengine.Location {
 		sel := locGroup.Selected()
@@ -194,191 +151,69 @@ func showManageFiles(s *state) {
 		return findLocation(s.cfg.Locations, sel[0])
 	}
 
-	var loadChildren func()
-	loadChildren = func() {
-		loc := refLoc()
-		if loc == nil {
-			entries = nil
-			list.Refresh()
-			breadcrumb.SetText("Select a Location above first.")
-			return
+	var fromEntry, toEntry *widget.Entry
+	targetEntry := func() *widget.Entry {
+		if pickerTarget == "To" {
+			return toEntry
 		}
-		breadcrumb.SetText("Loading experiments/" + relPath + "...")
-		src := *loc
-		p := relPath
-		target := pickerTarget
-		go func() {
-			result, err := syncengine.ListChildren(context.Background(), src, p)
-			fyne.Do(func() {
-				if relPath != p {
-					return
-				}
-				if err != nil {
-					// While picking "To", browsing to a folder that doesn't
-					// exist yet is the expected way to name a new
-					// destination (e.g. via "+ New Folder" or typing a name
-					// that doesn't exist at any Location) - rclone creates
-					// it on Apply, so show it as empty rather than erroring.
-					// "From" must always be an existing path, but that's
-					// surfaced by validateFromPath on blur (an inline
-					// message), not a modal here - so it also just shows
-					// empty rather than popping a dialog on every keystroke/
-					// focus change. relPath naming an existing file (not a
-					// directory - e.g. typed/submitted rather than tapped
-					// from the list, which goes through selectFile instead)
-					// is likewise not an error: a file just has no children,
-					// so it browses as an empty listing rather than erroring.
-					if errors.Is(err, fs.ErrorDirNotFound) || errors.Is(err, fs.ErrorIsFile) {
-						entries = nil
-						suffix := ""
-						if target == "To" && errors.Is(err, fs.ErrorDirNotFound) {
-							suffix = " (new folder)"
+		return fromEntry
+	}
+
+	// newManageBrowser builds one From/To browser. Both list a single
+	// reference Location (refLoc) one level at a time via the shared browser's
+	// custom-lister hook - Manage Files never wants the union-across-Locations
+	// listing the other callers use, and it needs syncengine.ListChildren's
+	// not-found tolerance (naming a new "To" folder, or selecting a bare file)
+	// plus its error routing (an expired remote token → reconnect). Only "To"
+	// (allowCreate) offers the "+ Add Folder" row.
+	newManageBrowser := func(allowCreate bool) *destFolderBrowser {
+		b := newDestFolderBrowser(s.win, allowCreate)
+		b.showFiles = true
+		b.selectFiles = true
+		b.showFileSize = true
+		b.breadcrumbPrefix = "experiments/"
+		b.addFolderStatus = "Folder will be created on Apply."
+		b.lister = func(gen int, relPath string) {
+			loc := refLoc()
+			if loc == nil {
+				b.listingDone(gen, nil)
+				b.setBreadcrumbOverride("Select a Location above first.")
+				return
+			}
+			src := *loc
+			go func() {
+				result, err := syncengine.ListChildren(context.Background(), src, relPath)
+				fyne.Do(func() {
+					if err != nil {
+						// Browsing to a folder that doesn't exist yet (naming a
+						// new "To" destination) or to a bare file (which has no
+						// children) is expected, not an error - show it empty.
+						// Only a hard error (e.g. an expired remote token) is
+						// surfaced, routed to reconnect via showLocationError.
+						if errors.Is(err, fs.ErrorDirNotFound) || errors.Is(err, fs.ErrorIsFile) {
+							if b.listingDone(gen, nil) && b.allowCreate && errors.Is(err, fs.ErrorDirNotFound) {
+								b.setBreadcrumbNote(" (new folder)")
+							}
+							return
 						}
-						breadcrumb.SetText("experiments/" + relPath + suffix)
-						upBtn.Disable()
-						if relPath != "" {
-							upBtn.Enable()
+						if b.listingFailed(gen) {
+							showLocationError(s, err, src)
 						}
-						list.Refresh()
 						return
 					}
-					breadcrumb.SetText("Error loading experiments/" + relPath)
-					showLocationError(s, err, src)
-					return
-				}
-				entries = result
-				breadcrumb.SetText("experiments/" + relPath)
-				upBtn.Disable()
-				if relPath != "" {
-					upBtn.Enable()
-				}
-				list.Refresh()
-			})
-		}()
-	}
-
-	closeAddFolder := func() {
-		addingFolder = false
-		addFolderText = ""
-	}
-
-	setRelPath := func(p string) {
-		closeAddFolder()
-		relPath = p
-		targetEntry().SetText(p)
-	}
-
-	// commitNewFolder folds the typed name into relPath and re-opens
-	// browsing under it - nothing is created on disk here; rclone copy/move
-	// creates any missing destination directory itself once Apply runs.
-	var commitNewFolder func()
-	commitNewFolder = func() {
-		name := strings.TrimSpace(addFolderText)
-		closeAddFolder()
-		if name == "" {
-			list.Refresh()
-			return
+					b.listingDone(gen, result)
+				})
+			}()
 		}
-		setRelPath(joinRel(relPath, name))
-		loadChildren()
+		return b
 	}
-
-	list.UpdateItem = func(id widget.ListItemID, obj fyne.CanvasObject) {
-		stack := obj.(*fyne.Container)
-		bg := stack.Objects[0].(*canvas.Rectangle)
-		btn := stack.Objects[1].(*widget.Button)
-		entry := stack.Objects[2].(*widget.Entry)
-
-		if int(id) < len(entries) {
-			entry.Hide()
-			btn.Show()
-			e := entries[id]
-			label := e.Name
-			if e.IsDir {
-				label = "\U0001F4C1 " + label
-				bg.FillColor = color.Transparent
-				btn.Importance = widget.MediumImportance
-			} else {
-				label = fmt.Sprintf("%s  (%s)", label, humanBytes(e.Size))
-				// Selected-file highlight: blue when this row's path is the
-				// current target's (From/To) selection, matching the same
-				// blue used for TO rows in the preview screen
-				// (manageColorMoveBg). LowImportance so the button's own
-				// (otherwise opaque) background doesn't paint over the tint
-				// underneath it.
-				entryPath := joinRel(relPath, e.Name)
-				if entryPath == strings.Trim(strings.TrimSpace(targetEntry().Text), "/") {
-					bg.FillColor = manageColorMoveBg
-				} else {
-					bg.FillColor = color.Transparent
-				}
-				btn.Importance = widget.LowImportance
-			}
-			bg.Refresh()
-			btn.Refresh()
-			btn.SetText(label)
-			btn.OnTapped = func() {
-				if e.IsDir {
-					setRelPath(joinRel(relPath, e.Name))
-					loadChildren()
-					return
-				}
-				selectFile(joinRel(relPath, e.Name))
-			}
-			return
+	browserFrom := newManageBrowser(false)
+	browserTo := newManageBrowser(true)
+	activeBrowser := func() *destFolderBrowser {
+		if pickerTarget == "To" {
+			return browserTo
 		}
-		bg.FillColor = color.Transparent
-		bg.Refresh()
-
-		// Trailing "+ New Folder" row (only present while pickerTarget ==
-		// "To" - see the list's Length func above).
-		if addingFolder {
-			btn.Hide()
-			entry.Show()
-			entry.SetText(addFolderText)
-			entry.OnChanged = func(text string) { addFolderText = text }
-			entry.OnSubmitted = func(string) { commitNewFolder() }
-			if needsFocus {
-				needsFocus = false
-				s.win.Canvas().Focus(entry)
-			}
-			return
-		}
-		entry.Hide()
-		btn.Show()
-		btn.SetText("+ New Folder")
-		btn.OnTapped = func() {
-			addingFolder = true
-			addFolderText = ""
-			needsFocus = true
-			list.Refresh()
-		}
-	}
-	upBtn.OnTapped = func() {
-		p := path.Dir(relPath)
-		if p == "." {
-			p = ""
-		}
-		setRelPath(p)
-		loadChildren()
-	}
-	locGroup.OnChanged = func(sel []string) {
-		s.cfg.ManageFilesLocationIDs = idsFromLocations(locationsFromNamesAny(s.cfg.Locations, sel))
-		s.saveConfig()
-		updateMirrorWarning()
-		// Changing which Locations the operation applies to shouldn't
-		// disturb the already-typed/browsed From/To paths - just re-browse
-		// the (possibly new) reference Location at the current relPath.
-		loadChildren()
-	}
-
-	setPickerTarget := func(target string) {
-		pickerTarget = target
-		closeAddFolder()
-		pickerHeaderLabel.SetText(target)
-		relPath = strings.Trim(strings.TrimSpace(targetEntry().Text), "/")
-		breadcrumb.SetText("experiments/" + relPath)
-		loadChildren()
+		return browserFrom
 	}
 
 	// fromPathError surfaces a not-found "From" path inline, once the user
@@ -427,33 +262,73 @@ func showManageFiles(s *state) {
 		}()
 	}
 
-	selectFile = func(p string) {
-		closeAddFolder()
-		targetEntry().SetText(p)
-		if pickerTarget == "From" {
-			validateFromPath()
+	// setPickerTarget swaps which browser (and which underlying From/To
+	// field) is active, re-anchoring the now-visible browser at that field's
+	// current text so typing and browsing stay in sync.
+	var setPickerTarget func(target string)
+	setPickerTarget = func(target string) {
+		pickerTarget = target
+		pickerHeaderLabel.SetText(target)
+		if target == "To" {
+			browserFrom.CanvasObject().Hide()
+			browserTo.CanvasObject().Show()
+		} else {
+			browserTo.CanvasObject().Hide()
+			browserFrom.CanvasObject().Show()
 		}
-		list.Refresh()
+		activeBrowser().NavigateTo(strings.Trim(strings.TrimSpace(targetEntry().Text), "/"))
 	}
 
-	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") }, validateFromPath)
+	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") }, func() { validateFromPath() })
 	fromFocusEntry.SetPlaceHolder("experiments/<relative path to rename/move/delete>")
 	toFocusEntry := newFocusEntry(func() { setPickerTarget("To") }, nil)
 	toFocusEntry.SetPlaceHolder("experiments/<new name or destination folder>")
 	fromEntry = &fromFocusEntry.Entry
 	toEntry = &toFocusEntry.Entry
 
+	// Each browser mirrors its chosen path (a browsed folder, or a tapped
+	// file) into its own From/To field; "From" also re-validates on change.
+	browserFrom.OnPathChanged = func(rel string) {
+		fromEntry.SetText(rel)
+		validateFromPath()
+	}
+	browserTo.OnPathChanged = func(rel string) {
+		toEntry.SetText(rel)
+	}
+
+	// Submitting a typed path drives the active browser to it (a not-found /
+	// is-a-file path is tolerated by the lister above).
 	fromEntry.OnSubmitted = func(text string) {
 		if pickerTarget == "From" {
-			relPath = strings.Trim(strings.TrimSpace(text), "/")
-			loadChildren()
+			browserFrom.NavigateTo(text)
 		}
 	}
 	toEntry.OnSubmitted = func(text string) {
 		if pickerTarget == "To" {
-			relPath = strings.Trim(strings.TrimSpace(text), "/")
-			loadChildren()
+			browserTo.NavigateTo(text)
 		}
+	}
+
+	// setLocs points both browsers at the current reference Location (for the
+	// add-folder row's enabled state) and re-lists whichever is active.
+	setLocs := func() {
+		var locs []syncengine.Location
+		if l := refLoc(); l != nil {
+			locs = []syncengine.Location{*l}
+		}
+		browserFrom.SetBrowseLocations(locs)
+		browserTo.SetBrowseLocations(locs)
+		activeBrowser().reload()
+	}
+
+	locGroup.OnChanged = func(sel []string) {
+		s.cfg.ManageFilesLocationIDs = idsFromLocations(locationsFromNamesAny(s.cfg.Locations, sel))
+		s.saveConfig()
+		updateMirrorWarning()
+		// Changing which Locations the operation applies to shouldn't disturb
+		// the already-typed/browsed From/To paths - just re-list the (possibly
+		// new) reference Location at the current path.
+		setLocs()
 	}
 
 	// "From" is always shown; only the operation-specific second field
@@ -529,11 +404,10 @@ func showManageFiles(s *state) {
 		container.NewHBox(previewBtn, backBtn),
 	)
 
-	expCol := container.NewBorder(
-		container.NewVBox(pickerHeader, container.NewHBox(upBtn, breadcrumb)),
-		nil, nil, nil,
-		list,
-	)
+	// browserSlot stacks both browsers; only the active target's is shown
+	// (see setPickerTarget).
+	browserSlot := container.NewStack(browserFrom.CanvasObject(), browserTo.CanvasObject())
+	expCol := container.NewBorder(pickerHeader, nil, nil, nil, browserSlot)
 
 	columns := container.NewHSplit(optionsCol, expCol)
 	columns.SetOffset(0.35)
@@ -547,14 +421,15 @@ func showManageFiles(s *state) {
 		columns,
 	)
 	s.setContent(container.NewPadded(content))
-	upBtn.Disable()
-	// Restore a persisted Location selection's picker/warning state -
-	// locGroup.OnChanged only fires on a user click, not on the initial
-	// selection newToggleGroup was constructed with.
+	// Show the "From" browser first, then point both browsers at the current
+	// selection and list it (restoring a persisted Location's picker/warning
+	// state - locGroup.OnChanged only fires on a user click, not the initial
+	// selection newToggleGroup was constructed with).
+	setPickerTarget("From")
 	if len(locGroup.Selected()) > 0 {
 		updateMirrorWarning()
-		loadChildren()
 	}
+	setLocs()
 }
 
 // runManageFilesRetime is the Retime operation (see manageOpRetime): it
