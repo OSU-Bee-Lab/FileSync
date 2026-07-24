@@ -51,14 +51,14 @@ func (ps *progressScreen) makeBarList(rows *[]barRow, isSelected func(barRow) bo
 // buildSplit wires two section lists into a VSplit and returns a function
 // that shows one or both panels depending on which groups have rows. Once a
 // sync is actually running (or finished/cancelled — see progressScreen.
-// isSyncing), collapseSynced drops the "Already synced" panel and, since the
+// isSyncing), collapseSynced drops the "Previously synced" panel and, since the
 // unsynced list is then the only thing left, its "Current Sync" header too —
 // there's nothing left to distinguish it from, so the label is just wasted
 // space at that point.
 func buildSplit(unsyncedList, syncedList *widget.List) (fyne.CanvasObject, func(hasUnsynced, hasSynced, collapseSynced bool)) {
 	unsyncedHeader := sectionHeader("Current Sync")
 	unsyncedPanel := container.NewBorder(unsyncedHeader, nil, nil, nil, unsyncedList)
-	syncedPanel := container.NewBorder(sectionHeader("Already synced"), nil, nil, nil, syncedList)
+	syncedPanel := container.NewBorder(sectionHeader("Previously synced"), nil, nil, nil, syncedList)
 	split := container.NewVSplit(unsyncedPanel, syncedPanel)
 	split.SetOffset(0.5)
 	applyMode := func(hasUnsynced, hasSynced, collapseSynced bool) {

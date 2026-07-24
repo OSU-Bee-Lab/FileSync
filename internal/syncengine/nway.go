@@ -435,7 +435,7 @@ func FilterNWayToSourcePresent(result NWayScanResult, srcID string) NWayScanResu
 // and destination, so it's carried along as an inert ActionSkipIdentical
 // entry. filesFromFilter and the copy engine ignore non-ActionCopy entries,
 // so this is display-only: it's what lets the Ready-to-Sync/Syncing screens
-// keep showing "Already synced" instead of losing it once the transfer plan
+// keep showing "Previously synced" instead of losing it once the transfer plan
 // (copy-only by nature) replaces the full scan result as this task's data.
 func ScanResultFromNWayTransfers(scan NWayScanResult, pair NWayTransferPair) ScanResult {
 	result := ScanResult{

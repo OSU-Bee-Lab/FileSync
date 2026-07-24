@@ -282,7 +282,7 @@ func createColumn(title string, content fyne.CanvasObject) fyne.CanvasObject {
 }
 
 // sectionHeader is a heavy-weight banner that labels a Files sub-panel
-// ("Current Sync" / "Already synced"). It sits above its panel's list, so it
+// ("Current Sync" / "Previously synced"). It sits above its panel's list, so it
 // stays fixed while the list scrolls. Also used by screen_recorders.go's
 // local-sync panel.
 func sectionHeader(title string) fyne.CanvasObject {

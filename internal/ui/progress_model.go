@@ -126,7 +126,7 @@ type barRow struct {
 
 // isFullySkipped reports whether every file in the folder was already present
 // and identical at the destination (nothing to copy). Such folders are shown
-// in the "Already synced" section and stay grey.
+// in the "Previously synced" section and stay grey.
 func (f *folderUIState) isFullySkipped() bool {
 	for _, file := range f.files {
 		if file.action != syncengine.ActionSkipIdentical {
