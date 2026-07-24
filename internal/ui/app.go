@@ -100,14 +100,31 @@ func (l *boundedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 	}
 }
 
-// setContent replaces the window's content and re-asserts windowSize
-// immediately after. Screens must call this instead of s.win.SetContent
-// directly - see the comment on windowSize for why. Content is wrapped in a
-// boundedWidthLayout so no screen can stretch the window past windowSize.
+// currentOrDefaultSize returns w's current content size, or fallback if the
+// window hasn't been shown yet or has somehow shrunk below it. setContent
+// uses this (captured before SetContent) to restore whatever size the
+// window actually had - rather than always stomping it back to a fixed
+// windowSize - so that a maximized or user-resized window stays that size
+// across screen changes instead of snapping back to windowSize on every
+// navigation.
+func currentOrDefaultSize(w fyne.Window, fallback fyne.Size) fyne.Size {
+	cur := w.Canvas().Size()
+	if cur.Width < fallback.Width || cur.Height < fallback.Height {
+		return fallback
+	}
+	return cur
+}
+
+// setContent replaces the window's content and re-asserts the window's
+// pre-swap size immediately after (see currentOrDefaultSize). Screens must
+// call this instead of s.win.SetContent directly - see the comment on
+// windowSize for why. Content is wrapped in a boundedWidthLayout so no
+// screen can stretch the window past windowSize.
 func (s *state) setContent(content fyne.CanvasObject) {
+	size := currentOrDefaultSize(s.win, windowSize)
 	bounded := container.New(&boundedWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(bounded)
-	s.win.Resize(windowSize)
+	s.win.Resize(size)
 }
 
 // growingWidthLayout keeps the same MinSize cap as boundedWidthLayout (so it
@@ -147,9 +164,10 @@ func (l *growingWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 // columns) - anything with fillable widgets not designed for a wide layout
 // should keep using setContent.
 func (s *state) setContentResizable(content fyne.CanvasObject) {
+	size := currentOrDefaultSize(s.win, windowSize)
 	bounded := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(bounded)
-	s.win.Resize(windowSize)
+	s.win.Resize(size)
 }
 
 func (s *state) saveConfig() {
