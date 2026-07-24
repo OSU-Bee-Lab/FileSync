@@ -6,6 +6,7 @@ import (
 
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/fserrors"
@@ -98,5 +99,45 @@ func TestSetHTTP2Enabled(t *testing.T) {
 	SetHTTP2Enabled(true)
 	if fs.GetConfig(context.Background()).DisableHTTP2 {
 		t.Error("SetHTTP2Enabled(true) left HTTP/2 disabled")
+	}
+}
+
+// A steady transfer must report a steady, non-zero speed for as long as it
+// keeps moving bytes. The previous ramp-based smoother re-anchored its ramp
+// on every tick, so the reported speed froze at whatever value it last held
+// and never tracked the transfer again.
+func TestSpeedAverager_TracksOngoingTransfer(t *testing.T) {
+	var s speedAverager
+	start := time.Now()
+	const perTick = 1 << 20 // 1 MiB every 250ms == 4 MiB/s
+
+	var speed float64
+	for i := 0; i <= 40; i++ {
+		speed = s.observe(start.Add(time.Duration(i)*250*time.Millisecond), int64(i)*perTick)
+	}
+	if want := float64(4 << 20); speed < want*0.99 || speed > want*1.01 {
+		t.Fatalf("speed = %v, want ~%v", speed, want)
+	}
+}
+
+// Once bytes stop moving the speed must reach exactly zero within the
+// window, since the UI shows "---" only for a zero speed.
+func TestSpeedAverager_StallReachesZero(t *testing.T) {
+	var s speedAverager
+	start := time.Now()
+	for i := 0; i <= 20; i++ {
+		s.observe(start.Add(time.Duration(i)*250*time.Millisecond), int64(i)<<20)
+	}
+	stallStart := start.Add(20 * 250 * time.Millisecond)
+
+	var speed float64
+	for i := 1; i <= 20; i++ {
+		speed = s.observe(stallStart.Add(time.Duration(i)*250*time.Millisecond), 20<<20)
+		if elapsed := time.Duration(i) * 250 * time.Millisecond; elapsed < speedWindow && speed <= 0 {
+			t.Fatalf("speed dropped to %v after only %s of stall", speed, elapsed)
+		}
+	}
+	if speed != 0 {
+		t.Fatalf("speed = %v after a long stall, want exactly 0", speed)
 	}
 }

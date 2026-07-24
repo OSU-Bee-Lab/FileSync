@@ -231,12 +231,45 @@ func filesFromFilter(expected ScanResult) *filter.Filter {
 // explains itself. Dropped connections stay unlimited.
 const unlimitedNonTransientAttempts = 3
 
-// speedDecayWindow is how long the displayed transfer speed takes to ramp
-// linearly to a new target rate (including 0, once bytes stop moving),
-// regardless of the gap between old and new — see the comment in
-// startCopyPreserving's emit closure for why this replaced an exponential
-// moving average.
-const speedDecayWindow = 3 * time.Second
+// speedWindow is the span the displayed transfer speed averages over. Any
+// change in the real rate (including a drop to 0 once bytes stop moving) is
+// fully reflected after this long, regardless of how big the change was.
+const speedWindow = 3 * time.Second
+
+// speedAverager reports transfer speed as the average rate across the last
+// speedWindow, computed from the cumulative byte counter rather than from
+// per-tick deltas. Averaging a fixed span keeps the number readable without
+// the settling time depending on the size of the change - an exponential
+// moving average takes longer to come down from 100MB/s than from 1MB/s and
+// reads as arbitrary flicker.
+type speedAverager struct {
+	samples []speedSample
+}
+
+type speedSample struct {
+	at    time.Time
+	bytes int64
+}
+
+// observe records the cumulative byte count at a point in time and returns
+// the current speed in bytes/sec. The oldest sample still inside the window
+// is the baseline; samples that fall out are dropped, except that the last
+// one out is kept until a newer sample is itself old enough to replace it,
+// so the average always spans the full window rather than collapsing to the
+// gap between the two newest ticks.
+func (s *speedAverager) observe(at time.Time, bytes int64) float64 {
+	s.samples = append(s.samples, speedSample{at: at, bytes: bytes})
+	cutoff := at.Add(-speedWindow)
+	for len(s.samples) > 1 && !s.samples[1].at.After(cutoff) {
+		s.samples = s.samples[1:]
+	}
+	oldest := s.samples[0]
+	elapsed := at.Sub(oldest.at).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(bytes-oldest.bytes) / elapsed
+}
 
 // copyDirWithRetry runs sync.CopyDir, retrying until it succeeds, hits an
 // error retrying can't fix, exhausts the configured attempt budget, or the
@@ -412,46 +445,11 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 		defer ticker.Stop()
 		stats := accounting.Stats(ctx)
 
-		var lastBytes int64
-		var lastTime = time.Now()
-		var currentSpeed float64
-		var rampFrom, rampTo float64
-		var rampStart time.Time
+		var speed speedAverager
 
 		emit := func(status JobStatus, err error) {
-			// Calculate speed. Every tick measures a new instantaneous
-			// target rate (0 when no bytes moved since the last tick) and
-			// the displayed speed ramps linearly toward it over a fixed
-			// window, rather than an exponential moving average. A linear
-			// ramp reaches any target in the same bounded time regardless
-			// of how far off it is — a drop from 100MB/s and a drop from
-			// 1MB/s both settle in speedDecayWindow — where an exponential
-			// decay's settling time scales with the starting value and
-			// reads as arbitrary flicker. The first sample jumps straight
-			// to its target: there's nothing to ramp from yet.
-			now := time.Now()
-			dur := now.Sub(lastTime)
 			currentBytes := stats.GetBytes()
-			if dur > 0 {
-				target := float64(currentBytes-lastBytes) / dur.Seconds()
-				if lastBytes == 0 {
-					currentSpeed = target
-				} else {
-					if target != rampTo {
-						rampFrom = currentSpeed
-						rampTo = target
-						rampStart = now
-					}
-					elapsed := now.Sub(rampStart).Seconds()
-					if elapsed >= speedDecayWindow.Seconds() {
-						currentSpeed = rampTo
-					} else {
-						currentSpeed = rampFrom + (rampTo-rampFrom)*(elapsed/speedDecayWindow.Seconds())
-					}
-				}
-			}
-			lastBytes = currentBytes
-			lastTime = now
+			currentSpeed := speed.observe(time.Now(), currentBytes)
 
 			filesMap := make(map[string]FileProgress)
 			for _, t := range stats.Transferred() {
