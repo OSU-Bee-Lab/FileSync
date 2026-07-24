@@ -143,12 +143,8 @@ func showManageFiles(s *state) {
 	pickerHeaderLabel := widget.NewLabelWithStyle("From", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	pickerHeader := container.NewStack(pickerHeaderBg, container.NewPadded(pickerHeaderLabel))
 
-	refLoc := func() *syncengine.Location {
-		sel := locGroup.Selected()
-		if len(sel) == 0 {
-			return nil
-		}
-		return findLocation(s.cfg.Locations, sel[0])
+	selectedLocs := func() []syncengine.Location {
+		return locationsFromNamesAny(s.cfg.Locations, locGroup.Selected())
 	}
 
 	var fromEntry, toEntry *widget.Entry
@@ -159,13 +155,16 @@ func showManageFiles(s *state) {
 		return fromEntry
 	}
 
-	// newManageBrowser builds one From/To browser. Both list a single
-	// reference Location (refLoc) one level at a time via the shared browser's
-	// custom-lister hook - Manage Files never wants the union-across-Locations
-	// listing the other callers use, and it needs syncengine.ListChildren's
-	// not-found tolerance (naming a new "To" folder, or selecting a bare file)
-	// plus its error routing (an expired remote token → reconnect). Only "To"
-	// (allowCreate) offers the "+ Add Folder" row.
+	// newManageBrowser builds one From/To browser. Both list the union of
+	// every currently selected Location one level at a time via the shared
+	// browser's custom-lister hook - a folder only has to exist on one
+	// selected Location to show up (an operation just skips over the
+	// Locations that don't hold it), so Manage Files can't use plain
+	// syncengine.ListChildren against a single reference Location the way it
+	// used to. It still needs syncengine.ListChildrenUnion's not-found
+	// tolerance (naming a new "To" folder, or selecting a bare file) plus its
+	// error routing (every selected Location's token expired → reconnect).
+	// Only "To" (allowCreate) offers the "+ Add Folder" row.
 	newManageBrowser := func(allowCreate bool) *destFolderBrowser {
 		b := newDestFolderBrowser(s.win, allowCreate)
 		b.showFiles = true
@@ -174,30 +173,31 @@ func showManageFiles(s *state) {
 		b.breadcrumbPrefix = "experiments/"
 		b.addFolderStatus = "Folder will be created on Apply."
 		b.lister = func(gen int, relPath string) {
-			loc := refLoc()
-			if loc == nil {
+			locs := selectedLocs()
+			if len(locs) == 0 {
 				b.listingDone(gen, nil)
 				b.setBreadcrumbOverride("Select a Location above first.")
 				return
 			}
-			src := *loc
 			go func() {
-				result, err := syncengine.ListChildren(context.Background(), src, relPath)
+				result, notFound, isFile, err := syncengine.ListChildrenUnion(context.Background(), locs, relPath)
 				fyne.Do(func() {
 					if err != nil {
-						// Browsing to a folder that doesn't exist yet (naming a
-						// new "To" destination) or to a bare file (which has no
-						// children) is expected, not an error - show it empty.
-						// Only a hard error (e.g. an expired remote token) is
-						// surfaced, routed to reconnect via showLocationError.
-						if errors.Is(err, fs.ErrorDirNotFound) || errors.Is(err, fs.ErrorIsFile) {
-							if b.listingDone(gen, nil) && b.allowCreate && errors.Is(err, fs.ErrorDirNotFound) {
-								b.setBreadcrumbNote(" (new folder)")
-							}
-							return
-						}
+						// Every selected Location failed with something other
+						// than not-found/is-a-file (e.g. an expired remote
+						// token) - route to reconnect via showLocationError.
 						if b.listingFailed(gen) {
-							showLocationError(s, err, src)
+							showLocationError(s, err, locs...)
+						}
+						return
+					}
+					if notFound || isFile {
+						// A folder that doesn't exist on any selected Location
+						// yet (naming a new "To" destination) or that names a
+						// bare file (which has no children) is expected, not
+						// an error - show it empty.
+						if b.listingDone(gen, nil) && b.allowCreate && notFound {
+							b.setBreadcrumbNote(" (new folder)")
 						}
 						return
 					}
@@ -309,13 +309,10 @@ func showManageFiles(s *state) {
 		}
 	}
 
-	// setLocs points both browsers at the current reference Location (for the
-	// add-folder row's enabled state) and re-lists whichever is active.
+	// setLocs points both browsers at the currently selected Locations (for
+	// the add-folder row's enabled state) and re-lists whichever is active.
 	setLocs := func() {
-		var locs []syncengine.Location
-		if l := refLoc(); l != nil {
-			locs = []syncengine.Location{*l}
-		}
+		locs := selectedLocs()
 		browserFrom.SetBrowseLocations(locs)
 		browserTo.SetBrowseLocations(locs)
 		activeBrowser().reload()

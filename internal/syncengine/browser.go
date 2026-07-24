@@ -2,6 +2,7 @@ package syncengine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path"
 	"sort"
@@ -70,6 +71,82 @@ func ListChildren(ctx context.Context, loc Location, relPath string) ([]Entry, e
 		return out[i].Name < out[j].Name
 	})
 	return out, nil
+}
+
+// ListChildrenUnion is ListChildren, but across every one of locs at once:
+// it lists relPath at each location concurrently and returns the
+// deduped/sorted union of whatever children exist, so Manage Files can show
+// every folder present on any selected Location instead of gating on a
+// single reference one. A path only has to exist on one Location to show up
+// - Manage Files operations already tolerate per-Location misses (see
+// ApplyRenames), so a folder missing from some Locations is normal, not an
+// error.
+//
+// notFound reports whether relPath named an existing directory on none of
+// the locations that could be listed at all - used to show a "(new
+// folder)" note. isFile reports whether relPath named a file (not a
+// directory) on at least one listable location. err is returned only when
+// every location failed with something other than "not found"/"is a
+// file" (e.g. every remote's token expired) - if even one location listed
+// successfully, the others' hard errors are swallowed the same as a
+// Location simply not having this folder.
+func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (entries []Entry, notFound bool, isFile bool, err error) {
+	type result struct {
+		entries []Entry
+		err     error
+	}
+	results := make([]result, len(locs))
+	var wg sync.WaitGroup
+	for i, loc := range locs {
+		wg.Add(1)
+		go func(i int, loc Location) {
+			defer wg.Done()
+			e, err := ListChildren(ctx, loc, relPath)
+			results[i] = result{e, err}
+		}(i, loc)
+	}
+	wg.Wait()
+
+	seen := make(map[string]Entry)
+	anyOK := false
+	anyIsFile := false
+	var firstHardErr error
+	for _, r := range results {
+		if r.err != nil {
+			switch {
+			case errors.Is(r.err, fs.ErrorIsFile):
+				anyIsFile = true
+			case errors.Is(r.err, fs.ErrorDirNotFound):
+				// Not present at this Location - fine, others may have it.
+			default:
+				if firstHardErr == nil {
+					firstHardErr = r.err
+				}
+			}
+			continue
+		}
+		anyOK = true
+		for _, e := range r.entries {
+			if existing, ok := seen[e.Name]; !ok || (!existing.IsDir && e.IsDir) {
+				seen[e.Name] = e
+			}
+		}
+	}
+	if !anyOK && firstHardErr != nil {
+		return nil, false, false, firstHardErr
+	}
+
+	out := make([]Entry, 0, len(seen))
+	for _, e := range seen {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, !anyOK && !anyIsFile, anyIsFile, nil
 }
 
 // ListRemoteDirsOnDrive lists only the sub-directories (not files) directly
