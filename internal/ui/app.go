@@ -307,7 +307,9 @@ func showHome(s *state) {
 
 	main := container.NewPadded(container.NewVBox(widget.NewLabel(""), body))
 
-	var bottomRight fyne.CanvasObject = container.NewWithoutLayout()
+	versionText := canvas.NewText("v"+appversion.Version, theme.Color(theme.ColorNameDisabled))
+	versionText.Alignment = fyne.TextAlignTrailing
+	bottomRightItems := []fyne.CanvasObject{versionText}
 	if update := s.availableUpdate.Load(); update != nil {
 		link := widget.NewHyperlink("New Version Available", nil)
 		link.OnTapped = func() {
@@ -315,8 +317,9 @@ func showHome(s *state) {
 				fyne.CurrentApp().OpenURL(u)
 			}
 		}
-		bottomRight = container.NewPadded(link)
+		bottomRightItems = append(bottomRightItems, link)
 	}
+	bottomRight := container.NewPadded(container.NewVBox(bottomRightItems...))
 
 	s.setContent(container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), bottomRight), nil, nil, main))
 }
