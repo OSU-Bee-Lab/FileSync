@@ -66,6 +66,11 @@ type syncFlowExtras struct {
 	// than a blocking dialog or a scan that never progresses.
 	finishedTitle   string
 	finishedMessage string
+	// headerNote, when set, renders as a small subtitle under the main title
+	// for the life of the session (every phase, not just one) — used by
+	// retryFailed to mark a session as a targeted rescan of previously
+	// failed items, so the user doesn't mistake it for a full re-run.
+	headerNote string
 }
 
 // progressScreen holds all state and widgets for the shared scan/sync
@@ -105,6 +110,7 @@ type progressScreen struct {
 	cancelling bool
 
 	titleLabel *widget.Label
+	noteLabel  *widget.Label
 	speedLabel *widget.Label
 	retryLabel *canvas.Text
 
@@ -123,13 +129,13 @@ type progressScreen struct {
 
 	fileUnsyncedList, fileSyncedList *widget.List
 	fileUnsyncedRows, fileSyncedRows []barRow
-	applyFilesMode                   func(hasUnsynced, hasSynced bool)
+	applyFilesMode                   func(hasUnsynced, hasSynced, collapseSynced bool)
 
 	foldUnsyncedList, foldSyncedList *widget.List
 	foldUnsyncedRows, foldSyncedRows []barRow
-	applyFoldMode                    func(hasUnsynced, hasSynced bool)
+	applyFoldMode                    func(hasUnsynced, hasSynced, collapseSynced bool)
 
-	cancelBtn, backBtn, syncBtn, scanBtn, resolveBtn *widget.Button
+	cancelBtn, backBtn, syncBtn, scanBtn, resolveBtn, retryBtn *widget.Button
 }
 
 // isSyncing reports whether a real copy has run (or is running). Progress
@@ -190,6 +196,10 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	s := ps.s
 
 	ps.titleLabel = widget.NewLabelWithStyle("Scanning...", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	ps.noteLabel = widget.NewLabel(ps.extras.headerNote)
+	if ps.extras.headerNote == "" {
+		ps.noteLabel.Hide()
+	}
 	ps.speedLabel = widget.NewLabel("")
 	ps.speedLabel.Hide()
 
@@ -411,10 +421,15 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	ps.scanBtn.Importance = widget.MediumImportance
 	ps.scanBtn.Hide()
 
+	ps.retryBtn = widget.NewButton("Retry Failed…", ps.retryFailed)
+	ps.retryBtn.Importance = widget.HighImportance
+	ps.retryBtn.Hide()
+
 	progressContainer := container.NewStack(ps.overallBar, ps.overallBarInf)
 
 	header := container.NewVBox(
 		container.NewHBox(ps.titleLabel, ps.speedLabel, ps.retryLabel),
+		ps.noteLabel,
 		progressContainer,
 		metrics,
 		errorRow,
@@ -424,7 +439,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 
 	content := container.NewBorder(
 		header,
-		container.NewHBox(ps.cancelBtn, ps.scanBtn, ps.resolveBtn, ps.syncBtn, ps.backBtn),
+		container.NewHBox(ps.cancelBtn, ps.scanBtn, ps.resolveBtn, ps.retryBtn, ps.syncBtn, ps.backBtn),
 		nil, nil,
 		columns,
 	)
@@ -490,12 +505,34 @@ func (ps *progressScreen) gateNWaySync() {
 	}
 }
 
+// retryFailed re-launches a fresh scan/sync session scoped to just the
+// tasks that errored out, instead of blindly re-sending the files rclone
+// reported as failed: a rescan re-diffs current state, so it can't retry a
+// file that isn't actually broken (e.g. one whose error was misreported) or
+// skip one that broke after the fact. Tasks that finished cleanly are left
+// out entirely.
+func (ps *progressScreen) retryFailed() {
+	var failedTasks []scanTask
+	for i, e := range ps.expStates {
+		if e.hasError && i < len(ps.tasks) {
+			failedTasks = append(failedTasks, ps.tasks[i])
+		}
+	}
+	if len(failedTasks) == 0 {
+		return
+	}
+	extras := ps.extras
+	extras.headerNote = fmt.Sprintf("Retry scan — rechecking %s that failed last time", plural(len(failedTasks), "item", ""))
+	showSyncFlowExtras(ps.s, failedTasks, ps.onBack, extras)
+}
+
 // applyPhaseChrome switches title text, progress-bar visibility, and button
 // visibility/enablement based on the current phase.
 func (ps *progressScreen) applyPhaseChrome() {
 	if ps.phase != phaseSyncComplete {
 		ps.finishedMsgLabel.Hide()
 	}
+	ps.retryBtn.Hide()
 	switch ps.phase {
 	case phaseScanRunning:
 		ps.titleLabel.SetText("Scanning...")
@@ -582,6 +619,7 @@ func (ps *progressScreen) applyPhaseChrome() {
 			}
 			if hasAnyErrors {
 				ps.titleLabel.SetText("Sync Completed with Errors")
+				ps.retryBtn.Show()
 			} else {
 				ps.titleLabel.SetText("Sync Complete")
 			}
