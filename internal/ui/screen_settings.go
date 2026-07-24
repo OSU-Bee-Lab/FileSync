@@ -91,6 +91,19 @@ func showSettings(s *state) {
 		"can help on slow or rate-limited remotes.")
 	transfersHint.Wrapping = fyne.TextWrapWord
 
+	http2Check := widget.NewCheck("Use HTTP/2 for remote transfers", func(enabled bool) {
+		s.cfg.HTTP2Enabled = enabled
+		syncengine.SetHTTP2Enabled(enabled)
+		s.saveConfig()
+	})
+	http2Check.SetChecked(s.cfg.HTTP2Enabled)
+	http2Hint := widget.NewLabel("Off by default. HTTP/2 sends every transfer down one connection, so when that " +
+		"connection drops — which SharePoint and OneDrive do routinely — every file in flight fails at once and " +
+		"restarts from the beginning. On HTTP/1.1 each transfer has its own connection, so a drop costs one file. " +
+		"There's no meaningful speed difference for audio-sized files. Turn this on only if a remote specifically " +
+		"needs it; a remote already used since FileSync started keeps its current connection until you restart.")
+	http2Hint.Wrapping = fyne.TextWrapWord
+
 	// Retries: a checkbox for the common case ("just keep going") with the
 	// entry only in play once the user opts into a finite budget, rather
 	// than a bare number field where 0 silently means "unlimited".
@@ -146,6 +159,8 @@ func showSettings(s *state) {
 			widget.NewLabel("Transfers"), transfersEntry, transfersHint,
 			widget.NewSeparator(),
 			widget.NewLabel("Retries"), retriesForever, retriesEntry, retriesHint,
+			widget.NewSeparator(),
+			widget.NewLabel("Connections"), http2Check, http2Hint,
 		),
 	)
 	s.setContent(container.NewPadded(content))

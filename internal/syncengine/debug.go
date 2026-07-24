@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/fshttp"
 )
 
 // debugEnabled gates both this package's own console logging and rclone's
@@ -90,4 +91,32 @@ func SetTransfers(n int) {
 		n = DefaultTransfers
 	}
 	fs.GetConfig(context.Background()).Transfers = n
+}
+
+// SetHTTP2Enabled chooses between HTTP/2 and HTTP/1.1 for every remote
+// (rclone's --disable-http2, inverted). FileSync defaults to HTTP/1.1.
+//
+// HTTP/2 multiplexes every request onto a single TCP connection, which pays
+// off for workloads made of many small requests. This app's is the opposite:
+// dozens of ~1 GB audio files, each a long-lived upload, where the
+// per-request overhead HTTP/2 saves is negligible. What isn't negligible is
+// the shared fate - when that one connection is torn down (Go's HTTP/2
+// transport and SharePoint/OneDrive do this to each other routinely, giving
+// "http2: client connection force closed via ClientConn.Close"), every
+// in-flight transfer dies at once, and because rclone cancels an interrupted
+// upload session rather than resuming it, each of those files restarts from
+// byte zero. On HTTP/1.1 the transfers sit on separate connections, so a
+// drop costs one file instead of Transfers-many.
+//
+// The rclone community has repeatedly proposed making --disable-http2 the
+// default for exactly this reason; FileSync just does it.
+//
+// Only transports created after this call are affected: a remote already
+// used this session keeps the connection it has until FileSync restarts.
+func SetHTTP2Enabled(enabled bool) {
+	fs.GetConfig(context.Background()).DisableHTTP2 = !enabled
+	// The transport is built once, on first use, from whatever the config
+	// said at that moment; without this a change made in Settings wouldn't
+	// apply to any remote opened later in the same session either.
+	fshttp.ResetTransport()
 }

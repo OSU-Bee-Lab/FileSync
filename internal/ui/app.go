@@ -177,6 +177,7 @@ func Run() {
 		syncengine.SetBwLimitMiBPerSec(s.cfg.BwLimitMiBPerSec)
 		syncengine.SetTransfers(s.cfg.Transfers)
 		syncengine.SetCopyRetries(s.cfg.CopyRetries)
+		syncengine.SetHTTP2Enabled(s.cfg.HTTP2Enabled)
 
 		// Content must be set before Resize/CenterOnScreen - otherwise Fyne
 		// has no size hints yet and (at least on macOS with multiple

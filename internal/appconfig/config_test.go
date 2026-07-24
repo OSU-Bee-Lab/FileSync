@@ -92,6 +92,38 @@ func TestLoadBackfillsTimestampTolerance(t *testing.T) {
 	}
 }
 
+// TestExistingConfigsGetHTTP2Disabled is the mirror image of the backfill
+// above: here the absent key must be left alone. HTTP/2 is off by default,
+// including for anyone upgrading - they're precisely the users who have been
+// losing transfers to dropped connections - so a config predating the option
+// must load with HTTP2Enabled false, same as a fresh one.
+func TestExistingConfigsGetHTTP2Disabled(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"checkers":8,"transfers":4}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP2Enabled {
+		t.Error("a config predating the option loaded with HTTP/2 enabled")
+	}
+	if Default().HTTP2Enabled {
+		t.Error("a fresh config defaults to HTTP/2 enabled")
+	}
+}
+
 func TestPathIsUnderFileSyncSubdir(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")

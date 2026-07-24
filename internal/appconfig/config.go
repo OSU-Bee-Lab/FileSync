@@ -57,6 +57,15 @@ type Config struct {
 	// Transfers is rclone's --transfers value: how many files are copied
 	// concurrently within a single scan/copy job. Must be >= 1.
 	Transfers int `json:"transfers"`
+	// HTTP2Enabled opts back in to HTTP/2 for remote transfers, which
+	// FileSync otherwise turns off (see syncengine.SetHTTP2Enabled).
+	//
+	// The field is deliberately named for the non-default state so its zero
+	// value means "HTTP/2 off": a config written by a version that predates
+	// this option loads with the key absent, and lands on HTTP/1.1 along
+	// with everyone else, rather than silently keeping the old behaviour
+	// for exactly the users who have been hitting dropped connections.
+	HTTP2Enabled bool `json:"http2Enabled"`
 	// CopyRetries is how many attempts a copy gets before a transient
 	// error (a dropped connection, a network outage) is reported as a
 	// failure. 0 is syncengine.RetriesUnlimited - keep retrying - which is

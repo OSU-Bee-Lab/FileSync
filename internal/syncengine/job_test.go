@@ -1,11 +1,13 @@
 package syncengine
 
 import (
+	"context"
 	"errors"
 
 	"net/url"
 	"testing"
 
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/fserrors"
 )
 
@@ -80,5 +82,21 @@ func TestSetCopyRetries(t *testing.T) {
 		if copyRetries != RetriesUnlimited {
 			t.Errorf("SetCopyRetries(%d): copyRetries = %d, want RetriesUnlimited", n, copyRetries)
 		}
+	}
+}
+
+func TestSetHTTP2Enabled(t *testing.T) {
+	t.Cleanup(func() { SetHTTP2Enabled(false) })
+
+	// The config flag is rclone's --disable-http2, i.e. the inverse of ours;
+	// getting the polarity backwards would silently do the opposite of what
+	// Settings says.
+	SetHTTP2Enabled(false)
+	if !fs.GetConfig(context.Background()).DisableHTTP2 {
+		t.Error("SetHTTP2Enabled(false) left HTTP/2 enabled")
+	}
+	SetHTTP2Enabled(true)
+	if fs.GetConfig(context.Background()).DisableHTTP2 {
+		t.Error("SetHTTP2Enabled(true) left HTTP/2 disabled")
 	}
 }
