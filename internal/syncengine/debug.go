@@ -111,8 +111,11 @@ func SetTransfers(n int) {
 // The rclone community has repeatedly proposed making --disable-http2 the
 // default for exactly this reason; FileSync just does it.
 //
-// Only transports created after this call are affected: a remote already
-// used this session keeps the connection it has until FileSync restarts.
+// Only transports created after this call are affected. A remote used
+// within the last few minutes is still in rclone's Fs cache, holding the
+// HTTP client it was built with, so it keeps the old setting until that
+// entry expires (rclone drops Fs entries idle for 5 minutes) or FileSync
+// restarts. Applied at startup this is moot - nothing has connected yet.
 func SetHTTP2Enabled(enabled bool) {
 	fs.GetConfig(context.Background()).DisableHTTP2 = !enabled
 	// The transport is built once, on first use, from whatever the config

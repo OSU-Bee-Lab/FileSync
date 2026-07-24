@@ -101,7 +101,8 @@ func showSettings(s *state) {
 		"connection drops — which SharePoint and OneDrive do routinely — every file in flight fails at once and " +
 		"restarts from the beginning. On HTTP/1.1 each transfer has its own connection, so a drop costs one file. " +
 		"There's no meaningful speed difference for audio-sized files. Turn this on only if a remote specifically " +
-		"needs it; a remote already used since FileSync started keeps its current connection until you restart.")
+		"needs it. Changing this applies to remotes you haven't synced in the last few minutes; restart FileSync " +
+		"to be sure it applies everywhere.")
 	http2Hint.Wrapping = fyne.TextWrapWord
 
 	// Retries: a checkbox for the common case ("just keep going") with the
