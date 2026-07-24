@@ -59,6 +59,13 @@ jobs:
       - name: Install fyne packaging tool
         run: go install fyne.io/fyne/v2/cmd/fyne@latest
 
+      - name: Set app version from tag
+        shell: bash
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          echo "GOFLAGS=-ldflags=-X=github.com/OSU-Bee-Lab/filesync/internal/appversion.Version=${version:-0.0.0}" >> "$GITHUB_ENV"
+
       - name: Package (macOS)
         if: matrix.os == 'darwin'
         run: |

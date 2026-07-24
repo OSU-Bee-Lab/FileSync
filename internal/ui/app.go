@@ -4,7 +4,11 @@
 package ui
 
 import (
+	"context"
 	_ "embed"
+	"net/url"
+	"sync/atomic"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
@@ -16,6 +20,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/appconfig"
+	"github.com/OSU-Bee-Lab/filesync/internal/appversion"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
@@ -55,6 +60,14 @@ type state struct {
 	syncOneWayFromFolder string
 	syncOneWayToNames    []string
 	syncOneWayToRelPath  string
+
+	// availableUpdate holds the result of the GitHub release check kicked
+	// off in Run, once it completes - nil until then, and nil forever if
+	// already up to date or the check failed. showHome reads it each time
+	// it's (re)built, so the "New Version Available" link appears next time
+	// the user lands on the home screen after the check finishes, without
+	// needing to interrupt whatever screen they're currently on.
+	availableUpdate atomic.Pointer[appversion.Update]
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to
@@ -197,6 +210,14 @@ func Run() {
 		syncengine.SetCopyRetries(s.cfg.CopyRetries)
 		syncengine.SetHTTP2Enabled(s.cfg.HTTP2Enabled)
 
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if update, err := appversion.CheckForUpdate(ctx); err == nil && update != nil {
+				s.availableUpdate.Store(update)
+			}
+		}()
+
 		// Content must be set before Resize/CenterOnScreen - otherwise Fyne
 		// has no size hints yet and (at least on macOS with multiple
 		// displays) can compute a window spanning the whole virtual desktop
@@ -283,5 +304,19 @@ func showHome(s *state) {
 	)
 	body.Add(locationsBtn)
 	body.Add(settingsBtn)
-	s.setContent(container.NewPadded(container.NewVBox(widget.NewLabel(""), body)))
+
+	main := container.NewPadded(container.NewVBox(widget.NewLabel(""), body))
+
+	var bottomRight fyne.CanvasObject = container.NewWithoutLayout()
+	if update := s.availableUpdate.Load(); update != nil {
+		link := widget.NewHyperlink("New Version Available", nil)
+		link.OnTapped = func() {
+			if u, err := url.Parse(update.URL); err == nil {
+				fyne.CurrentApp().OpenURL(u)
+			}
+		}
+		bottomRight = container.NewPadded(link)
+	}
+
+	s.setContent(container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), bottomRight), nil, nil, main))
 }
