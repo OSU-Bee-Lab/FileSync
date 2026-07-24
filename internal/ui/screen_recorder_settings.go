@@ -176,6 +176,7 @@ func showSyncRecorders(s *state) {
 	// wrap against, breaking it into one character per line).
 	batchUploadHint := widget.NewLabel("(faster when syncing many files - uploads everything at once instead of as each file lands.)")
 	batchUploadHint.Wrapping = fyne.TextWrapWord
+	batchUploadHint.Importance = widget.LowImportance
 
 	detectTimestampsCheck := widget.NewCheck("Detect bad recorder timestamps", nil)
 	detectTimestampsCheck.SetChecked(s.cfg.RecorderSettings.DetectBadTimestamps)
@@ -245,9 +246,12 @@ func showSyncRecorders(s *state) {
 		refreshBrowserLocations()
 		if len(sel) > 0 {
 			batchUploadCheck.Enable()
+			batchUploadHint.Importance = widget.MediumImportance
 		} else {
 			batchUploadCheck.Disable()
+			batchUploadHint.Importance = widget.LowImportance
 		}
+		batchUploadHint.Refresh()
 	}
 	updateStartEnabled()
 	updateSyncingTo()
