@@ -58,9 +58,13 @@ type timestampReviewInput struct {
 // start against the consensus and every OTHER recorder's start
 // (recorder.CheckRecorderTimestamp), wiring a recheck closure so the review
 // screen's tolerance slider can re-judge live. Recorders with no parseable
-// timestamp are dropped. Keeping this in one place is what stops the two
-// callers from drifting - the reason the Manage Files path could suggest a
-// different fix than Sync Recorders for the same clock error.
+// timestamp are dropped, but every recorder that was checked gets a row
+// regardless of verdict - including a clean one - so the review screen always
+// has something to show and can render its own all-clear state (see
+// refreshSummary) rather than the caller silently skipping the screen.
+// Keeping this in one place is what stops the two callers from drifting - the
+// reason the Manage Files path could suggest a different fix than Sync
+// Recorders for the same clock error.
 func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Duration) []timestampReviewRow {
 	allStarts := make([]time.Time, len(inputs))
 	for i, in := range inputs {
@@ -79,9 +83,6 @@ func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Dura
 		in := in
 		recheck := func(tol time.Duration) recorder.TimestampIssue {
 			return *recorder.CheckRecorderTimestamp(in.sourceFiles, in.parser, cy, cm, cd, others, tol)
-		}
-		if recorder.CheckRecorderTimestamp(in.sourceFiles, in.parser, cy, cm, cd, others, tolerance) == nil {
-			continue
 		}
 		rows = append(rows, timestampReviewRow{
 			recorderID:  in.recorderID,

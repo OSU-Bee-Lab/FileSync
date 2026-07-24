@@ -517,9 +517,12 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 // checking its earliest file against that consensus and every OTHER
 // recorder's earliest file (see recorder.CheckRecorderTimestamp's doc for
 // why cross-recorder, rather than a recorder's own other files, is the only
-// valid ground truth) - then either shows the timestamp review screen (whose
-// own Continue action calls next) or, if there's nothing to review, calls
-// next immediately.
+// valid ground truth) - then shows the timestamp review screen (whose own
+// Continue action calls next), even when every recorder checks out clean, so
+// the researcher always gets an explicit confirmation rather than silently
+// proceeding. next is only called immediately, skipping the screen entirely,
+// when there's nothing this driver set even supports checking (no eligible
+// recorder had a parseable timestamp).
 //
 // This runs at the point the user actually commits to leaving Screen 2 -
 // End Sync, Exit Sync, or Batch Upload - rather than as soon as every
@@ -597,11 +600,6 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	}
 
 	reviewRows := buildTimestampReviewRows(inputs, sc.params.timestampTolerance)
-	if len(reviewRows) == 0 {
-		sc.timestampsHandled = false
-		next()
-		return
-	}
 
 	continueLabel := "End Sync"
 	if sc.params.batchUpload && len(sc.params.uploads) > 0 {

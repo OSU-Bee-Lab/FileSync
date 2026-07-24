@@ -438,9 +438,11 @@ func showManageFiles(s *state) {
 // local or remote), groups the results into candidate recorder directories
 // (recorder.GroupTimestampFiles), then hands them to the shared retime
 // pathway (buildTimestampReviewRows) that computes the session consensus and
-// each recorder's check exactly as Sync Recorders does, and - if anything
-// looks suspicious - shows the same review screen (showTimestampReview)
-// before applying anything. The only Retime-specific part is the apply step:
+// each recorder's check exactly as Sync Recorders does, and always shows the
+// same review screen (showTimestampReview) - even when every recorder checks
+// out clean, so the researcher gets an explicit all-clear rather than no
+// feedback at all - before applying anything. The only Retime-specific part
+// is the apply step:
 // the correction, once confirmed, is applied at every selected Location
 // (local or remote alike, via syncengine.ApplyRenames) - mirroring how a
 // recorder's fix already lands at every one of its destDirs in Sync
@@ -521,11 +523,6 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	}
 
 	reviewRows := buildTimestampReviewRows(inputs, tolerance)
-	if len(reviewRows) == 0 {
-		dialog.ShowInformation("Nothing to check",
-			"No recorder directories with a checkable timestamp naming pattern were found under "+from+".", s.win)
-		return
-	}
 
 	showTimestampReview(timestampReviewHost{
 		s:             s,
