@@ -43,6 +43,10 @@ option to scan experiments).
   a native window. Build/vet/test to confirm it compiles and passes existing
   tests, then hand off to the user to check it in the running app.
 - Worktrees go in ./.claude/worktrees
+- Folder/experiment browsers' "step up one directory" action must use
+  `widget.NewButtonWithIcon("", theme.NavigateBackIcon(), ...)`, never a text
+  button (e.g. "Up"). See `dest_folder_browser.go`'s `backBtn` for the
+  reference implementation.
 - Features that are incomplete or still being stabilized should stay hidden
   from release builds by gating them behind `devMode()`
   (`internal/ui/features.go`), which is on when the `FILESYNC_DEV` env var is

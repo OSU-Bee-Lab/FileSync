@@ -14,6 +14,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/rclone/rclone/fs"
 
@@ -183,7 +184,7 @@ func showManageFiles(s *state) {
 		},
 		nil,
 	)
-	upBtn := widget.NewButton("Up", nil)
+	upBtn := widget.NewButtonWithIcon("", theme.NavigateBackIcon(), nil)
 
 	refLoc := func() *syncengine.Location {
 		sel := locGroup.Selected()
