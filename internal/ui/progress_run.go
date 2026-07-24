@@ -161,6 +161,25 @@ func (ps *progressScreen) runScan() {
 	}()
 }
 
+// setTaskSpeed records task i's latest transfer speed and redraws the
+// speed label with the total across all running tasks. UI goroutine only.
+func (ps *progressScreen) setTaskSpeed(i int, speed float64) {
+	if i < 0 || i >= len(ps.taskSpeeds) {
+		return
+	}
+	ps.taskSpeeds[i] = speed
+
+	var total float64
+	for _, s := range ps.taskSpeeds {
+		total += s
+	}
+	if total > 0 {
+		ps.speedLabel.SetText(fmt.Sprintf("Speed: %s/s", humanSpeed(total)))
+	} else {
+		ps.speedLabel.SetText("Speed: ---")
+	}
+}
+
 // runSync rebuilds expStates from the confirmed scan results and runs the
 // real copy for every task concurrently (bounded by maxConcurrentTasks).
 func (ps *progressScreen) runSync() {
@@ -172,6 +191,7 @@ func (ps *progressScreen) runSync() {
 	ps.selectedFoldIdx = 0
 	ps.phase = phaseSyncing
 	ps.cancelling = false
+	ps.taskSpeeds = make([]float64, len(ps.tasks))
 	ps.speedLabel.SetText("Speed: ---")
 	ps.speedLabel.Show()
 	ps.refreshUI()
@@ -227,11 +247,7 @@ func (ps *progressScreen) runSync() {
 						ps.retryLabel.Hide()
 					}
 
-					if snap.Speed > 0 {
-						ps.speedLabel.SetText(fmt.Sprintf("Speed: %s/s", humanSpeed(snap.Speed)))
-					} else {
-						ps.speedLabel.SetText("Speed: ---")
-					}
+					ps.setTaskSpeed(i, snap.Speed)
 
 					// Force refreshing the active folders/files list during sync
 					if ps.selectedExpIdx == i {
@@ -243,6 +259,12 @@ func (ps *progressScreen) runSync() {
 			}
 
 			fyne.Do(func() {
+				// This task is no longer moving bytes, so it must stop
+				// contributing to the summed speed - otherwise a finished
+				// job's last reading would inflate the total for as long as
+				// the slower ones keep running.
+				ps.setTaskSpeed(i, 0)
+
 				statusText := statusDone
 				var jobErr error
 				switch final.Status {

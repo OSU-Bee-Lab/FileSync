@@ -117,6 +117,14 @@ type progressScreen struct {
 	titleLabel *widget.Label
 	noteLabel  *widget.Label
 	speedLabel *widget.Label
+
+	// taskSpeeds holds each task's most recent reported transfer speed,
+	// indexed like tasks/expStates. Up to maxConcurrentTasks jobs run at
+	// once and speedLabel shows a single figure, so it has to be their sum -
+	// writing the label straight from each snapshot made it flip between
+	// whichever job emitted last. Only ever touched on the UI goroutine
+	// (inside fyne.Do), so it needs no lock.
+	taskSpeeds []float64
 	retryLabel *canvas.Text
 
 	overallBar    *widget.ProgressBar
