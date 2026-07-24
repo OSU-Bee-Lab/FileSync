@@ -161,16 +161,19 @@ func showEditLocation(s *state, id int) {
 		buttons.Add(reauthBtn)
 	}
 
+	// NewVScroll forces content to the window width (entries fill, no
+	// horizontal scrollbar). It reports content min width to the window, so
+	// keep every child narrow - long path labels are truncated and the
+	// path-entry placeholder is short - to avoid stretching the window
+	// across multiple monitors.
+	scroll := container.NewVScroll(body)
+	fixEntryScrolling(body, scroll)
+
 	content := container.NewBorder(
 		widget.NewLabelWithStyle("Edit Location", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		buttons,
 		nil, nil,
-		// NewVScroll forces content to the window width (entries fill, no
-		// horizontal scrollbar). It reports content min width to the window, so
-		// keep every child narrow - long path labels are truncated and the
-		// path-entry placeholder is short - to avoid stretching the window
-		// across multiple monitors.
-		container.NewVScroll(body),
+		scroll,
 	)
 	s.setContent(container.NewPadded(content))
 }

@@ -595,6 +595,12 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 		return nwayChoice{}
 	}
 
+	// body is assigned once the dialog's outer Scroll exists (below); render()
+	// (and thus renderSubArea) only ever runs after that, so it's non-nil by
+	// the time renderSubArea uses it to re-fix subArea's freshly rebuilt
+	// entries. See fixEntryScrolling for why this is needed.
+	var body *container.Scroll
+
 	// renderSubArea fills the area under the radio group: the concrete new
 	// names for keep-all, or the destructive warning + location picker for
 	// delete.
@@ -679,6 +685,9 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 			subArea.Add(group)
 		}
 		subArea.Refresh()
+		if body != nil {
+			fixEntryScrolling(subArea, body)
+		}
 	}
 
 	render = func() {
@@ -792,7 +801,7 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 	}
 
 	header := container.NewVBox(posLabel, pathLabel, reasonLabel, widget.NewSeparator())
-	body := container.NewVScroll(container.NewVBox(radio, subArea))
+	body = container.NewVScroll(container.NewVBox(radio, subArea))
 	body.SetMinSize(fyne.NewSize(600, 260))
 	footer := container.NewVBox(
 		applyAllCheck,

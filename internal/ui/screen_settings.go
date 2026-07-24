@@ -159,6 +159,7 @@ func showSettings(s *state) {
 		widget.NewSeparator(),
 		widget.NewLabel("Connections"), http2Check, http2Hint,
 	))
+	fixEntryScrolling(scroll.Content, scroll)
 
 	content := container.NewBorder(
 		container.NewVBox(widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}), widget.NewSeparator()),

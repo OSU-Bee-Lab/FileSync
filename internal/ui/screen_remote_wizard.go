@@ -98,6 +98,12 @@ func showAddLocation(s *state) {
 
 	saveBtn := widget.NewButton("Save", nil)
 
+	// scroll is assigned once the screen's outer Scroll exists (below); rebuild
+	// runs once before that (nil, so the fix is skipped - nothing is scrolling
+	// yet) and again on every "Type" change, when it re-fixes just the parts of
+	// dynamicArea it just rebuilt. See fixEntryScrolling for why this is needed.
+	var scroll *container.Scroll
+
 	rebuild := func() {
 		dynamicArea.Objects = nil
 		kind := kindSelect.Selected
@@ -127,6 +133,9 @@ func showAddLocation(s *state) {
 			saveBtn.SetText("Save")
 		}
 		dynamicArea.Refresh()
+		if scroll != nil {
+			fixEntryScrolling(dynamicArea, scroll)
+		}
 	}
 	kindSelect.OnChanged = func(string) { rebuild() }
 	rebuild()
@@ -282,12 +291,15 @@ func showAddLocation(s *state) {
 		dynamicArea,
 	)
 
+	scroll = container.NewVScroll(layout)
+	fixEntryScrolling(layout, scroll)
+
 	backBtn := widget.NewButton("Cancel", func() { showLocations(s) })
 	content := container.NewBorder(
 		widget.NewLabelWithStyle("Add Location", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewHBox(saveBtn, backBtn),
 		nil, nil,
-		container.NewVScroll(layout),
+		scroll,
 	)
 	s.setContent(container.NewPadded(content))
 }
