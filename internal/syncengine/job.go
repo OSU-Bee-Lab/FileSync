@@ -232,9 +232,10 @@ func filesFromFilter(expected ScanResult) *filter.Filter {
 const unlimitedNonTransientAttempts = 3
 
 // speedDecayWindow is how long the displayed transfer speed takes to ramp
-// linearly down to 0 once bytes stop moving, regardless of how fast the
-// transfer was going — see the comment in startCopyPreserving's emit
-// closure for why this replaced an exponential decay.
+// linearly to a new target rate (including 0, once bytes stop moving),
+// regardless of the gap between old and new — see the comment in
+// startCopyPreserving's emit closure for why this replaced an exponential
+// moving average.
 const speedDecayWindow = 3 * time.Second
 
 // copyDirWithRetry runs sync.CopyDir, retrying until it succeeds, hits an
@@ -414,39 +415,38 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 		var lastBytes int64
 		var lastTime = time.Now()
 		var currentSpeed float64
-		var decayFrom float64
-		var decayStart time.Time
+		var rampFrom, rampTo float64
+		var rampStart time.Time
 
 		emit := func(status JobStatus, err error) {
-			// Calculate speed. While bytes are actually moving, smooth the
-			// instantaneous rate with a light EMA to ride out per-tick
-			// jitter. Once bytes stop moving (gap between files, stalled
-			// connection), ramp the displayed speed linearly down to 0 over
-			// a fixed window rather than an exponential tail — an
-			// exponential decay's rate depends on the starting speed (a
-			// long tail from 100MB/s, a near-instant drop from 1MB/s),
-			// which read as arbitrary flicker rather than a predictable
-			// wind-down.
+			// Calculate speed. Every tick measures a new instantaneous
+			// target rate (0 when no bytes moved since the last tick) and
+			// the displayed speed ramps linearly toward it over a fixed
+			// window, rather than an exponential moving average. A linear
+			// ramp reaches any target in the same bounded time regardless
+			// of how far off it is — a drop from 100MB/s and a drop from
+			// 1MB/s both settle in speedDecayWindow — where an exponential
+			// decay's settling time scales with the starting value and
+			// reads as arbitrary flicker. The first sample jumps straight
+			// to its target: there's nothing to ramp from yet.
 			now := time.Now()
 			dur := now.Sub(lastTime)
 			currentBytes := stats.GetBytes()
 			if dur > 0 {
-				delta := currentBytes - lastBytes
-				if delta > 0 {
-					speed := float64(delta) / dur.Seconds()
-					if lastBytes == 0 {
-						currentSpeed = speed
-					} else {
-						currentSpeed = 0.8*currentSpeed + 0.2*speed
+				target := float64(currentBytes-lastBytes) / dur.Seconds()
+				if lastBytes == 0 {
+					currentSpeed = target
+				} else {
+					if target != rampTo {
+						rampFrom = currentSpeed
+						rampTo = target
+						rampStart = now
 					}
-					decayFrom = currentSpeed
-					decayStart = now
-				} else if currentSpeed > 0 {
-					elapsed := now.Sub(decayStart).Seconds()
+					elapsed := now.Sub(rampStart).Seconds()
 					if elapsed >= speedDecayWindow.Seconds() {
-						currentSpeed = 0
+						currentSpeed = rampTo
 					} else {
-						currentSpeed = decayFrom * (1 - elapsed/speedDecayWindow.Seconds())
+						currentSpeed = rampFrom + (rampTo-rampFrom)*(elapsed/speedDecayWindow.Seconds())
 					}
 				}
 			}
