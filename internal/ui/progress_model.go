@@ -289,6 +289,51 @@ func fileSyncRank(f *fileUIState) int {
 	}
 }
 
+// folderSyncRank mirrors fileSyncRank one level up: while a sync is
+// running, a folder with copy work still in flight floats to the top, one
+// that hasn't started yet sits in the middle, and one with no remaining
+// copy work (finished, or nothing to copy at all) sinks to the bottom.
+func folderSyncRank(f *folderUIState) int {
+	switch {
+	case f.copyTotalFiles == 0 || f.copyFilesDone >= f.copyTotalFiles:
+		return 2
+	case f.copyFilesDone > 0:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// expSyncRank orders the Experiments list: the running experiment floats to
+// the top, not-yet-started ones sit in the middle, and finished ones (done,
+// errored, or canceled) sink to the bottom.
+func expSyncRank(e *expUIState) int {
+	switch e.status {
+	case statusRunning:
+		return 0
+	case statusWaiting:
+		return 1
+	default:
+		return 2
+	}
+}
+
+// sortedExpOrder returns indices into expStates ordered by expSyncRank
+// (stable within each rank). expStates itself must stay index-stable —
+// progress_run.go's workers write results back into expStates[i] by each
+// task's original index — so display order lives in this separate index
+// slice instead of reordering expStates.
+func sortedExpOrder(expStates []*expUIState) []int {
+	order := make([]int, len(expStates))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return expSyncRank(expStates[order[i]]) < expSyncRank(expStates[order[j]])
+	})
+	return order
+}
+
 // applyScanProgress folds a live scan progress update into the experiment's
 // temp (not-yet-final) folder/recent-entry snapshot. Pure — the caller wraps
 // this in fyne.Do and triggers a re-render.

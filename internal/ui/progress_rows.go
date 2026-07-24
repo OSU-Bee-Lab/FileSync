@@ -273,7 +273,20 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 	}
 	exp := ps.expStates[ps.selectedExpIdx]
 	if len(exp.folders) > 0 {
-		for i, fold := range exp.folders {
+		order := make([]int, len(exp.folders))
+		for i := range order {
+			order[i] = i
+		}
+		if ps.isSyncing() {
+			// Active-first ordering only means something once a sync is
+			// actually moving bytes; during the scan phase folders stay in
+			// their natural (alphabetical) order.
+			sort.SliceStable(order, func(i, j int) bool {
+				return folderSyncRank(exp.folders[order[i]]) < folderSyncRank(exp.folders[order[j]])
+			})
+		}
+		for _, i := range order {
+			fold := exp.folders[i]
 			if fold.isFullySkipped() {
 				synced = append(synced, barRow{
 					label:    fold.path,

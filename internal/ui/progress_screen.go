@@ -86,7 +86,12 @@ type progressScreen struct {
 	selectedExpIdx  int
 	selectedFoldIdx int
 	expStates       []*expUIState
-	scanResults     []syncengine.ScanResult
+	// expOrder maps expList row ids to indices into expStates, kept sorted
+	// active > waiting > finished (see sortedExpOrder). expStates' own
+	// indices can't be reordered — they're load-bearing elsewhere (see
+	// sortedExpOrder's comment) — so display order lives here instead.
+	expOrder    []int
+	scanResults []syncengine.ScanResult
 
 	// unresolved is the cached set of conflicts still awaiting a usable
 	// decision, and haveResolver whether this session has an N-way resolver at
@@ -163,10 +168,12 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 		selectedExpIdx:  -1,
 		selectedFoldIdx: -1,
 		expStates:       make([]*expUIState, len(tasks)),
+		expOrder:        make([]int, len(tasks)),
 		scanResults:     make([]syncengine.ScanResult, len(tasks)),
 	}
 	for i, t := range tasks {
 		ps.expStates[i] = &expUIState{label: t.Label, status: statusWaiting}
+		ps.expOrder[i] = i
 	}
 
 	content := ps.buildLayout()
@@ -256,7 +263,10 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 		func() int { return len(ps.expStates) },
 		func() fyne.CanvasObject { return createBackingBarItem(s.win) },
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
-			exp := ps.expStates[id]
+			if int(id) >= len(ps.expOrder) {
+				return
+			}
+			exp := ps.expStates[ps.expOrder[id]]
 			prog := 0.0
 			if ps.isSyncing() {
 				if exp.copyTotalBytes > 0 {
@@ -274,7 +284,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 				prog = float64(exp.bytesDone) / float64(exp.totalBytes)
 			}
 			summary := fmt.Sprintf("%d%%", int(prog*100))
-			isSelected := ps.selectedExpIdx == int(id)
+			isSelected := ps.selectedExpIdx == ps.expOrder[id]
 			// Orange wash rolls all the way up: an experiment stays flagged
 			// while any conflict anywhere inside it is still undecided.
 			warn := unresolvedWarnTip(ps.unresolvedInExp(exp))
@@ -327,7 +337,10 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	ps.foldSyncedList.OnSelected = foldSelect(&ps.foldSyncedRows, ps.foldUnsyncedList)
 
 	ps.expList.OnSelected = func(id widget.ListItemID) {
-		ps.selectedExpIdx = int(id)
+		if int(id) >= len(ps.expOrder) {
+			return
+		}
+		ps.selectedExpIdx = ps.expOrder[id]
 		ps.selectedFoldIdx = 0
 		ps.foldUnsyncedList.UnselectAll()
 		ps.foldSyncedList.UnselectAll()
@@ -728,6 +741,7 @@ func (ps *progressScreen) refreshLists() {
 	ps.syncErrorLabelForSelection()
 
 	ps.recomputeUnresolved()
+	ps.expOrder = sortedExpOrder(ps.expStates)
 	ps.expList.Refresh()
 	// Only refresh foldList & fileList if the selected exp is static or
 	// changed. If we are in scan running and it's active, refresh.
