@@ -3,7 +3,9 @@ package syncengine
 import (
 	"context"
 	"fmt"
+	"path"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,24 +114,62 @@ func ScanNWay(ctx context.Context, locs []Location, relPath string, fset FilterS
 // per-location listings run, then per-file entries (mapped through
 // nwayDisplayEntry) with directory rollups as the diff classifies each path.
 func ScanNWayWithProgress(ctx context.Context, locs []Location, relPath string, fset FilterSettings, progress ScanProgressFunc, mode NWayScanMode) (NWayScanResult, error) {
+	return ScanNWayScopedWithProgress(ctx, locs, relPath, nil, fset, progress, mode)
+}
+
+// ScanNWayScopedWithProgress is ScanNWayWithProgress restricted to a set of
+// subtrees of relPath. Every scope is a path relative to relPath; only those
+// subtrees are walked at each location, but every reported RelPath stays
+// relative to relPath itself, so the result is indistinguishable from a full
+// scan that happened to find nothing outside the scopes. A nil or empty
+// scopes walks the whole of relPath (what ScanNWayWithProgress does).
+//
+// This exists for callers that already know exactly which files they care
+// about and would otherwise pay to walk an entire experiment to find them —
+// batch upload after a recorder offload being the motivating case: it holds
+// the exact set of files this session wrote (see runBatchUploadScan) and
+// discards everything else from the scan result anyway, so walking every
+// prior deployment at every location was pure cost. Use CoveringDirs to turn
+// a known set of file paths into the minimal scopes covering them.
+//
+// Scopes are walked concurrently across every (location, scope) pair, and a
+// scope missing at a location is benign-empty (same rule as a missing
+// relPath — see listSource), so a location that lacks the subtree entirely
+// costs one failed listing rather than one lookup per file.
+func ScanNWayScopedWithProgress(ctx context.Context, locs []Location, relPath string, scopes []string, fset FilterSettings, progress ScanProgressFunc, mode NWayScanMode) (NWayScanResult, error) {
 	if len(locs) < 2 {
 		return NWayScanResult{}, fmt.Errorf("nway scan needs at least 2 locations, got %d", len(locs))
 	}
+	if len(scopes) == 0 {
+		scopes = []string{""}
+	}
 
-	// The per-location listings run in parallel, so their progress callbacks
-	// are folded into one aggregate count under a shared throttle.
+	// One listing job per (location, scope). They run in parallel, so their
+	// progress callbacks are folded into one aggregate count under a shared
+	// throttle.
+	type listJob struct {
+		loc   int
+		scope string
+	}
+	var jobs []listJob
+	for i := range locs {
+		for _, scope := range scopes {
+			jobs = append(jobs, listJob{loc: i, scope: scope})
+		}
+	}
+
 	var mu sync.Mutex
-	filesSeen := make([]int, len(locs))
-	dirsSeen := make([]int, len(locs))
+	filesSeen := make([]int, len(jobs))
+	dirsSeen := make([]int, len(jobs))
 	var lastEmit time.Time
-	listProgress := func(i int) ScanProgressFunc {
+	listProgress := func(j int) ScanProgressFunc {
 		if progress == nil {
 			return nil
 		}
 		return func(p ScanProgress) {
 			mu.Lock()
-			filesSeen[i] = p.FilesScanned
-			dirsSeen[i] = p.DirsSeen
+			filesSeen[j] = p.FilesScanned
+			dirsSeen[j] = p.DirsSeen
 			now := time.Now()
 			if !lastEmit.IsZero() && now.Sub(lastEmit) < 100*time.Millisecond {
 				mu.Unlock()
@@ -137,34 +177,80 @@ func ScanNWayWithProgress(ctx context.Context, locs []Location, relPath string, 
 			}
 			lastEmit = now
 			var files, dirs int
-			for j := range filesSeen {
-				files += filesSeen[j]
-				dirs += dirsSeen[j]
+			for k := range filesSeen {
+				files += filesSeen[k]
+				dirs += dirsSeen[k]
 			}
 			mu.Unlock()
 			progress(ScanProgress{Label: relPath, FilesScanned: files, DirsSeen: dirs})
 		}
 	}
 
-	listings := make([]SourceListing, len(locs))
-	errs := make([]error, len(locs))
+	partials := make([]SourceListing, len(jobs))
+	errs := make([]error, len(jobs))
 	var wg sync.WaitGroup
-	for i, loc := range locs {
+	for j, job := range jobs {
 		wg.Add(1)
-		go func(i int, loc Location) {
+		go func(j int, job listJob) {
 			defer wg.Done()
-			listings[i], errs[i] = listSource(ctx, loc.rcloneSpec(), relPath, loc.reachAnchor, fset, listProgress(i))
-		}(i, loc)
+			loc := locs[job.loc]
+			partials[j], errs[j] = listSource(ctx, loc.rcloneSpec(), path.Join(relPath, job.scope), loc.reachAnchor, job.scope, fset, listProgress(j))
+		}(j, job)
 	}
 	wg.Wait()
 
-	for i, err := range errs {
+	listings := make([]SourceListing, len(locs))
+	for j, err := range errs {
 		if err != nil {
-			return NWayScanResult{}, fmt.Errorf("listing %s: %w", locs[i].Name, err)
+			return NWayScanResult{}, fmt.Errorf("listing %s: %w", locs[jobs[j].loc].Name, err)
 		}
+		listings[jobs[j].loc].merge(partials[j])
 	}
 
 	return diffNWay(ctx, locs, listings, relPath, progress, mode)
+}
+
+// CoveringDirs returns the minimal set of directories that together contain
+// every path in relPaths, suitable as ScanNWayScopedWithProgress scopes: the
+// parent of each path, with any directory that already sits under another in
+// the set dropped. A nil return means "no useful narrowing" — either relPaths
+// was empty, or at least one path sits directly at the root, so only a walk
+// of the whole root covers it.
+func CoveringDirs(relPaths []string) []string {
+	seen := make(map[string]bool, len(relPaths))
+	for _, p := range relPaths {
+		dir := parentDir(path.Clean(p))
+		if dir == "" {
+			return nil
+		}
+		seen[dir] = true
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+
+	dirs := make([]string, 0, len(seen))
+	for d := range seen {
+		dirs = append(dirs, d)
+	}
+	// Sorted ascending, an ancestor always precedes its descendants
+	// ("a/b" < "a/b/c"), so one pass keeping only paths not already covered
+	// by something kept leaves exactly the minimal set.
+	sort.Strings(dirs)
+	out := make([]string, 0, len(dirs))
+	for _, d := range dirs {
+		covered := false
+		for _, keep := range out {
+			if strings.HasPrefix(d, keep+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 // diffNWay computes, for every relative path seen at any of the listings,
@@ -175,7 +261,7 @@ func diffNWay(ctx context.Context, locs []Location, listings []SourceListing, la
 	for i, listing := range listings {
 		m := make(map[string]fs.Object, len(listing.objects))
 		for _, obj := range listing.objects {
-			m[obj.Remote()] = obj
+			m[obj.rel] = obj.obj
 		}
 		perLoc[i] = m
 	}

@@ -80,13 +80,34 @@ type ScanProgress struct {
 // return quickly; slow UI work should be handed off to the UI thread.
 type ScanProgressFunc func(ScanProgress)
 
+// listedObject is one file found by listSource, paired with the path it
+// should be reported at. rel is relative to the *scan's* root, which is not
+// always the directory that was walked: a scoped scan (see ScanNWayScoped)
+// walks several subtrees of one root and needs every object keyed by its
+// root-relative path so listings from different subtrees can be merged and
+// diffed together. obj.Remote() stays relative to the walked directory.
+type listedObject struct {
+	rel string
+	obj fs.Object
+}
+
 // SourceListing is a full recursive listing of one source subtree (an
 // experiment, or any relPath under a Location), captured once by listSource
 // so it can be diffed against multiple destinations (via scanAgainstDest)
-// without re-walking the source once per destination.
+// without re-walking the source once per destination. Both objects' rel
+// paths and dirs are relative to the scan root — see listedObject.
 type SourceListing struct {
-	objects []fs.Object
+	objects []listedObject
 	dirs    []string
+}
+
+// merge appends other's objects and dirs into l. Only meaningful for
+// listings taken from the same location against the same scan root (their
+// rel paths are then in one comparable namespace) — that's what
+// ScanNWayScoped does with one location's several scopes.
+func (l *SourceListing) merge(other SourceListing) {
+	l.objects = append(l.objects, other.objects...)
+	l.dirs = append(l.dirs, other.dirs...)
 }
 
 // listSource walks <srcRoot>/<relPath> (through fset's filter) exactly
@@ -95,7 +116,11 @@ type SourceListing struct {
 // rclone spec whose reachability makes a missing <srcRoot> (with an empty
 // relPath) benign-empty instead of an error — used by SubLocation-based
 // destinations whose leaf folder hasn't been created yet.
-func listSource(ctx context.Context, srcRoot, relPath, reachAnchor string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
+//
+// scope is prepended to every rel path and directory recorded, so a walk of
+// a subtree can report root-relative paths (see listedObject); pass "" when
+// the walked directory *is* the scan root.
+func listSource(ctx context.Context, srcRoot, relPath, reachAnchor, scope string, fset FilterSettings, progress ScanProgressFunc) (SourceListing, error) {
 	ctx, err := withFilter(ctx, fset)
 	if err != nil {
 		return SourceListing{}, err
@@ -113,9 +138,9 @@ func listSource(ctx context.Context, srcRoot, relPath, reachAnchor string, fset 
 		for _, entry := range entries {
 			switch x := entry.(type) {
 			case fs.Directory:
-				listing.dirs = append(listing.dirs, x.Remote())
+				listing.dirs = append(listing.dirs, scopedRel(scope, x.Remote()))
 			case fs.Object:
-				listing.objects = append(listing.objects, x)
+				listing.objects = append(listing.objects, listedObject{rel: scopedRel(scope, x.Remote()), obj: x})
 			}
 		}
 		if progress != nil {
@@ -182,7 +207,7 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 	if srcIsFile {
 		scopeRelPath = parentDir(srcRelPath)
 	}
-	listing, err := listSource(ctx, src.rcloneSpec(), scopeRelPath, src.reachAnchor, fset, progress)
+	listing, err := listSource(ctx, src.rcloneSpec(), scopeRelPath, src.reachAnchor, "", fset, progress)
 	if err != nil {
 		return ScanResult{}, err
 	}
@@ -201,8 +226,8 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 // dropping every sibling file and all subdirectories.
 func filterToFile(listing SourceListing, name string) SourceListing {
 	for _, o := range listing.objects {
-		if o.Remote() == name {
-			return SourceListing{objects: []fs.Object{o}}
+		if o.rel == name {
+			return SourceListing{objects: []listedObject{o}}
 		}
 	}
 	return SourceListing{}
@@ -389,7 +414,7 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 			return ScanResult{}, err
 		}
 		tracker.addEntry(entry)
-		tracker.emit(parentDir(srcObj.Remote()), srcObj.Remote(), false)
+		tracker.emit(parentDir(srcObj.rel), srcObj.rel, false)
 	}
 
 	return tracker.finish(), nil
@@ -399,12 +424,12 @@ func scanAgainstDest(ctx context.Context, listing SourceListing, dstRoot, relPat
 // it as identical, or flag it as a conflict needing user resolution. See
 // compareObjects for the size+prefix comparison used when a same-path file
 // already exists at the destination.
-func classifyObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj fs.Object) (ScanEntry, error) {
-	relFile := srcObj.Remote()
-	entry := ScanEntry{RelPath: relFile, Size: srcObj.Size(), Action: ActionCopy}
+func classifyObject(ctx context.Context, dstObjs map[string]fs.Object, srcObj listedObject) (ScanEntry, error) {
+	relFile := srcObj.rel
+	entry := ScanEntry{RelPath: relFile, Size: srcObj.obj.Size(), Action: ActionCopy}
 
 	if dstObj, ok := dstObjs[relFile]; ok {
-		action, reason, err := compareObjects(ctx, srcObj, dstObj)
+		action, reason, err := compareObjects(ctx, srcObj.obj, dstObj)
 		if err != nil {
 			return ScanEntry{}, err
 		}
@@ -423,6 +448,15 @@ func parentDir(remote string) string {
 		return ""
 	}
 	return dir
+}
+
+// scopedRel rebases remote (relative to a walked subtree) onto the scan
+// root by prepending scope. An empty scope means the subtree is the root.
+func scopedRel(scope, remote string) string {
+	if scope == "" {
+		return remote
+	}
+	return path.Join(scope, remote)
 }
 
 func displayDir(dir string) string {

@@ -847,20 +847,28 @@ func (sc *recorderSyncScreen) doConfirmBatchUpload() {
 // to a single experiment and Quick Scan mode. onDone is called once the
 // upload screen is left (Back, or scan/transfer completion) - Batch Upload
 // is a terminal action for Sync Recorders' Screen 2, same as End Sync.
-// allowedPaths restricts the eventual transfer to exactly the files this
-// session's offloads just wrote (see recordBatchUploadPaths) - the scan
-// itself still covers the whole experiment (so existing/converged files
-// are correctly detected as already in sync), but runBatchUploadTransfers
-// filters the resulting plan down to allowedPaths before transferring.
+// allowedPaths is exactly the files this session's offloads just wrote (see
+// recordBatchUploadPaths), and it narrows the work twice over: the scan is
+// scoped to just the directories containing those files (CoveringDirs -
+// typically one subpath/recorderID subtree per recorder offloaded, rather
+// than the whole experiment with every prior deployment in it), and the
+// resulting r.Files is then filtered down to the files themselves before
+// anything is displayed or planned.
 func runBatchUploadScan(s *state, onDone func(), locs []syncengine.Location, name string, allowedPaths map[string]bool) {
 	fset := s.cfg.DefaultFilter
 	var result syncengine.NWayScanResult
+
+	allowed := make([]string, 0, len(allowedPaths))
+	for p := range allowedPaths {
+		allowed = append(allowed, p)
+	}
+	scopes := syncengine.CoveringDirs(allowed)
 
 	task := scanTask{
 		Label: name,
 		Locs:  locs,
 		Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-			r, err := syncengine.ScanNWayWithProgress(ctx, locs, name, fset, progress, syncengine.NWayQuickScan)
+			r, err := syncengine.ScanNWayScopedWithProgress(ctx, locs, name, scopes, fset, progress, syncengine.NWayQuickScan)
 			if err != nil {
 				return syncengine.ScanResult{}, err
 			}
