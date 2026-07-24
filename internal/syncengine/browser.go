@@ -186,6 +186,55 @@ func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath stri
 	wg.Wait()
 }
 
+// UnionChildEntriesStream is UnionChildDirNamesStream, but includes files
+// alongside directories (each tagged via Entry.IsDir) instead of directories
+// only. It backs the "Edit Sync Locations" browse dialog, where seeing the
+// files already at a candidate path helps confirm it's the right one before
+// adopting it as the Location's root.
+func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry)) {
+	if len(locs) == 0 {
+		return
+	}
+	var mu sync.Mutex
+	seen := make(map[string]Entry)
+	var wg sync.WaitGroup
+	for _, loc := range locs {
+		wg.Add(1)
+		go func(loc Location) {
+			defer wg.Done()
+			entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, e := range entries {
+				switch v := e.(type) {
+				case fs.Directory:
+					seen[dirName(e)] = Entry{Name: dirName(e), IsDir: true}
+				case fs.Object:
+					name := dirName(e)
+					if _, exists := seen[name]; !exists {
+						seen[name] = Entry{Name: name, IsDir: false, Size: v.Size()}
+					}
+				}
+			}
+			out := make([]Entry, 0, len(seen))
+			for _, entry := range seen {
+				out = append(out, entry)
+			}
+			sort.Slice(out, func(i, j int) bool {
+				if out[i].IsDir != out[j].IsDir {
+					return out[i].IsDir
+				}
+				return out[i].Name < out[j].Name
+			})
+			onUpdate(out)
+		}(loc)
+	}
+	wg.Wait()
+}
+
 func dirName(e fs.DirEntry) string {
 	return path.Base(e.Remote())
 }

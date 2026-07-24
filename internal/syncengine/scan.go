@@ -157,27 +157,55 @@ func listSource(ctx context.Context, srcRoot, relPath, reachAnchor string, fset 
 }
 
 // ScanPullFilesWithProgress scans an arbitrary sub-path (any depth: a
-// whole experiment, one deployment date, one recorder directory, even a
-// single file) from src into destFolder. When fullIdent is true, srcRelPath's
-// structure is preserved under destFolder (e.g. scope "foo/bar" lands at
-// destFolder/foo/bar/...); when false, files land directly under destFolder
-// using only the path beneath srcRelPath (destFolder/...), i.e. flattened.
-// destFolder is a raw local path (from an OS folder picker), never a saved
-// Location.
-func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, destFolder string, fullIdent bool, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+// whole experiment, one deployment date, one recorder directory, or (when
+// srcIsFile is set) a single file) from src into destFolder. When fullIdent
+// is true, srcRelPath's structure is preserved under destFolder (e.g. scope
+// "foo/bar" lands at destFolder/foo/bar/...); when false, files land
+// directly under destFolder using only the path beneath srcRelPath
+// (destFolder/...), i.e. flattened. destFolder is a raw local path (from an
+// OS folder picker), never a saved Location.
+//
+// srcIsFile is required rather than inferred: rclone's fs.NewFs treats
+// whatever path it's given as a directory root and returns ErrorIsFile if
+// it's actually a file, so a bare file relPath can't be walked directly. To
+// scan a single file, this walks its parent directory instead (scopeRelPath
+// below) and narrows the listing down to that one entry - the caller
+// (destFolderBrowser) already knows from its own directory listing whether
+// the tapped row was a file or a folder, so it's cheaper to pass that
+// through than to re-derive it here.
+func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, srcIsFile bool, destFolder string, fullIdent bool, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	label := srcRelPath
 	if label == "" {
 		label = "experiments/"
 	}
-	listing, err := listSource(ctx, src.rcloneSpec(), srcRelPath, src.reachAnchor, fset, progress)
+	scopeRelPath := srcRelPath
+	if srcIsFile {
+		scopeRelPath = parentDir(srcRelPath)
+	}
+	listing, err := listSource(ctx, src.rcloneSpec(), scopeRelPath, src.reachAnchor, fset, progress)
 	if err != nil {
 		return ScanResult{}, err
 	}
+	if srcIsFile {
+		listing = filterToFile(listing, path.Base(srcRelPath))
+	}
 	dstRelPath := ""
 	if fullIdent {
-		dstRelPath = srcRelPath
+		dstRelPath = scopeRelPath
 	}
 	return scanAgainstDest(ctx, listing, destFolder, dstRelPath, label, progress)
+}
+
+// filterToFile narrows a SourceListing (walked from a file's parent
+// directory) down to the single immediate-child object matching name,
+// dropping every sibling file and all subdirectories.
+func filterToFile(listing SourceListing, name string) SourceListing {
+	for _, o := range listing.objects {
+		if o.Remote() == name {
+			return SourceListing{objects: []fs.Object{o}}
+		}
+	}
+	return SourceListing{}
 }
 
 // scanTracker accumulates the per-entry and per-directory bookkeeping every

@@ -194,13 +194,19 @@ func StartSyncExperiments(ctx context.Context, src, dst Location, experimentName
 // "/Downloads/foo/Luke - Zucchini/2026-06-23/..."); when false, the copy is
 // flattened to just the path beneath srcRelPath (lands directly under
 // "/Downloads/foo/..."). destFolder is a raw local path, never a saved
-// Location.
-func StartPullFiles(ctx context.Context, src Location, srcRelPath string, destFolder string, fullIdent bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+// Location. srcIsFile must match what was passed to the preceding
+// ScanPullFilesWithProgress call - see its doc comment for why a bare file
+// relPath needs the scope resolved to its parent directory instead.
+func StartPullFiles(ctx context.Context, src Location, srcRelPath string, srcIsFile bool, destFolder string, fullIdent bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+	scopeRelPath := srcRelPath
+	if srcIsFile {
+		scopeRelPath = parentDir(srcRelPath)
+	}
 	dstRelPath := ""
 	if fullIdent {
-		dstRelPath = srcRelPath
+		dstRelPath = scopeRelPath
 	}
-	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, srcRelPath, dstRelPath, expected)
+	return startCopyPreserving(ctx, src.rcloneSpec(), destFolder, scopeRelPath, dstRelPath, expected)
 }
 
 // filesFromFilter builds an rclone filter that restricts the copy to

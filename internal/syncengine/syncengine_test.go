@@ -191,7 +191,7 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 	fset := DefaultFilterSettings()
 	relPath := "Luke - Zucchini/2026-06-23"
 
-	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, destFolder, true, fset, nil)
+	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, false, destFolder, true, fset, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestPullFilesPreservesSubPath(t *testing.T) {
 		t.Fatalf("scan.CopyCount = %d, want 3", scan.CopyCount)
 	}
 
-	_, progress := StartPullFiles(ctx, src, relPath, destFolder, true, scan)
+	_, progress := StartPullFiles(ctx, src, relPath, false, destFolder, true, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -224,7 +224,7 @@ func TestPullFilesFlattensSubPathWhenFullIdentOff(t *testing.T) {
 	fset := DefaultFilterSettings()
 	relPath := "Luke - Zucchini/2026-06-23"
 
-	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, destFolder, false, fset, nil)
+	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, false, destFolder, false, fset, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestPullFilesFlattensSubPathWhenFullIdentOff(t *testing.T) {
 		t.Fatalf("scan.CopyCount = %d, want 3", scan.CopyCount)
 	}
 
-	_, progress := StartPullFiles(ctx, src, relPath, destFolder, false, scan)
+	_, progress := StartPullFiles(ctx, src, relPath, false, destFolder, false, scan)
 	final := drain(t, progress)
 	if final.Status != JobDone {
 		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
@@ -242,6 +242,40 @@ func TestPullFilesFlattensSubPathWhenFullIdentOff(t *testing.T) {
 	// <destFolder>/Luke - Zucchini/2026-06-23/RecorderA/....
 	assertFileExists(t, filepath.Join(destFolder, "RecorderA", "260623_0900.mp3"))
 	assertFileExists(t, filepath.Join(destFolder, "RecorderA", "260623_0905.mp3"))
+}
+
+// TestPullFilesSingleFile covers picking exactly one file in the browser
+// (srcIsFile) rather than a folder scope - the case that used to be
+// rejected because rclone's fs.NewFs errors (ErrorIsFile) when pointed
+// straight at a file instead of a directory. Only the tapped file may be
+// copied, not its sibling wav or the other mp3 in the same directory.
+func TestPullFilesSingleFile(t *testing.T) {
+	srcRoot := t.TempDir()
+	destFolder := filepath.Join(t.TempDir(), "foo")
+	seedExperiment(t, srcRoot, "Luke - Zucchini")
+	src := localLoc(srcRoot)
+	ctx := context.Background()
+	fset := DefaultFilterSettings()
+	relPath := "Luke - Zucchini/2026-06-23/RecorderA/260623_0900.mp3"
+
+	scan, err := ScanPullFilesWithProgress(ctx, src, relPath, true, destFolder, true, fset, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scan.CopyCount != 1 {
+		t.Fatalf("scan.CopyCount = %d, want 1", scan.CopyCount)
+	}
+
+	_, progress := StartPullFiles(ctx, src, relPath, true, destFolder, true, scan)
+	final := drain(t, progress)
+	if final.Status != JobDone {
+		t.Fatalf("final status = %v, want JobDone (err=%v)", final.Status, final.Err)
+	}
+
+	assertFileExists(t, filepath.Join(destFolder, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0900.mp3"))
+	if _, err := os.Stat(filepath.Join(destFolder, "Luke - Zucchini", "2026-06-23", "RecorderA", "260623_0905.mp3")); err == nil {
+		t.Fatal("sibling mp3 should not have been copied")
+	}
 }
 
 // TestCopyPreserving_NeverDeletesDestinationOnlyFiles is the single most

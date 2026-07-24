@@ -39,6 +39,25 @@ type destFolderBrowser struct {
 	// where typing a not-yet-existing folder name is the point.
 	allowCreate bool
 
+	// showFiles controls whether files (not just subfolders) appear in the
+	// listing. Off by default (see the package comment on showPullFiles);
+	// on for Manage Locations' Browse dialog (context to confirm the
+	// candidate path is right) and for Pull Files (selectFiles below).
+	showFiles bool
+
+	// selectFiles controls whether a shown file is tappable to select it
+	// as the browse target, alongside the usual folder scope - e.g. Pull
+	// Files letting a researcher grab exactly one recording instead of a
+	// whole folder. Only meaningful when showFiles is also set. Off for
+	// Manage Locations' Browse dialog, where files are shown for context
+	// only - "Set as Location" only ever adopts a directory.
+	selectFiles bool
+
+	// selectedFile is the tapped file's name within the current relPath,
+	// or "" if none is selected. Cleared by any navigation (reload) since
+	// a selection only makes sense within the folder it was made in.
+	selectedFile string
+
 	locs    []syncengine.Location
 	relPath string
 	scanGen int
@@ -48,7 +67,7 @@ type destFolderBrowser struct {
 	statusLbl  *widget.Label
 	loading    *loadingBar
 	list       *widget.List
-	names      []string
+	entries    []syncengine.Entry
 
 	// addingFolder is whether the trailing list row is in text-entry
 	// mode. addFolderText mirrors that entry's content - kept on the
@@ -74,9 +93,9 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 	b.list = widget.NewList(
 		func() int {
 			if b.allowCreate {
-				return len(b.names) + 1 // +1 for the trailing "+ Add Folder" row
+				return len(b.entries) + 1 // +1 for the trailing "+ Add Folder" row
 			}
-			return len(b.names)
+			return len(b.entries)
 		},
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
@@ -104,14 +123,39 @@ func (b *destFolderBrowser) CanvasObject() fyne.CanvasObject { return b.root }
 
 // RelPath is the currently chosen destination: the browsed-to folder, plus
 // whatever's typed into the add-folder row if it's in edit mode (see
-// OnPathChanged - there's no separate commit step for that text).
+// OnPathChanged - there's no separate commit step for that text), or a
+// tapped file's path if one is selected (see selectFile).
 func (b *destFolderBrowser) RelPath() string {
 	if b.addingFolder {
 		if name := strings.TrimSpace(b.addFolderText); name != "" {
 			return joinRel(b.relPath, name)
 		}
 	}
+	if b.selectedFile != "" {
+		return joinRel(b.relPath, b.selectedFile)
+	}
 	return b.relPath
+}
+
+// IsFileSelected reports whether RelPath() names a selected file (from
+// selectFiles mode) rather than the browsed-to folder itself.
+func (b *destFolderBrowser) IsFileSelected() bool {
+	return b.selectedFile != ""
+}
+
+// selectFile is a file row's tap handler when selectFiles is on: it toggles
+// name as the selection within the current folder (tapping the same file
+// again deselects it, falling back to the folder scope). Files have no
+// children, so unlike descend this never re-browses or reloads.
+func (b *destFolderBrowser) selectFile(name string) {
+	b.closeAddFolder()
+	if b.selectedFile == name {
+		b.selectedFile = ""
+	} else {
+		b.selectedFile = name
+	}
+	b.list.Refresh()
+	b.notifyPathChanged()
 }
 
 // SetLocations replaces the set of locations being browsed (e.g. the
@@ -147,6 +191,7 @@ func (b *destFolderBrowser) showAddFolder() {
 	if !b.allowCreate || len(b.locs) == 0 {
 		return
 	}
+	b.selectedFile = ""
 	b.addingFolder = true
 	b.addFolderText = ""
 	b.needsFocus = true
@@ -180,12 +225,30 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 	btn := stack.Objects[0].(*widget.Button)
 	entry := stack.Objects[1].(*widget.Entry)
 
-	if id < len(b.names) {
-		name := b.names[id]
+	if id < len(b.entries) {
+		e := b.entries[id]
 		entry.Hide()
 		btn.Show()
-		btn.SetText("\U0001F4C1 " + name)
-		btn.OnTapped = func() { b.descend(name) }
+		if e.IsDir {
+			btn.Importance = widget.MediumImportance
+			btn.SetText("\U0001F4C1 " + e.Name)
+			btn.OnTapped = func() { b.descend(e.Name) }
+		} else if b.selectFiles {
+			name := e.Name
+			if b.selectedFile == name {
+				btn.Importance = widget.HighImportance
+				btn.SetText("✅ " + name)
+			} else {
+				btn.Importance = widget.MediumImportance
+				btn.SetText("\U0001F4C4 " + name)
+			}
+			btn.OnTapped = func() { b.selectFile(name) }
+		} else {
+			btn.Importance = widget.MediumImportance
+			btn.SetText("\U0001F4C4 " + e.Name)
+			btn.OnTapped = nil
+		}
+		btn.Enable()
 		return
 	}
 
@@ -247,6 +310,7 @@ func (b *destFolderBrowser) updateBackBtn() {
 }
 
 func (b *destFolderBrowser) reload() {
+	b.selectedFile = ""
 	b.updateBreadcrumbText()
 	b.updateBackBtn()
 	b.scanGen++
@@ -255,28 +319,39 @@ func (b *destFolderBrowser) reload() {
 	relPath := b.relPath
 
 	if len(locs) == 0 {
-		b.names = nil
+		b.entries = nil
 		b.list.Refresh()
 		b.statusLbl.SetText("")
 		b.loading.Hide()
 		return
 	}
 
-	b.names = nil
+	b.entries = nil
 	b.list.Refresh()
 	b.statusLbl.SetText("")
 	b.loading.Show()
 	go func() {
 		ctx := context.Background()
-		syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string) {
+		onUpdate := func(entries []syncengine.Entry) {
 			fyne.Do(func() {
 				if gen != b.scanGen {
 					return
 				}
-				b.names = names
+				b.entries = entries
 				b.list.Refresh()
 			})
-		})
+		}
+		if b.showFiles {
+			syncengine.UnionChildEntriesStream(ctx, locs, relPath, onUpdate)
+		} else {
+			syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string) {
+				entries := make([]syncengine.Entry, len(names))
+				for i, n := range names {
+					entries[i] = syncengine.Entry{Name: n, IsDir: true}
+				}
+				onUpdate(entries)
+			})
+		}
 		fyne.Do(func() {
 			if gen != b.scanGen {
 				return

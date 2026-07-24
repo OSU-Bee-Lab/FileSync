@@ -550,6 +550,7 @@ func runRemoteOAuth(s *state, bt syncengine.BackendType, dialogTitle, progressTe
 // treating RootPath as a floor.
 func browseLocation(s *state, id int, loc syncengine.Location) {
 	browser := newDestFolderBrowser(s.win, true)
+	browser.showFiles = true
 	rootLoc := loc
 	if loc.Kind == syncengine.LocationRemote {
 		rootLoc.RootPath = ""
@@ -566,10 +567,21 @@ func browseLocation(s *state, id int, loc syncengine.Location) {
 		if loc.Kind == syncengine.LocationLocal {
 			rel = "/" + rel
 		}
-		s.cfg.Locations[id].RootPath = rel
-		s.saveConfig()
-		d.Hide()
-		showLocations(s)
+		newLoc := loc
+		newLoc.RootPath = rel
+		msg := widget.NewLabel(
+			"Change \"" + loc.Name + "\" from:\n\n" + describeLocation(loc) +
+				"\n\nto:\n\n" + describeLocation(newLoc))
+		msg.Wrapping = fyne.TextWrapWord
+		dialog.NewCustomConfirm("Set as Location", "Set as Location", "Cancel", msg, func(ok bool) {
+			if !ok {
+				return
+			}
+			s.cfg.Locations[id].RootPath = rel
+			s.saveConfig()
+			d.Hide()
+			showLocations(s)
+		}, s.win).Show()
 	})
 	setBtn.Importance = widget.HighImportance
 	closeBtn := widget.NewButton("Close", func() { d.Hide() })

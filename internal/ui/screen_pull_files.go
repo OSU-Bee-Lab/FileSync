@@ -14,13 +14,11 @@ import (
 // showPullFiles is the Pull Files flow: a researcher pulling a subset of one
 // experiment's files into an arbitrary working directory (e.g. an R
 // project), not a saved Location. Unlike Sync Experiments, this lets the user
-// drill to any depth under experiments/ - a whole experiment, one
-// deployment date, or one recorder directory. Scope selection is
-// deliberately folder-only, not single-file: rclone's fs.NewFs returns
-// ErrorIsFile (rooted at the parent, not the file) when pointed at a bare
-// file path, which syncengine's copy/scan helpers don't special-case - so a
-// single file isn't a safe scope choice here. destFolderBrowser is a natural
-// fit for that constraint, since it only ever shows folders to browse into.
+// drill to any depth under experiments/ - a whole experiment, one deployment
+// date, one recorder directory, or (browser.selectFiles) a single file.
+// ScanPullFilesWithProgress/StartPullFiles take an explicit srcIsFile bool
+// for the single-file case, since rclone's fs.NewFs returns ErrorIsFile
+// (rooted at the parent, not the file) when pointed at a bare file path.
 func showPullFiles(s *state) {
 	names := locationNames(s.cfg.Locations)
 	srcSelect := widget.NewSelect(names, nil)
@@ -46,14 +44,19 @@ func showPullFiles(s *state) {
 	}
 
 	browser := newDestFolderBrowser(s.win, false)
+	browser.showFiles = true
+	browser.selectFiles = true
 	browser.OnPathChanged = func(relPath string) {
 		if srcLoc == nil {
 			scopeLabel.SetText("No source chosen yet.")
 			return
 		}
-		if relPath == "" {
+		switch {
+		case relPath == "":
 			scopeLabel.SetText("Pulling: entire experiments/ root")
-		} else {
+		case browser.IsFileSelected():
+			scopeLabel.SetText("Pulling: experiments/" + relPath + " (single file)")
+		default:
 			scopeLabel.SetText("Pulling: experiments/" + relPath)
 		}
 	}
@@ -118,6 +121,7 @@ func showPullFiles(s *state) {
 		}
 		src := *srcLoc
 		chosenRelPath := browser.RelPath()
+		chosenIsFile := browser.IsFileSelected()
 		fset := s.cfg.DefaultFilter
 		dest := destFolder
 		fullIdent := fullIdentCheck.Checked
@@ -135,10 +139,10 @@ func showPullFiles(s *state) {
 				Label: label,
 				Locs:  []syncengine.Location{src},
 				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, dest, fullIdent, fset, progress)
+					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, chosenIsFile, dest, fullIdent, fset, progress)
 				},
 				Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-					return syncengine.StartPullFiles(ctx, src, chosenRelPath, dest, fullIdent, result)
+					return syncengine.StartPullFiles(ctx, src, chosenRelPath, chosenIsFile, dest, fullIdent, result)
 				},
 			}}
 			showSyncFlow(s, tasks, func() { showPullFiles(s) })
