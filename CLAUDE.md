@@ -43,6 +43,14 @@ option to scan experiments).
   a native window. Build/vet/test to confirm it compiles and passes existing
   tests, then hand off to the user to check it in the running app.
 - Worktrees go in ./.claude/worktrees
+- Any user-facing count text (labels, buttons, dialogs, tooltips, status
+  text) must be plural-aware. Never hedge with "(s)"/"(y/ies)" (e.g. "3
+  conflict(s)"), and never hardcode one form next to a bare `%d` (e.g. "All
+  %d recorder start times line up" reads wrong at n=1). Use `plural(n,
+  singular, pluralForm)` / `pluralWord(n, singular, pluralForm)` from
+  `internal/ui/util.go` for every new `%d`-driven string, and hand-pick verb
+  agreement from the same count where the sentence has one ("1 recorder
+  looks off" vs "2 recorders look off").
 - Folder/experiment browsers' "step up one directory" action must use
   `widget.NewButtonWithIcon("", theme.NavigateBackIcon(), ...)`, never a text
   button (e.g. "Up"). See `dest_folder_browser.go`'s `backBtn` for the

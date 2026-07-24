@@ -455,10 +455,14 @@ func (tr *timestampReviewScreen) refreshSummary() {
 	}
 	total := len(tr.entries)
 	if flagged == 0 {
-		tr.summaryLbl.SetText(fmt.Sprintf("All %d recorder start times line up — nothing needs correcting. Continue, or set a new start time on any recorder to override.", total))
+		tr.summaryLbl.SetText(fmt.Sprintf("All %s line up — nothing needs correcting. Continue, or set a new start time on any recorder to override.", plural(total, "recorder start time", "recorder start times")))
 		return
 	}
-	tr.summaryLbl.SetText(fmt.Sprintf("%d of %d recorders look off (highlighted) — review each and set a new start time where needed.", flagged, total))
+	verb := "look"
+	if flagged == 1 {
+		verb = "looks"
+	}
+	tr.summaryLbl.SetText(fmt.Sprintf("%d of %d %s %s off (highlighted) — review each and set a new start time where needed.", flagged, total, pluralWord(total, "recorder", ""), verb))
 }
 
 // selectRow switches the detail pane to entries[i] and refreshes every left
