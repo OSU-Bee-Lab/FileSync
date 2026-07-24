@@ -220,7 +220,7 @@ func (ps *progressScreen) runSync() {
 					ps.expStates[i].applySyncSnapshot(snap)
 
 					if snap.Retrying {
-						ps.retryLabel.Text = fmt.Sprintf("⚠ Connection hiccup, retrying (%d/%d)…", snap.RetryAttempt, snap.RetryMax)
+						ps.retryLabel.Text = retryNoticeText(snap.RetryAttempt, snap.RetryMax)
 						ps.retryLabel.Refresh()
 						ps.retryLabel.Show()
 					} else {

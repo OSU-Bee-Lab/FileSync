@@ -396,7 +396,19 @@ func showLocationError(s *state, err error, locs ...syncengine.Location) {
 			return
 		}
 	}
-	dialog.ShowError(err, s.win)
+	// Everything else gets the same translation the sync screen's error
+	// banner uses, with rclone's raw text behind a Details button rather
+	// than dumped into the dialog.
+	f := classifyError(err)
+	msg := widget.NewLabel(f.String())
+	msg.Wrapping = fyne.TextWrapWord
+	d := dialog.NewCustomWithoutButtons("Something went wrong", msg, s.win)
+	detailsBtn := widget.NewButton("Details…", func() { showErrorDetails("Error details", f.Detail, s.win) })
+	detailsBtn.Importance = widget.LowImportance
+	closeBtn := widget.NewButton("Close", d.Hide)
+	d.SetButtons([]fyne.CanvasObject{detailsBtn, closeBtn})
+	d.Resize(fyne.NewSize(460, 0))
+	d.Show()
 }
 
 // showReconnectWindow is the common bad-token entrypoint: it explains the

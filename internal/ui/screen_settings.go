@@ -91,6 +91,43 @@ func showSettings(s *state) {
 		"can help on slow or rate-limited remotes.")
 	transfersHint.Wrapping = fyne.TextWrapWord
 
+	// Retries: a checkbox for the common case ("just keep going") with the
+	// entry only in play once the user opts into a finite budget, rather
+	// than a bare number field where 0 silently means "unlimited".
+	retriesEntry := widget.NewEntry()
+	retriesEntry.SetText(strconv.Itoa(max(s.cfg.CopyRetries, 2)))
+	retriesEntry.OnChanged = func(text string) {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 1 {
+			return
+		}
+		s.cfg.CopyRetries = n
+		syncengine.SetCopyRetries(n)
+		s.saveConfig()
+	}
+	retriesForever := widget.NewCheck("Keep retrying until the sync gets through", nil)
+	retriesForever.OnChanged = func(forever bool) {
+		if forever {
+			retriesEntry.Disable()
+			s.cfg.CopyRetries = syncengine.RetriesUnlimited
+			syncengine.SetCopyRetries(syncengine.RetriesUnlimited)
+			s.saveConfig()
+			return
+		}
+		retriesEntry.Enable()
+		retriesEntry.OnChanged(retriesEntry.Text)
+	}
+	retriesForever.SetChecked(s.cfg.CopyRetries == syncengine.RetriesUnlimited)
+	if retriesForever.Checked {
+		retriesEntry.Disable()
+	}
+	retriesHint := widget.NewLabel("How many times a sync retries after a dropped connection or a network " +
+		"outage before giving up. Retries wait longer each time (up to 5 minutes), and resume immediately once " +
+		"the connection is back, so an overnight upload survives the internet going down for a while. Errors " +
+		"that retrying can't fix — a sign-in that expired, a full drive, a file the remote refuses — still stop " +
+		"straight away, and Cancel always works.")
+	retriesHint.Wrapping = fyne.TextWrapWord
+
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	content := container.NewBorder(
@@ -107,6 +144,8 @@ func showSettings(s *state) {
 			widget.NewLabel("Bandwidth limit (MiB/s)"), bwLimitEntry, bwLimitHint,
 			widget.NewSeparator(),
 			widget.NewLabel("Transfers"), transfersEntry, transfersHint,
+			widget.NewSeparator(),
+			widget.NewLabel("Retries"), retriesForever, retriesEntry, retriesHint,
 		),
 	)
 	s.setContent(container.NewPadded(content))

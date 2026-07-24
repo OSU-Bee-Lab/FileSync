@@ -57,6 +57,12 @@ type Config struct {
 	// Transfers is rclone's --transfers value: how many files are copied
 	// concurrently within a single scan/copy job. Must be >= 1.
 	Transfers int `json:"transfers"`
+	// CopyRetries is how many attempts a copy gets before a transient
+	// error (a dropped connection, a network outage) is reported as a
+	// failure. 0 is syncengine.RetriesUnlimited - keep retrying - which is
+	// the default; a config saved before this field existed loads as 0 and
+	// so lands on that default too.
+	CopyRetries int `json:"copyRetries"`
 	// ManageFilesLocationIDs persists the dev-gated Manage Files screen's
 	// last-selected Locations across restarts, the same way
 	// RecorderSettings.DestinationLocationIDs does for Sync Recorders.
@@ -84,6 +90,7 @@ func Default() Config {
 		RecorderInactivityTimeoutMinutes: 5,
 		Checkers:                         syncengine.DefaultCheckers,
 		Transfers:                        syncengine.DefaultTransfers,
+		CopyRetries:                      syncengine.DefaultCopyRetries,
 	}
 }
 
@@ -125,6 +132,11 @@ func Load() (Config, error) {
 	}
 	if cfg.Transfers <= 0 {
 		cfg.Transfers = syncengine.DefaultTransfers
+	}
+	// A negative CopyRetries is meaningless; 0 is the real "unlimited"
+	// value and is left alone.
+	if cfg.CopyRetries < 0 {
+		cfg.CopyRetries = syncengine.RetriesUnlimited
 	}
 	// Configs saved before TimestampToleranceMinutes existed hold 0 (the key
 	// is absent), which the timestamp check reads as "zero tolerance" and

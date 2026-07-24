@@ -116,6 +116,7 @@ type progressScreen struct {
 	bytesValue *widget.Label
 
 	errorLabel       *widget.Label
+	errorDetailBtn   *widget.Button
 	finishedMsgLabel *widget.Label
 
 	expList *widget.List
@@ -214,9 +215,28 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 
 	metrics := container.NewGridWithColumns(3, expBlurb, filesBlurb, bytesBlurb)
 
+	// The error banner shows a translated explanation (classifyError), not
+	// rclone's raw text - which is written for a terminal and can be several
+	// hundred characters of request URL. The raw text is one tap away under
+	// "Details", with URLs redacted.
 	ps.errorLabel = widget.NewLabel("")
 	ps.errorLabel.Wrapping = fyne.TextWrapWord
 	ps.errorLabel.Hide()
+
+	ps.errorDetailBtn = widget.NewButton("Details…", func() {
+		if ps.selectedExpIdx < 0 || ps.selectedExpIdx >= len(ps.expStates) {
+			return
+		}
+		exp := ps.expStates[ps.selectedExpIdx]
+		if exp.err == nil {
+			return
+		}
+		showErrorDetails("Error in "+exp.label, classifyError(exp.err).Detail, s.win)
+	})
+	ps.errorDetailBtn.Importance = widget.LowImportance
+	ps.errorDetailBtn.Hide()
+
+	errorRow := container.NewBorder(nil, nil, nil, ps.errorDetailBtn, ps.errorLabel)
 
 	ps.finishedMsgLabel = widget.NewLabel("")
 	ps.finishedMsgLabel.Wrapping = fyne.TextWrapWord
@@ -397,7 +417,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 		container.NewHBox(ps.titleLabel, ps.speedLabel, ps.retryLabel),
 		progressContainer,
 		metrics,
-		ps.errorLabel,
+		errorRow,
 		ps.finishedMsgLabel,
 		widget.NewSeparator(),
 	)
@@ -428,14 +448,17 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 func (ps *progressScreen) syncErrorLabelForSelection() {
 	if ps.selectedExpIdx < 0 || ps.selectedExpIdx >= len(ps.expStates) {
 		ps.errorLabel.Hide()
+		ps.errorDetailBtn.Hide()
 		return
 	}
 	exp := ps.expStates[ps.selectedExpIdx]
 	if exp.err != nil {
-		ps.errorLabel.SetText(fmt.Sprintf("Error in %s: %s", exp.label, exp.err.Error()))
+		ps.errorLabel.SetText(fmt.Sprintf("%s: %s", exp.label, classifyError(exp.err)))
 		ps.errorLabel.Show()
+		ps.errorDetailBtn.Show()
 	} else {
 		ps.errorLabel.Hide()
+		ps.errorDetailBtn.Hide()
 	}
 }
 

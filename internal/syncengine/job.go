@@ -2,6 +2,8 @@ package syncengine
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	stdsync "sync"
 	"time"
 
@@ -15,16 +17,106 @@ import (
 	"github.com/rclone/rclone/lib/random"
 )
 
-// copyRetries is the number of times a whole-directory copy is retried
-// after a transient error (e.g. a dropped HTTP/2 connection) before it's
-// reported to the UI as a failure. This mirrors the outer retry loop the
-// rclone CLI runs (its --retries flag), which FileSync doesn't get for
-// free since it calls sync.CopyDir directly instead of going through
-// rclone's cmd.Run.
-const copyRetries = 3
+// RetriesUnlimited is the CopyRetries value meaning "never give up on a
+// transient error" — the default. It exists for the overnight-upload case:
+// if the network drops for an hour at 2am, the right behaviour is to keep
+// picking back up until the copy gets through, not to error out and leave
+// the user to discover a half-finished sync in the morning.
+//
+// Unlimited doesn't mean "never fail": copyDirWithRetry still stops on
+// anything rclone marks fatal or non-retriable, and an error that is
+// retriable but doesn't look like a network problem gets only
+// unlimitedNonTransientAttempts tries. The backoff caps at
+// copyRetryMaxInterval so a waiting copy idles rather than spins, and
+// cancelling the job always breaks out immediately.
+const RetriesUnlimited = 0
 
-// copyRetriesInterval is the pause between retry attempts.
-const copyRetriesInterval = 5 * time.Second
+// DefaultCopyRetries is the retry count a fresh config starts with.
+const DefaultCopyRetries = RetriesUnlimited
+
+// copyRetryInitialInterval is the pause before the first retry;
+// copyRetryMaxInterval caps the exponential backoff applied to each
+// subsequent one. The cap keeps a long outage cheap (a wake-up every few
+// minutes) while still resuming promptly once the network returns — an
+// attempt that manages to transfer anything resets the backoff.
+const (
+	copyRetryInitialInterval = 5 * time.Second
+	copyRetryMaxInterval     = 5 * time.Minute
+)
+
+// copyRetries is the number of times a whole-directory copy is attempted
+// before a transient error (e.g. a dropped HTTP/2 connection) is reported to
+// the UI as a failure, or RetriesUnlimited to keep retrying. This is the
+// outer retry loop the rclone CLI runs (its --retries flag), which FileSync
+// doesn't get for free since it calls sync.CopyDir directly instead of going
+// through rclone's cmd.Run.
+var copyRetries = DefaultCopyRetries
+
+// SetCopyRetries sets how many attempts a copy gets before a transient error
+// becomes a failure. n <= 0 means unlimited (RetriesUnlimited). Like
+// SetTransfers/SetCheckers this is a process-global user preference, applied
+// at startup and whenever Settings changes it; a copy already running reads
+// it per-attempt, so a change takes effect on the next retry.
+func SetCopyRetries(n int) {
+	if n < 0 {
+		n = RetriesUnlimited
+	}
+	copyRetries = n
+}
+
+// extraRetriablePhrases lists error text that means "the network dropped this
+// request mid-flight" but that rclone's own fserrors.ShouldRetry does not
+// recognise. rclone matches a hand-maintained list of phrases
+// (fserrors.retriableErrorStrings) plus errors implementing Timeout()/
+// Temporary(); several routine cloud-transfer failures satisfy neither, most
+// notably Go's HTTP/2 transport tearing down a whole connection:
+//
+//	Put "https://...sharepoint.com/...": http2: client connection force
+//	closed via ClientConn.Close
+//
+// That is a plain errors.New wrapped in a *url.Error, so ShouldRetry returns
+// false and a single dropped connection ends the whole copy — even though
+// re-running it is exactly what fixes it. Everything listed here is safe to
+// retry: CopyDir never deletes, and rclone only publishes a destination file
+// once it has been written in full (upload sessions for cloud backends, a
+// .partial name plus rename for local ones), so a retry just re-sends what
+// didn't land.
+var extraRetriablePhrases = []string{
+	"http2:",                   // e.g. "client connection force closed via ClientConn.Close"
+	"connection reset by peer", // TCP reset mid-transfer
+	"broken pipe",
+	"unexpected EOF",
+	"i/o timeout",
+	"TLS handshake timeout",
+	"Client.Timeout exceeded", // net/http's own request-timeout wording
+	"context deadline exceeded",
+	"server misbehaving", // transient DNS failure (e.g. laptop resuming from sleep)
+}
+
+// shouldRetryCopy reports whether an error looks like a transient network
+// failure - the question copyDirWithRetry asks before letting an unlimited
+// retry budget keep going indefinitely (whether to retry *at all* is decided
+// from the job's accounting stats, as rclone's own CLI does).
+// It defers to rclone's own judgement first and then widens it with
+// extraRetriablePhrases. String matching is unlovely, but it's the same
+// mechanism rclone itself uses for this class of error (its own comment on
+// retriableErrorStrings calls it "incredibly ugly") — the underlying errors
+// are unexported stdlib values with no type to assert on.
+func shouldRetryCopy(err error) bool {
+	if err == nil {
+		return false
+	}
+	if fserrors.ShouldRetry(err) {
+		return true
+	}
+	msg := err.Error()
+	for _, phrase := range extraRetriablePhrases {
+		if strings.Contains(msg, phrase) {
+			return true
+		}
+	}
+	return false
+}
 
 // JobStatus is the lifecycle state of a running copy.
 type JobStatus int
@@ -66,7 +158,9 @@ type ProgressSnapshot struct {
 	// transient error (see copyDirWithRetry). The job is still JobRunning
 	// at this point - it isn't a failure until every retry is exhausted -
 	// so callers should show this as a "will resolve itself" notice
-	// rather than an error state.
+	// rather than an error state. RetryMax is RetriesUnlimited when the
+	// copy has no attempt limit, so a UI showing "attempt N of M" must
+	// handle that case (see retryBudgetLabel).
 	Retrying               bool
 	RetryAttempt, RetryMax int
 	RetryErr               error
@@ -128,43 +222,121 @@ func filesFromFilter(expected ScanResult) *filter.Filter {
 	return f
 }
 
-// copyDirWithRetry runs sync.CopyDir, retrying on transient errors (dropped
-// connections, timeouts, etc. per fserrors.ShouldRetry) up to copyRetries
-// times before giving up. Files already copied in a failed attempt are left
-// in place (CopyDir never deletes), so a retry just picks up whatever the
+// unlimitedNonTransientAttempts bounds the one case an unlimited retry
+// budget would otherwise spin on forever: an error rclone is willing to
+// retry but that doesn't look like a network problem (shouldRetryCopy says
+// no). Those are usually something only the user can fix - a file the remote
+// keeps rejecting, a full disk - so they get a few attempts and then a real
+// error message, rather than a progress bar that never finishes and never
+// explains itself. Dropped connections stay unlimited.
+const unlimitedNonTransientAttempts = 3
+
+// speedDecayWindow is how long the displayed transfer speed takes to ramp
+// linearly down to 0 once bytes stop moving, regardless of how fast the
+// transfer was going — see the comment in startCopyPreserving's emit
+// closure for why this replaced an exponential decay.
+const speedDecayWindow = 3 * time.Second
+
+// copyDirWithRetry runs sync.CopyDir, retrying until it succeeds, hits an
+// error retrying can't fix, exhausts the configured attempt budget, or the
+// job is cancelled. Files already copied in a failed attempt are left in
+// place (CopyDir never deletes), so a retry just picks up whatever the
 // destination is still missing - it isn't redone from scratch, though a
 // retried attempt does re-list source and destination.
 //
+// The retry decision mirrors rclone's own CLI loop (cmd.Run): it asks the
+// job's accounting stats, which is where every per-file error has already
+// been classified as fatal / no-retry / retriable, rather than re-judging
+// the single error CopyDir happens to return. That matters because CopyDir
+// returns a summary ("failed to copy: N errors") whose text says nothing
+// about the underlying failures. shouldRetryCopy is then used only to
+// decide whether an unlimited budget really means unlimited, and a
+// server-supplied Retry-After (rclone's usual answer to being throttled) is
+// honoured over our own backoff.
+//
+// That backoff is exponential, capped at copyRetryMaxInterval, and resets as
+// soon as an attempt transfers anything: a long outage settles into a cheap
+// every-few-minutes poll, but the moment the network is back the copy is
+// running at full tilt again.
+//
 // onRetry, if non-nil, is called just before each retry sleep so a caller
 // can surface a "retrying" indicator in the UI without the error being
-// treated as a hard failure - the copy is still in flight, not stalled.
+// treated as a hard failure - the copy is still in flight, not stalled. max
+// is passed through as RetriesUnlimited when there's no attempt limit.
 func copyDirWithRetry(ctx context.Context, fdst, fsrc fs.Fs, onRetry func(attempt, max int, err error)) error {
+	max := copyRetries
+	stats := accounting.Stats(ctx)
+	wait := copyRetryInitialInterval
 	var err error
-	for attempt := 1; attempt <= copyRetries; attempt++ {
-		err = sync.CopyDir(ctx, fdst, fsrc, false)
-		if err == nil || ctx.Err() != nil {
+	for attempt := 1; max <= RetriesUnlimited || attempt <= max; attempt++ {
+		bytesBefore := stats.GetBytes()
+
+		err = fs.CountError(ctx, sync.CopyDir(ctx, fdst, fsrc, false))
+		// A per-file failure doesn't always come back as CopyDir's return
+		// value, so take the stats' last error when it doesn't - the same
+		// substitution cmd.Run makes.
+		if err == nil {
+			err = stats.GetLastError()
+		}
+		if ctx.Err() != nil {
 			return err
 		}
-		if !fserrors.ShouldRetry(err) {
+		if !stats.Errored() {
+			return err // normally nil; non-nil only for an error rclone chose not to count
+		}
+		switch {
+		case stats.HadFatalError():
+			debugf("copy %s -> %s: fatal error, not retrying: %v", fsrc.Root(), fdst.Root(), err)
+			return err
+		case !stats.HadRetryError():
+			debugf("copy %s -> %s: no retriable errors, not retrying: %v", fsrc.Root(), fdst.Root(), err)
+			return err
+		case max > RetriesUnlimited && attempt == max:
+			return err
+		case max <= RetriesUnlimited && attempt >= unlimitedNonTransientAttempts &&
+			!shouldRetryCopy(err) && !shouldRetryCopy(stats.GetLastError()):
+			debugf("copy %s -> %s: %d attempts, error doesn't look transient, giving up: %v", fsrc.Root(), fdst.Root(), attempt, err)
 			return err
 		}
-		if attempt == copyRetries {
-			break
+
+		if stats.GetBytes() > bytesBefore {
+			wait = copyRetryInitialInterval // made progress: don't punish the next attempt
 		}
-		debugf("copy %s -> %s: transient error (attempt %d/%d), retrying in %s: %v", fsrc.Root(), fdst.Root(), attempt, copyRetries, copyRetriesInterval, err)
+		if retryAfter := stats.RetryAfter(); !retryAfter.IsZero() {
+			if d := time.Until(retryAfter); d > wait {
+				wait = d // the remote told us how long to back off; believe it
+			}
+		}
+		debugf("copy %s -> %s: attempt %d/%s failed with %d errors, retrying in %s: %v", fsrc.Root(), fdst.Root(), attempt, retryBudgetLabel(max), stats.GetErrors(), wait, err)
 		if onRetry != nil {
-			onRetry(attempt, copyRetries, err)
+			onRetry(attempt, max, err)
 		}
 		select {
-		case <-time.After(copyRetriesInterval):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return err
 		}
+		if wait *= 2; wait > copyRetryMaxInterval {
+			wait = copyRetryMaxInterval
+		}
+		// Errors are per-attempt: without this reset the stats stay in the
+		// errored state from a failure the next attempt may well fix, and
+		// every later attempt would look like it failed too.
+		stats.ResetErrors()
 		if onRetry != nil {
-			onRetry(attempt, copyRetries, nil) // resumed: clear the "retrying" indicator
+			onRetry(attempt, max, nil) // resumed: clear the "retrying" indicator
 		}
 	}
 	return err
+}
+
+// retryBudgetLabel renders an attempt budget for debug logging, spelling out
+// the unlimited case rather than printing "0".
+func retryBudgetLabel(max int) string {
+	if max <= RetriesUnlimited {
+		return "unlimited"
+	}
+	return strconv.Itoa(max)
 }
 
 // startCopyPreserving is the one place sync.CopyDir is called in this
@@ -242,18 +414,40 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 		var lastBytes int64
 		var lastTime = time.Now()
 		var currentSpeed float64
+		var decayFrom float64
+		var decayStart time.Time
 
 		emit := func(status JobStatus, err error) {
-			// Calculate speed
+			// Calculate speed. While bytes are actually moving, smooth the
+			// instantaneous rate with a light EMA to ride out per-tick
+			// jitter. Once bytes stop moving (gap between files, stalled
+			// connection), ramp the displayed speed linearly down to 0 over
+			// a fixed window rather than an exponential tail — an
+			// exponential decay's rate depends on the starting speed (a
+			// long tail from 100MB/s, a near-instant drop from 1MB/s),
+			// which read as arbitrary flicker rather than a predictable
+			// wind-down.
 			now := time.Now()
 			dur := now.Sub(lastTime)
 			currentBytes := stats.GetBytes()
 			if dur > 0 {
-				speed := float64(currentBytes-lastBytes) / dur.Seconds()
-				if lastBytes == 0 && currentBytes > 0 {
-					currentSpeed = speed
-				} else {
-					currentSpeed = 0.8*currentSpeed + 0.2*speed
+				delta := currentBytes - lastBytes
+				if delta > 0 {
+					speed := float64(delta) / dur.Seconds()
+					if lastBytes == 0 {
+						currentSpeed = speed
+					} else {
+						currentSpeed = 0.8*currentSpeed + 0.2*speed
+					}
+					decayFrom = currentSpeed
+					decayStart = now
+				} else if currentSpeed > 0 {
+					elapsed := now.Sub(decayStart).Seconds()
+					if elapsed >= speedDecayWindow.Seconds() {
+						currentSpeed = 0
+					} else {
+						currentSpeed = decayFrom * (1 - elapsed/speedDecayWindow.Seconds())
+					}
 				}
 			}
 			lastBytes = currentBytes
