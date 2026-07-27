@@ -2,6 +2,8 @@ package ui
 
 import (
 	"context"
+	"path"
+	"path/filepath"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -28,8 +30,11 @@ func showPullFiles(s *state) {
 	destLabel := widget.NewLabel("No destination chosen")
 	var destFolder string
 
+	previewLabel := widget.NewLabel("")
+	previewLabel.Truncation = fyne.TextTruncateEllipsis
+
 	fullIdentCheck := widget.NewCheck("Use full ident", nil)
-	fullIdentCheck.SetChecked(true)
+	fullIdentCheck.SetChecked(s.pullFilesFullIdent)
 
 	scanBtn := widget.NewButton("Scan", nil)
 	scanBtn.Importance = widget.HighImportance
@@ -46,7 +51,29 @@ func showPullFiles(s *state) {
 	browser := newDestFolderBrowser(s.win, false)
 	browser.showFiles = true
 	browser.selectFiles = true
+
+	// updatePreview mirrors ScanPullFilesWithProgress's dstRelPath logic
+	// (scan.go) so the shown path matches where files will actually land.
+	updatePreview := func() {
+		if srcLoc == nil || destFolder == "" {
+			previewLabel.SetText("")
+			return
+		}
+		dstRelPath := ""
+		if fullIdentCheck.Checked {
+			relPath := browser.RelPath()
+			if browser.IsFileSelected() {
+				relPath = path.Dir(relPath)
+				if relPath == "." {
+					relPath = ""
+				}
+			}
+			dstRelPath = relPath
+		}
+		previewLabel.SetText("Output: " + filepath.Join(destFolder, dstRelPath))
+	}
 	browser.OnPathChanged = func(relPath string) {
+		s.pullFilesRelPath = browser.relPath
 		if srcLoc == nil {
 			scopeLabel.SetText("No source chosen yet.")
 			return
@@ -59,6 +86,12 @@ func showPullFiles(s *state) {
 		default:
 			scopeLabel.SetText("Pulling: experiments/" + relPath)
 		}
+		updatePreview()
+	}
+
+	fullIdentCheck.OnChanged = func(checked bool) {
+		s.pullFilesFullIdent = checked
+		updatePreview()
 	}
 
 	// checkSrcMissing pops the not-found prompt immediately if srcLoc is a
@@ -86,6 +119,7 @@ func showPullFiles(s *state) {
 	}
 
 	srcSelect.OnChanged = func(name string) {
+		s.pullFilesSourceName = name
 		srcLoc = findLocation(s.cfg.Locations, name)
 		// Switching source starts scope back at the experiments/ root
 		// rather than carrying over a path browsed on the previous
@@ -97,6 +131,7 @@ func showPullFiles(s *state) {
 			browser.SetLocations([]syncengine.Location{*srcLoc})
 		}
 		updateScanEnabled()
+		updatePreview()
 		checkSrcMissing(func() {})
 	}
 
@@ -110,10 +145,33 @@ func showPullFiles(s *state) {
 				return
 			}
 			destFolder = path
+			s.pullFilesDestFolder = destFolder
 			destLabel.SetText(destFolder)
 			updateScanEnabled()
+			updatePreview()
 		})
 	})
+
+	// Rehydrate from state so a round trip through Scan (or any other
+	// screen reached from here) and back restores the previously chosen
+	// source, destination, and browsed scope instead of resetting to a
+	// blank screen.
+	if s.pullFilesDestFolder != "" {
+		destFolder = s.pullFilesDestFolder
+		destLabel.SetText(destFolder)
+	}
+	if s.pullFilesSourceName != "" && findLocation(s.cfg.Locations, s.pullFilesSourceName) != nil {
+		savedRelPath := s.pullFilesRelPath
+		// srcSelect.OnChanged resets browser.relPath (and, via
+		// OnPathChanged, s.pullFilesRelPath) to "" as part of a genuine
+		// source switch - restore the saved scope after it runs.
+		srcSelect.SetSelected(s.pullFilesSourceName)
+		if savedRelPath != "" {
+			browser.NavigateTo(savedRelPath)
+		}
+	}
+	updateScanEnabled()
+	updatePreview()
 
 	scanBtn.OnTapped = func() {
 		if srcLoc == nil || destFolder == "" {
@@ -160,6 +218,7 @@ func showPullFiles(s *state) {
 			scopeLabel,
 			container.NewHBox(chooseDestBtn, destLabel),
 			fullIdentCheck,
+			previewLabel,
 			container.NewHBox(scanBtn, backBtn),
 		),
 		nil, nil,

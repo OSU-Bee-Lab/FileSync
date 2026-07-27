@@ -61,6 +61,17 @@ type state struct {
 	syncOneWayToNames    []string
 	syncOneWayToRelPath  string
 
+	// pullFilesSourceName, pullFilesDestFolder, pullFilesRelPath, and
+	// pullFilesFullIdent cache the Pull Files screen's source/destination
+	// choice, browsed scope, and "Use full ident" toggle so they survive a
+	// round trip through Scan and back (same role as syncOneWay* above).
+	// pullFilesFullIdent defaults to true (set in Run) to match the
+	// screen's own initial checked state.
+	pullFilesSourceName string
+	pullFilesDestFolder string
+	pullFilesRelPath    string
+	pullFilesFullIdent  bool
+
 	// availableUpdate holds the result of the GitHub release check kicked
 	// off in Run, once it completes - nil until then, and nil forever if
 	// already up to date or the check failed. showHome reads it each time
@@ -197,7 +208,7 @@ func Run() {
 
 	startApp := func() {
 		cfg, err := appconfig.Load()
-		s := &state{win: w, cfg: cfg}
+		s := &state{win: w, cfg: cfg, pullFilesFullIdent: true}
 		if err != nil {
 			// Not fatal - fall back to defaults and let the user fix it by
 			// re-saving from the Locations screen.
