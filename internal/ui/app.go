@@ -72,6 +72,19 @@ type state struct {
 	pullFilesRelPath    string
 	pullFilesFullIdent  bool
 
+	// manageFilesOp, manageFilesFrom, manageFilesTo, manageFilesDeleteConfirm,
+	// and manageFilesPickerTarget cache the Manage Files setup screen's
+	// operation choice, From/To paths, delete-confirmation text, and which
+	// picker pane is active, so they survive a round trip through Preview
+	// (or the Retime review screen) and back - same role as pullFiles*
+	// above. manageFilesOp/manageFilesPickerTarget default to "" and are
+	// treated as "Rename / Move / Merge"/"From" respectively when empty.
+	manageFilesOp            string
+	manageFilesFrom          string
+	manageFilesTo            string
+	manageFilesDeleteConfirm string
+	manageFilesPickerTarget  string
+
 	// availableUpdate holds the result of the GitHub release check kicked
 	// off in Run, once it completes - nil until then, and nil forever if
 	// already up to date or the check failed. showHome reads it each time

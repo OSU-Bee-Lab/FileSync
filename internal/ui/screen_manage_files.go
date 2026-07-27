@@ -135,8 +135,13 @@ func showManageFiles(s *state) {
 	// OnPathChanged; Delete only ever targets "From". ---
 	deleteConfirmEntry := widget.NewEntry()
 	deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
+	deleteConfirmEntry.SetText(s.manageFilesDeleteConfirm)
+	deleteConfirmEntry.OnChanged = func(t string) { s.manageFilesDeleteConfirm = t }
 
 	pickerTarget := "From" // "From" or "To" - which target the picker currently populates
+	if s.manageFilesPickerTarget == "To" {
+		pickerTarget = "To"
+	}
 	// pickerHeaderLabel is the browser's own banner (not a separate row
 	// beneath it), naming the field the visible browser populates.
 	pickerHeaderBg := canvas.NewRectangle(color.NRGBA{R: 240, G: 242, B: 245, A: 255})
@@ -268,6 +273,7 @@ func showManageFiles(s *state) {
 	var setPickerTarget func(target string)
 	setPickerTarget = func(target string) {
 		pickerTarget = target
+		s.manageFilesPickerTarget = target
 		pickerHeaderLabel.SetText(target)
 		if target == "To" {
 			browserFrom.CanvasObject().Hide()
@@ -285,6 +291,14 @@ func showManageFiles(s *state) {
 	toFocusEntry.SetPlaceHolder("experiments/<new name or destination folder>")
 	fromEntry = &fromFocusEntry.Entry
 	toEntry = &toFocusEntry.Entry
+	fromEntry.OnChanged = func(t string) { s.manageFilesFrom = t }
+	toEntry.OnChanged = func(t string) { s.manageFilesTo = t }
+	if s.manageFilesFrom != "" {
+		fromEntry.SetText(s.manageFilesFrom)
+	}
+	if s.manageFilesTo != "" {
+		toEntry.SetText(s.manageFilesTo)
+	}
 
 	// Each browser mirrors its chosen path (a browsed folder, or a tapped
 	// file) into its own From/To field; "From" also re-validates on change.
@@ -338,6 +352,7 @@ func showManageFiles(s *state) {
 	deleteForm.Hide()
 
 	opGroup.OnChanged = func(v string) {
+		s.manageFilesOp = v
 		toForm.Hide()
 		deleteForm.Hide()
 		switch v {
@@ -347,7 +362,11 @@ func showManageFiles(s *state) {
 			deleteForm.Show()
 		}
 	}
-	opGroup.SetSelected("Rename / Move / Merge")
+	initialOp := s.manageFilesOp
+	if initialOp == "" {
+		initialOp = "Rename / Move / Merge"
+	}
+	opGroup.SetSelected(initialOp)
 
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
@@ -418,11 +437,12 @@ func showManageFiles(s *state) {
 		columns,
 	)
 	s.setContent(container.NewPadded(content))
-	// Show the "From" browser first, then point both browsers at the current
-	// selection and list it (restoring a persisted Location's picker/warning
-	// state - locGroup.OnChanged only fires on a user click, not the initial
+	// Show the previously-active browser (From, or a restored To) first,
+	// then point both browsers at the current selection and list it
+	// (restoring a persisted Location's picker/warning state -
+	// locGroup.OnChanged only fires on a user click, not the initial
 	// selection newToggleGroup was constructed with).
-	setPickerTarget("From")
+	setPickerTarget(pickerTarget)
 	if len(locGroup.Selected()) > 0 {
 		updateMirrorWarning()
 	}
