@@ -158,6 +158,12 @@ func (ps *progressScreen) isSyncing() bool {
 	return ps.phase == phaseSyncing || ps.phase == phaseSyncComplete || ps.phase == phaseSyncCancelled
 }
 
+// quitState reports an active transfer for as long as a real copy is
+// running - see state.quitCheck.
+func (ps *progressScreen) quitState() quitState {
+	return quitState{active: ps.phase == phaseSyncing}
+}
+
 // showSyncFlow shows the plain pairwise scan-then-sync flow (no N-way
 // extras).
 func showSyncFlow(s *state, tasks []scanTask, onBack func()) {
@@ -186,6 +192,7 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 
 	content := ps.buildLayout()
 	ps.s.setContentResizable(container.NewPadded(content))
+	ps.s.quitCheck = ps.quitState
 
 	if len(tasks) == 0 {
 		// Nothing to scan at all (e.g. N-way found every location already

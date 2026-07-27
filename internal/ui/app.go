@@ -92,6 +92,30 @@ type state struct {
 	// the user lands on the home screen after the check finishes, without
 	// needing to interrupt whatever screen they're currently on.
 	availableUpdate atomic.Pointer[appversion.Update]
+
+	// quitCheck, while non-nil, is asked whether quitting the app right now
+	// would interrupt or abandon anything, so the window-close handler can
+	// warn before actually closing. Only the screens that can leave
+	// something in that state (progressScreen, recorderSyncScreen) set it,
+	// once they've built their content - setContent/setContentResizable
+	// clear it back to nil on every screen change first, so navigating away
+	// (e.g. via Back) always reverts to "nothing to warn about" unless the
+	// new screen re-sets it itself.
+	quitCheck func() quitState
+}
+
+// quitState is what a currently-shown screen reports about the consequence
+// of quitting the app right now.
+type quitState struct {
+	// active means a transfer is actively running - quitting now would
+	// interrupt it mid-copy, the same danger showDangerConfirm already
+	// guards on the Cancel/End Sync buttons.
+	active bool
+	// pending means nothing is actively transferring, but data was already
+	// offloaded from a recorder onto the local drive and hasn't gone
+	// through its batch sync yet. Safe on disk, but quitting now leaves it
+	// unsynced to the other Locations until the user comes back for it.
+	pending bool
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to
@@ -158,6 +182,7 @@ func currentOrDefaultSize(w fyne.Window, fallback fyne.Size) fyne.Size {
 // windowSize for why. Content is wrapped in a boundedWidthLayout so no
 // screen can stretch the window past windowSize.
 func (s *state) setContent(content fyne.CanvasObject) {
+	s.quitCheck = nil
 	size := currentOrDefaultSize(s.win, windowSize)
 	bounded := container.New(&boundedWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(bounded)
@@ -201,6 +226,7 @@ func (l *growingWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 // columns) - anything with fillable widgets not designed for a wide layout
 // should keep using setContent.
 func (s *state) setContentResizable(content fyne.CanvasObject) {
+	s.quitCheck = nil
 	size := currentOrDefaultSize(s.win, windowSize)
 	bounded := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(bounded)
@@ -222,6 +248,7 @@ func Run() {
 	startApp := func() {
 		cfg, err := appconfig.Load()
 		s := &state{win: w, cfg: cfg, pullFilesFullIdent: true}
+		w.SetCloseIntercept(func() { confirmQuit(s) })
 		if err != nil {
 			// Not fatal - fall back to defaults and let the user fix it by
 			// re-saving from the Locations screen.
@@ -284,6 +311,40 @@ func Run() {
 
 	startApp()
 	w.ShowAndRun()
+}
+
+// confirmQuit is the main window's close handler (set via
+// SetCloseIntercept). It asks the currently-shown screen, if any, whether
+// quitting right now would interrupt or abandon anything (see quitCheck) and
+// warns accordingly before actually closing - an active transfer gets the
+// same "this will interrupt it" danger warning as the Cancel/End Sync
+// buttons, while offloaded-but-unsynced recorder data gets a softer warning
+// since nothing is lost, just left unsynced.
+func confirmQuit(s *state) {
+	var qs quitState
+	if s.quitCheck != nil {
+		qs = s.quitCheck()
+	}
+	switch {
+	case qs.active:
+		showDangerConfirm("Sync still in progress",
+			"A transfer is still running. Quitting now will interrupt it before it finishes.",
+			"Quit", "Keep Syncing", func(ok bool) {
+				if ok {
+					s.win.Close()
+				}
+			}, s.win)
+	case qs.pending:
+		showDangerConfirm("Recorder files not yet synced",
+			"Files offloaded from a recorder are safely on this computer's drive, but haven't been synced to your other Locations yet. Quitting now will leave them unsynced until you come back and finish the batch sync.",
+			"Quit", "Go Back", func(ok bool) {
+				if ok {
+					s.win.Close()
+				}
+			}, s.win)
+	default:
+		s.win.Close()
+	}
 }
 
 func showHome(s *state) {

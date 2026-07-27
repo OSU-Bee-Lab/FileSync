@@ -170,6 +170,19 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		main,
 	)
 	s.setContent(container.NewPadded(content))
+	s.quitCheck = sc.quitState
+}
+
+// quitState reports an active transfer while any recorder is still copying
+// locally or an upload is still draining (hasActiveTransfer), and otherwise
+// flags pending whenever this session has already offloaded files onto the
+// local drive in batch-upload mode but hasn't run the batch sync yet - see
+// state.quitCheck.
+func (sc *recorderSyncScreen) quitState() quitState {
+	if sc.hasActiveTransfer() {
+		return quitState{active: true}
+	}
+	return quitState{pending: sc.params.batchUpload && len(sc.batchUploadPaths) > 0}
 }
 
 func (sc *recorderSyncScreen) runBlinkTicker() {
