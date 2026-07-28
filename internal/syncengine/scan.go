@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/rclone/rclone/fs"
@@ -181,38 +182,44 @@ func listSource(ctx context.Context, srcRoot, relPath, reachAnchor, scope string
 	return listing, nil
 }
 
-// ScanPullFilesWithProgress scans an arbitrary sub-path (any depth: a
-// whole experiment, one deployment date, one recorder directory, or (when
-// srcIsFile is set) a single file) from src into destFolder. When fullIdent
-// is true, srcRelPath's structure is preserved under destFolder (e.g. scope
-// "foo/bar" lands at destFolder/foo/bar/...); when false, files land
-// directly under destFolder using only the path beneath srcRelPath
-// (destFolder/...), i.e. flattened. destFolder is a raw local path (from an
-// OS folder picker), never a saved Location.
+// ScanPullFilesWithProgress scans an arbitrary sub-path (any depth: a whole
+// experiment, one deployment date, one recorder directory, or - when
+// srcFiles is non-empty - one or more individually selected files, possibly
+// spread across different subfolders) from src into destFolder. When
+// fullIdent is true, the chosen scope's structure is preserved under
+// destFolder (e.g. scope "foo/bar" lands at destFolder/foo/bar/...); when
+// false, files land directly under destFolder using only the path beneath
+// the scope (destFolder/...), i.e. flattened. destFolder is a raw local path
+// (from an OS folder picker), never a saved Location.
 //
-// srcIsFile is required rather than inferred: rclone's fs.NewFs treats
+// srcFiles holds explicit file paths (relative to src) rather than a single
+// srcIsFile bool so a multi-file selection (destFolderBrowser's multiSelect
+// mode) works the same way as a single one: rclone's fs.NewFs treats
 // whatever path it's given as a directory root and returns ErrorIsFile if
-// it's actually a file, so a bare file relPath can't be walked directly. To
-// scan a single file, this walks its parent directory instead (scopeRelPath
-// below) and narrows the listing down to that one entry - the caller
-// (destFolderBrowser) already knows from its own directory listing whether
-// the tapped row was a file or a folder, so it's cheaper to pass that
-// through than to re-derive it here.
-func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, srcIsFile bool, destFolder string, fullIdent bool, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
+// it's actually a file, so a bare file path can't be walked directly. Instead
+// this walks CommonDir(srcFiles) - the deepest folder containing every
+// selected file, srcRelPath itself when srcFiles is empty - and narrows the
+// listing down to just those entries, dropping every sibling.
+func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath string, srcFiles []string, destFolder string, fullIdent bool, fset FilterSettings, progress ScanProgressFunc) (ScanResult, error) {
 	label := srcRelPath
+	scopeRelPath := srcRelPath
+	if len(srcFiles) > 0 {
+		scopeRelPath = CommonDir(srcFiles)
+		if len(srcFiles) == 1 {
+			label = srcFiles[0]
+		} else {
+			label = scopeRelPath
+		}
+	}
 	if label == "" {
 		label = "experiments/"
-	}
-	scopeRelPath := srcRelPath
-	if srcIsFile {
-		scopeRelPath = parentDir(srcRelPath)
 	}
 	listing, err := listSource(ctx, src.rcloneSpec(), scopeRelPath, src.reachAnchor, "", fset, progress)
 	if err != nil {
 		return ScanResult{}, err
 	}
-	if srcIsFile {
-		listing = filterToFile(listing, path.Base(srcRelPath))
+	if len(srcFiles) > 0 {
+		listing = filterToFiles(listing, scopeRelPath, srcFiles)
 	}
 	dstRelPath := ""
 	if fullIdent {
@@ -221,16 +228,61 @@ func ScanPullFilesWithProgress(ctx context.Context, src Location, srcRelPath str
 	return scanAgainstDest(ctx, listing, destFolder, dstRelPath, label, progress)
 }
 
-// filterToFile narrows a SourceListing (walked from a file's parent
-// directory) down to the single immediate-child object matching name,
-// dropping every sibling file and all subdirectories.
-func filterToFile(listing SourceListing, name string) SourceListing {
-	for _, o := range listing.objects {
-		if o.rel == name {
-			return SourceListing{objects: []listedObject{o}}
+// CommonDir returns the deepest directory that is an ancestor of every file
+// in files (each a "/"-separated path relative to the same root), or "" if
+// files is empty or they share no common parent beyond the root. A single
+// file's CommonDir is simply its own parent directory.
+func CommonDir(files []string) string {
+	if len(files) == 0 {
+		return ""
+	}
+	common := dirSegments(files[0])
+	for _, f := range files[1:] {
+		common = commonPrefixSegments(common, dirSegments(f))
+		if len(common) == 0 {
+			return ""
 		}
 	}
-	return SourceListing{}
+	return strings.Join(common, "/")
+}
+
+func dirSegments(file string) []string {
+	dir := parentDir(file)
+	if dir == "" {
+		return nil
+	}
+	return strings.Split(dir, "/")
+}
+
+func commonPrefixSegments(a, b []string) []string {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
+	}
+	return a[:i]
+}
+
+// filterToFiles narrows a SourceListing (walked from scopeRelPath, the
+// common ancestor of every entry in files) down to exactly those entries,
+// dropping every sibling file and all subdirectories.
+func filterToFiles(listing SourceListing, scopeRelPath string, files []string) SourceListing {
+	want := make(map[string]bool, len(files))
+	for _, f := range files {
+		rel := strings.TrimPrefix(f, scopeRelPath)
+		rel = strings.TrimPrefix(rel, "/")
+		want[rel] = true
+	}
+	var objs []listedObject
+	for _, o := range listing.objects {
+		if want[o.rel] {
+			objs = append(objs, o)
+		}
+	}
+	return SourceListing{objects: objs}
 }
 
 // scanTracker accumulates the per-entry and per-directory bookkeeping every

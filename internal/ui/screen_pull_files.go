@@ -2,8 +2,11 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -17,10 +20,12 @@ import (
 // experiment's files into an arbitrary working directory (e.g. an R
 // project), not a saved Location. Unlike Sync Experiments, this lets the user
 // drill to any depth under experiments/ - a whole experiment, one deployment
-// date, one recorder directory, or (browser.selectFiles) a single file.
-// ScanPullFilesWithProgress/StartPullFiles take an explicit srcIsFile bool
-// for the single-file case, since rclone's fs.NewFs returns ErrorIsFile
-// (rooted at the parent, not the file) when pointed at a bare file path.
+// date, one recorder directory, or (browser.selectFiles, browser.multiSelect)
+// one or more individually tapped files, even across different folders.
+// ScanPullFilesWithProgress/StartPullFiles take an explicit []string of
+// selected files rather than inferring them from the browsed folder, since
+// rclone's fs.NewFs returns ErrorIsFile (rooted at the parent, not the file)
+// when pointed at a bare file path.
 func showPullFiles(s *state) {
 	names := locationNames(s.cfg.Locations)
 	srcSelect := widget.NewSelect(names, nil)
@@ -32,6 +37,9 @@ func showPullFiles(s *state) {
 
 	previewLabel := widget.NewLabel("")
 	previewLabel.Truncation = fyne.TextTruncateEllipsis
+	spanHintLabel := widget.NewLabel("")
+	spanHintLabel.Truncation = fyne.TextTruncateEllipsis
+	spanHintLabel.TextStyle = fyne.TextStyle{Italic: true}
 
 	fullIdentCheck := widget.NewCheck("Use full ident", nil)
 	fullIdentCheck.SetChecked(s.pullFilesFullIdent)
@@ -51,26 +59,37 @@ func showPullFiles(s *state) {
 	browser := newDestFolderBrowser(s.win, false)
 	browser.showFiles = true
 	browser.selectFiles = true
+	browser.multiSelect = true
 
 	// updatePreview mirrors ScanPullFilesWithProgress's dstRelPath logic
 	// (scan.go) so the shown path matches where files will actually land.
+	// With more than one file selected (possibly from different folders,
+	// since a multiSelect selection survives navigation), the preview
+	// collapses to their common ancestor directory rather than listing
+	// every file - spanHintLabel below fills in what that's hiding.
 	updatePreview := func() {
 		if srcLoc == nil || destFolder == "" {
 			previewLabel.SetText("")
+			spanHintLabel.SetText("")
 			return
 		}
+		files := browser.SelectedFiles()
 		dstRelPath := ""
 		if fullIdentCheck.Checked {
-			relPath := browser.RelPath()
-			if browser.IsFileSelected() {
-				relPath = path.Dir(relPath)
-				if relPath == "." {
-					relPath = ""
+			switch {
+			case len(files) == 1:
+				dstRelPath = path.Dir(files[0])
+				if dstRelPath == "." {
+					dstRelPath = ""
 				}
+			case len(files) > 1:
+				dstRelPath = syncengine.CommonDir(files)
+			default:
+				dstRelPath = browser.RelPath()
 			}
-			dstRelPath = relPath
 		}
 		previewLabel.SetText("Output: " + filepath.Join(destFolder, dstRelPath))
+		spanHintLabel.SetText(spanHint(files))
 	}
 	browser.OnPathChanged = func(relPath string) {
 		s.pullFilesRelPath = browser.relPath
@@ -78,11 +97,14 @@ func showPullFiles(s *state) {
 			scopeLabel.SetText("No source chosen yet.")
 			return
 		}
+		files := browser.SelectedFiles()
 		switch {
+		case len(files) == 1:
+			scopeLabel.SetText("Pulling: experiments/" + files[0] + " (single file)")
+		case len(files) > 1:
+			scopeLabel.SetText("Pulling: " + plural(len(files), "file", "files") + " selected under experiments/")
 		case relPath == "":
 			scopeLabel.SetText("Pulling: entire experiments/ root")
-		case browser.IsFileSelected():
-			scopeLabel.SetText("Pulling: experiments/" + relPath + " (single file)")
 		default:
 			scopeLabel.SetText("Pulling: experiments/" + relPath)
 		}
@@ -179,14 +201,21 @@ func showPullFiles(s *state) {
 		}
 		src := *srcLoc
 		chosenRelPath := browser.RelPath()
-		chosenIsFile := browser.IsFileSelected()
+		chosenFiles := browser.SelectedFiles()
 		fset := s.cfg.DefaultFilter
 		dest := destFolder
 		fullIdent := fullIdentCheck.Checked
 
-		label := "experiments/" + chosenRelPath
-		if chosenRelPath == "" {
+		var label string
+		switch {
+		case len(chosenFiles) == 1:
+			label = "experiments/" + chosenFiles[0]
+		case len(chosenFiles) > 1:
+			label = "experiments/" + syncengine.CommonDir(chosenFiles) + " (" + plural(len(chosenFiles), "file", "files") + ")"
+		case chosenRelPath == "":
 			label = "experiments/ (entire root)"
+		default:
+			label = "experiments/" + chosenRelPath
 		}
 
 		// checkSrcMissing is also run on every srcSelect change, so this is a
@@ -197,10 +226,10 @@ func showPullFiles(s *state) {
 				Label: label,
 				Locs:  []syncengine.Location{src},
 				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, chosenIsFile, dest, fullIdent, fset, progress)
+					return syncengine.ScanPullFilesWithProgress(ctx, src, chosenRelPath, chosenFiles, dest, fullIdent, fset, progress)
 				},
 				Start: func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-					return syncengine.StartPullFiles(ctx, src, chosenRelPath, chosenIsFile, dest, fullIdent, result)
+					return syncengine.StartPullFiles(ctx, src, chosenRelPath, chosenFiles, dest, fullIdent, result)
 				},
 			}}
 			showSyncFlow(s, tasks, func() { showPullFiles(s) })
@@ -219,10 +248,50 @@ func showPullFiles(s *state) {
 			container.NewHBox(chooseDestBtn, destLabel),
 			fullIdentCheck,
 			previewLabel,
+			spanHintLabel,
 			container.NewHBox(scanBtn, backBtn),
 		),
 		nil, nil,
 		browser.CanvasObject(),
 	)
 	s.setContent(container.NewPadded(content))
+}
+
+// spanHint names the subfolders (immediate children of files' common
+// ancestor, per syncengine.CommonDir) a multi-file selection is drawn from,
+// so the researcher can tell what previewLabel's single collapsed path is
+// hiding - e.g. "a.mp3, b.mp3, c.mp3" under foo/bar/nun/ plus "d.mp3" under
+// foo/bar/lorem/ preview as just foo/bar/, and this fills in "Spans 2
+// folders: lorem/, nun/". Empty when there's nothing to disambiguate: fewer
+// than two files, or every file sits directly in the common root.
+func spanHint(files []string) string {
+	if len(files) < 2 {
+		return ""
+	}
+	root := syncengine.CommonDir(files)
+	subdirs := make(map[string]bool)
+	for _, f := range files {
+		rel := strings.TrimPrefix(f, root)
+		rel = strings.TrimPrefix(rel, "/")
+		dir := path.Dir(rel)
+		if dir == "." {
+			dir = ""
+		} else {
+			dir = strings.SplitN(dir, "/", 2)[0]
+		}
+		subdirs[dir] = true
+	}
+	if len(subdirs) <= 1 {
+		return ""
+	}
+	names := make([]string, 0, len(subdirs))
+	for d := range subdirs {
+		if d == "" {
+			names = append(names, "(root)")
+		} else {
+			names = append(names, d+"/")
+		}
+	}
+	sort.Strings(names)
+	return fmt.Sprintf("Spans %s: %s", plural(len(names), "folder", "folders"), strings.Join(names, ", "))
 }

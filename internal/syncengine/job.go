@@ -188,19 +188,20 @@ func StartSyncExperiments(ctx context.Context, src, dst Location, experimentName
 	return startCopyPreserving(ctx, src.rcloneSpec(), dst.rcloneSpec(), experimentName, experimentName, expected)
 }
 
-// StartPullFiles copies an arbitrary sub-path from src into destFolder. When
-// fullIdent is true, srcRelPath's structure is preserved under destFolder
-// (e.g. pulling "Luke - Zucchini/2026-06-23" into "/Downloads/foo" lands at
-// "/Downloads/foo/Luke - Zucchini/2026-06-23/..."); when false, the copy is
-// flattened to just the path beneath srcRelPath (lands directly under
-// "/Downloads/foo/..."). destFolder is a raw local path, never a saved
-// Location. srcIsFile must match what was passed to the preceding
-// ScanPullFilesWithProgress call - see its doc comment for why a bare file
-// relPath needs the scope resolved to its parent directory instead.
-func StartPullFiles(ctx context.Context, src Location, srcRelPath string, srcIsFile bool, destFolder string, fullIdent bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
+// StartPullFiles copies an arbitrary sub-path (or, when srcFiles is
+// non-empty, one or more individually selected files) from src into
+// destFolder. When fullIdent is true, the chosen scope's structure is
+// preserved under destFolder (e.g. pulling "Luke - Zucchini/2026-06-23" into
+// "/Downloads/foo" lands at "/Downloads/foo/Luke - Zucchini/2026-06-23/...");
+// when false, the copy is flattened to just the path beneath the scope
+// (lands directly under "/Downloads/foo/..."). destFolder is a raw local
+// path, never a saved Location. srcFiles must match what was passed to the
+// preceding ScanPullFilesWithProgress call - see its doc comment for why a
+// file selection needs the scope resolved to CommonDir(srcFiles) instead.
+func StartPullFiles(ctx context.Context, src Location, srcRelPath string, srcFiles []string, destFolder string, fullIdent bool, expected ScanResult) (*Job, <-chan ProgressSnapshot) {
 	scopeRelPath := srcRelPath
-	if srcIsFile {
-		scopeRelPath = parentDir(srcRelPath)
+	if len(srcFiles) > 0 {
+		scopeRelPath = CommonDir(srcFiles)
 	}
 	dstRelPath := ""
 	if fullIdent {

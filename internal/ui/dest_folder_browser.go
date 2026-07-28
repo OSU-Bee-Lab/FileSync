@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -56,10 +57,11 @@ type destFolderBrowser struct {
 
 	// selectFiles controls whether a shown file is tappable to select it
 	// as the browse target, alongside the usual folder scope - e.g. Pull
-	// Files letting a researcher grab exactly one recording instead of a
-	// whole folder. Only meaningful when showFiles is also set. Off for
-	// Manage Locations' Browse dialog, where files are shown for context
-	// only - "Set as Location" only ever adopts a directory.
+	// Files letting a researcher grab one or more (see multiSelect)
+	// recordings instead of a whole folder. Only meaningful when showFiles
+	// is also set. Off for Manage Locations' Browse dialog, where files
+	// are shown for context only - "Set as Location" only ever adopts a
+	// directory.
 	selectFiles bool
 
 	// showFileSize appends a "(size)" suffix to each file row - on for
@@ -69,8 +71,23 @@ type destFolderBrowser struct {
 
 	// selectedFile is the tapped file's name within the current relPath,
 	// or "" if none is selected. Cleared by any navigation (reload) since
-	// a selection only makes sense within the folder it was made in.
+	// a selection only makes sense within the folder it was made in. Used
+	// when multiSelect is off.
 	selectedFile string
+
+	// multiSelect switches selectFile from replacing selectedFile to
+	// toggling membership in selectedFiles, letting a caller (Pull Files)
+	// gather files from more than one folder into one destination
+	// preview. Off for every other selectFiles call site (Manage Files'
+	// move/delete needs exactly one target).
+	multiSelect bool
+
+	// selectedFiles holds full relative paths (relPath+name, unlike
+	// selectedFile's bare name) of every file picked while multiSelect is
+	// on. Unlike selectedFile, it survives navigation - a selection made
+	// in one folder must still be there after browsing into another - and
+	// is only cleared explicitly (ClearSelectedFiles) or by SetLocations.
+	selectedFiles map[string]bool
 
 	// lister, when non-nil, replaces the default multi-Location union
 	// listing (reload's Union* calls) with a fully custom one. Manage Files
@@ -184,6 +201,29 @@ func (b *destFolderBrowser) IsFileSelected() bool {
 	return b.selectedFile != ""
 }
 
+// SelectedFiles returns the full relative paths of every file selected
+// while multiSelect is on, sorted for a stable display order, or nil if
+// none are selected.
+func (b *destFolderBrowser) SelectedFiles() []string {
+	if len(b.selectedFiles) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(b.selectedFiles))
+	for f := range b.selectedFiles {
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ClearSelectedFiles empties the multiSelect selection - used when a caller
+// resets the browse scope out from under it (e.g. Pull Files switching
+// source Location).
+func (b *destFolderBrowser) ClearSelectedFiles() {
+	b.selectedFiles = nil
+	b.list.Refresh()
+}
+
 // NavigateTo re-anchors the browser at relPath and re-lists it, as if the
 // user had browsed there - used when an external field (Manage Files' typed
 // From/To entry, or a target switch) is the source of truth for where to
@@ -195,12 +235,29 @@ func (b *destFolderBrowser) NavigateTo(relPath string) {
 	b.notifyPathChanged()
 }
 
-// selectFile is a file row's tap handler when selectFiles is on: it toggles
-// name as the selection within the current folder (tapping the same file
-// again deselects it, falling back to the folder scope). Files have no
-// children, so unlike descend this never re-browses or reloads.
+// selectFile is a file row's tap handler when selectFiles is on. In
+// multiSelect mode it toggles name's full path in selectedFiles, adding to
+// whatever's already picked (possibly in other folders) rather than
+// replacing it. Otherwise it toggles name as the sole selection within the
+// current folder (tapping the same file again deselects it, falling back to
+// the folder scope). Files have no children, so unlike descend this never
+// re-browses or reloads.
 func (b *destFolderBrowser) selectFile(name string) {
 	b.closeAddFolder()
+	if b.multiSelect {
+		full := joinRel(b.relPath, name)
+		if b.selectedFiles == nil {
+			b.selectedFiles = make(map[string]bool)
+		}
+		if b.selectedFiles[full] {
+			delete(b.selectedFiles, full)
+		} else {
+			b.selectedFiles[full] = true
+		}
+		b.list.Refresh()
+		b.notifyPathChanged()
+		return
+	}
 	if b.selectedFile == name {
 		b.selectedFile = ""
 	} else {
@@ -217,6 +274,7 @@ func (b *destFolderBrowser) selectFile(name string) {
 // below re-scans and shows it.
 func (b *destFolderBrowser) SetLocations(locs []syncengine.Location) {
 	b.locs = locs
+	b.selectedFiles = nil
 	b.closeAddFolder()
 	b.reload()
 	b.notifyPathChanged()
@@ -306,7 +364,11 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 		} else if b.selectFiles {
 			name := e.Name
 			label := b.fileLabel(e)
-			if b.selectedFile == name {
+			selected := b.selectedFile == name
+			if b.multiSelect {
+				selected = b.selectedFiles[joinRel(b.relPath, name)]
+			}
+			if selected {
 				btn.Importance = widget.HighImportance
 				btn.SetText("✅ " + label)
 			} else {
