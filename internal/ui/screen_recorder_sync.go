@@ -88,6 +88,15 @@ type recorderSyncScreen struct {
 	// can each call it, and either can be retried (e.g. backing out of the
 	// End Sync confirm dialog and pressing it again).
 	timestampsHandled bool
+
+	// finishedRows records every row that reached jobDone this session, in
+	// finish order, independent of sc.rows - which onVolumeDetach prunes a
+	// jobDone row from the instant its recorder is unplugged (the normal
+	// workflow: unplug a finished recorder to free the slot for the next
+	// one). checkTimestampsThen must survive that pruning, so it reads from
+	// here rather than sc.rows - otherwise every recorder unplugged before
+	// End Sync would silently vanish from the timestamp check.
+	finishedRows []*recorderRow
 }
 
 // showRecorderSync builds and shows Screen 2 for params, then launches its
@@ -466,7 +475,9 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 	// below) without needing the recorder itself, which may already be
 	// disconnected or wiped by the time every file has landed.
 	if sc.params.detectBadTimestamps {
-		row.sourceFiles, _ = row.driver.SourceFiles(row.volume)
+		if sourceFiles, err := row.driver.SourceFiles(row.volume); err == nil {
+			row.sourceFiles = sourceFiles
+		}
 		row.destDirs = recorder.DestDirs(sc.destRoots, sc.params.subpath, sc.params.experimentName, row.id)
 	}
 	job, progress := recorder.StartOffload(sc.watchCtx, row.driver, row.volume, row.id, sc.destRoots, sc.params.subpath,
@@ -487,6 +498,7 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 					if p.FilesTotal == 0 {
 						row.statusMsg = "Done (no files)"
 					}
+					sc.finishedRows = append(sc.finishedRows, row)
 					if sc.params.batchUpload {
 						sc.recordBatchUploadPaths(row.id, p.Files)
 					}
@@ -559,8 +571,8 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 		start  time.Time
 	}
 	var eligible []parsedRow
-	for _, r := range sc.rows {
-		if r.status != jobDone || len(r.sourceFiles) == 0 {
+	for _, r := range sc.finishedRows {
+		if len(r.sourceFiles) == 0 {
 			continue
 		}
 		parser, ok := r.driver.(recorder.TimestampParser)
