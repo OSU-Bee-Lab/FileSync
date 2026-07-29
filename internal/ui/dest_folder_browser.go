@@ -120,6 +120,13 @@ type destFolderBrowser struct {
 	relPath string
 	scanGen int
 
+	// audioRegistered/audioRefreshGen record whether this browser is
+	// subscribed to playback state changes (see registerAudioRefresh), and for
+	// which screen - a browser left behind on a replaced screen has to
+	// re-register before it counts as live again.
+	audioRegistered bool
+	audioRefreshGen int
+
 	backBtn    *widget.Button
 	breadcrumb *widget.Label
 	statusLbl  *widget.Label
@@ -164,19 +171,6 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 	)
 
 	b.backBtn = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() { b.ascend() })
-
-	// Repaint the rows whenever playback state changes, so the row being
-	// previewed swaps its play button for a pause button (and back again when
-	// the file ends). Only the newest browser is on screen - setContent has
-	// replaced any earlier one - so overwriting the callback is right.
-	audioPlayer().SetOnChange(func() {
-		fyne.Do(func() {
-			if err := audioPlayer().State().Err; err != nil {
-				b.statusLbl.SetText("Couldn't play that file. " + classifyError(err).String())
-			}
-			b.list.Refresh()
-		})
-	})
 
 	b.root = container.NewBorder(
 		container.NewHBox(b.backBtn, b.breadcrumb),
@@ -379,7 +373,7 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 		if e.IsDir {
 			audioControls.hide()
 		} else {
-			audioControls.update(b.locs, joinRel(b.relPath, e.Name), e.Name)
+			audioControls.update(b, b.locs, joinRel(b.relPath, e.Name), e.Name)
 		}
 		if e.IsDir {
 			btn.Importance = widget.MediumImportance

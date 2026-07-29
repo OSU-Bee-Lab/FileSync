@@ -139,13 +139,13 @@ func TestSeamToFinalPos(t *testing.T) {
 	cases := []struct {
 		from, seam, want int
 	}{
-		{from: 0, seam: 0, want: 0},  // drop back in place, before itself
-		{from: 0, seam: 1, want: 0},  // drop just after itself: no-op position
-		{from: 0, seam: 2, want: 1},  // drop two seams down
-		{from: 2, seam: 0, want: 0},  // drag up to the very top
-		{from: 2, seam: 2, want: 2},  // drop back in place
-		{from: 2, seam: 3, want: 2},  // drop just after itself: no-op position
-		{from: 2, seam: 4, want: 3},  // drag down past the end
+		{from: 0, seam: 0, want: 0}, // drop back in place, before itself
+		{from: 0, seam: 1, want: 0}, // drop just after itself: no-op position
+		{from: 0, seam: 2, want: 1}, // drop two seams down
+		{from: 2, seam: 0, want: 0}, // drag up to the very top
+		{from: 2, seam: 2, want: 2}, // drop back in place
+		{from: 2, seam: 3, want: 2}, // drop just after itself: no-op position
+		{from: 2, seam: 4, want: 3}, // drag down past the end
 	}
 	for _, c := range cases {
 		if got := seamToFinalPos(c.from, c.seam); got != c.want {

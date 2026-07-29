@@ -39,6 +39,57 @@ func stopAudio() {
 	}
 }
 
+// audioRefreshers are the browsers whose rows currently show transport
+// controls, and audioRefreshGen is bumped whenever the screen is replaced so
+// browsers left behind on the old screen re-register (or don't) rather than
+// accumulating for the life of the session.
+//
+// This is a list rather than the single callback it started as: a screen can
+// hold more than one browser - Manage Files has both a From and a To - and
+// with one callback only the last one built ever got repainted, so the browser
+// actually being played from sat frozen on its play button. That was the whole
+// of the "nothing updates" bug.
+//
+// Only ever touched on the UI goroutine: browsers register as their rows
+// render, and the fan-out runs inside fyne.Do.
+var (
+	audioRefreshers []*destFolderBrowser
+	audioRefreshGen int
+)
+
+// clearAudioRefreshers drops the current screen's browsers. Called from
+// setContent, which is also where playback stops - browsers register when
+// their rows render, which is after the new content is installed, so this
+// can't drop the incoming screen's browser.
+func clearAudioRefreshers() {
+	audioRefreshers = nil
+	audioRefreshGen++
+}
+
+// registerAudioRefresh subscribes b's rows to playback state changes. Called
+// from row rendering rather than from the browser's constructor, so that a
+// browser only counts as live once it has actually put rows on screen.
+func registerAudioRefresh(b *destFolderBrowser) {
+	if b.audioRefreshGen == audioRefreshGen && b.audioRegistered {
+		return
+	}
+	b.audioRegistered = true
+	b.audioRefreshGen = audioRefreshGen
+	audioRefreshers = append(audioRefreshers, b)
+	audioPlayer().SetOnChange(func() { fyne.Do(refreshAudioRows) })
+}
+
+// refreshAudioRows repaints the rows of every browser on the current screen.
+func refreshAudioRows() {
+	st := audioPlayer().State()
+	for _, b := range audioRefreshers {
+		if st.Err != nil {
+			b.statusLbl.SetText("Couldn't play that file. " + classifyError(st.Err).String())
+		}
+		b.list.Refresh()
+	}
+}
+
 // audioOpener streams relPath for playback from the best available location:
 // locs is ranked by normalizedLocationOrder, the same locals-before-remotes,
 // Priority-ordered rule the sync engine picks a source with, so a file that
@@ -152,20 +203,22 @@ func (c *audioRowControls) hide() {
 }
 
 // update points the controls at the file at relPath (streamed from locs) and
-// renders them against the current playback state.
-func (c *audioRowControls) update(locs []syncengine.Location, relPath, filename string) {
+// renders them against the current playback state. owner is subscribed to
+// playback changes the first time it renders a playable row.
+func (c *audioRowControls) update(owner *destFolderBrowser, locs []syncengine.Location, relPath, filename string) {
 	if !audio.CanPlay(filename) || len(locs) == 0 {
 		c.hide()
 		return
 	}
+	registerAudioRefresh(owner)
 
 	p := audioPlayer()
 	st := p.State()
 	// A row is the active one from the moment its play button is tapped until
 	// playback stops or the file ends - which is exactly when back-to-start
 	// applies, since anything loaded is either past its first sample or on its
-	// way there.
-	active := st.Key == relPath
+	// way there. A failed preview isn't active: there's nothing to restart.
+	active := st.Key == relPath && st.Err == nil
 
 	switch {
 	case active && st.Loading:
