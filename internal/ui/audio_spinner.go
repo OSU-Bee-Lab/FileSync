@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image/color"
+	"math"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -10,22 +11,35 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
-// audioSpinnerCycle is one full pulse of the loading indicator. Fyne's
-// widget.Activity, which this otherwise mirrors, hardcodes 2 seconds; with its
-// three phase-offset circles that puts a pulse on screen roughly every half
-// second, which at the size of a list row reads as frantic shaking rather than
-// "opening the file". Four seconds gives the same shape a slow breath.
-const audioSpinnerCycle = 4 * time.Second
+const (
+	// audioSpinnerCycle is one full revolution. A second or so is what every
+	// platform's spinner does, and at spinnerDots steps that works out to a
+	// step every ~125ms - brisk enough to read as motion, slow enough not to
+	// blur into a flicker.
+	audioSpinnerCycle = 1100 * time.Millisecond
 
-// audioSpinner is a calmer widget.Activity: the same three concentric circles
-// growing and fading in sequence, but on audioSpinnerCycle and with a linear
-// curve. The curve matters as much as the duration - Fyne's version leaves it
-// at the default ease-in-out, which lands the pulse in a lurch instead of an
-// even swell.
+	// spinnerDots is how many dots make up the ring.
+	spinnerDots = 8
+
+	// spinnerTrailDim is the alpha of the dimmest dot (the one furthest behind
+	// the head) as a fraction of full strength. Keeping it above zero leaves
+	// the whole ring faintly present, so what moves is the bright head rather
+	// than dots appearing out of nowhere.
+	spinnerTrailDim = 0.15
+
+	// spinnerDotScale sizes each dot relative to the ring's radius.
+	spinnerDotScale = 0.28
+)
+
+// audioSpinner is the ordinary ring-of-dots spinner: a bright head travelling
+// around a faint ring, one revolution per audioSpinnerCycle.
 //
-// This is a copy of that widget rather than a wrapper because neither its
-// duration nor its curve is reachable from outside: both live in the animation
-// its renderer builds privately.
+// It steps rather than sweeping - the head jumps from dot to dot, as the
+// platform spinners it imitates do - so it repaints spinnerDots times per
+// revolution instead of once per frame.
+//
+// Fyne's own widget.Activity is not this: it pulses three concentric circles,
+// and neither its timing nor its curve can be reached from outside the widget.
 type audioSpinner struct {
 	widget.BaseWidget
 
@@ -62,11 +76,11 @@ func (s *audioSpinner) Stop() {
 }
 
 func (s *audioSpinner) CreateRenderer() fyne.WidgetRenderer {
-	dots := make([]fyne.CanvasObject, 3)
+	dots := make([]fyne.CanvasObject, spinnerDots)
 	for i := range dots {
 		dots[i] = canvas.NewCircle(color.Transparent)
 	}
-	r := &audioSpinnerRenderer{dots: dots, parent: s}
+	r := &audioSpinnerRenderer{dots: dots, parent: s, head: -1}
 	r.anim = &fyne.Animation{
 		Duration:    audioSpinnerCycle,
 		RepeatCount: fyne.AnimationRepeatForever,
@@ -85,21 +99,37 @@ type audioSpinnerRenderer struct {
 	dots   []fyne.CanvasObject
 	parent *audioSpinner
 
-	bound   fyne.Size
-	maxCol  color.NRGBA
-	maxRad  float32
+	baseCol color.NRGBA
 	started bool
+
+	// head is which dot is currently brightest, or -1 when nothing has been
+	// drawn yet. Held so a tick that hasn't moved the head can return without
+	// touching the canvas.
+	head int
 }
 
 func (r *audioSpinnerRenderer) MinSize() fyne.Size {
 	return fyne.NewSquareSize(r.parent.Theme().Size(theme.SizeNameInlineIcon))
 }
 
+// Layout places the dots evenly around the ring. They never move afterwards -
+// only their colour changes - so this is the only place geometry is computed.
 func (r *audioSpinnerRenderer) Layout(size fyne.Size) {
-	// The circles are drawn from the centre outwards, so the radius is bound
-	// by the shorter side - a row stretches this taller than it is wide.
-	r.maxRad = fyne.Min(size.Width, size.Height) / 2
-	r.bound = size
+	// The ring is bound by the shorter side: a list row stretches this widget
+	// taller than it is wide.
+	radius := fyne.Min(size.Width, size.Height) / 2
+	dotRad := radius * spinnerDotScale
+	ring := radius - dotRad
+	midX, midY := size.Width/2, size.Height/2
+
+	for i, dot := range r.dots {
+		// Start at twelve o'clock and go clockwise, like every other spinner.
+		angle := 2*math.Pi*float64(i)/spinnerDots - math.Pi/2
+		x := midX + ring*float32(math.Cos(angle))
+		y := midY + ring*float32(math.Sin(angle))
+		dot.Resize(fyne.NewSquareSize(dotRad * 2))
+		dot.Move(fyne.NewPos(x-dotRad, y-dotRad))
+	}
 }
 
 func (r *audioSpinnerRenderer) Objects() []fyne.CanvasObject { return r.dots }
@@ -127,7 +157,8 @@ func (r *audioSpinnerRenderer) start() {
 func (r *audioSpinnerRenderer) stop() {
 	r.started = false
 	r.anim.Stop()
-	// Leave nothing drawn behind: a stopped spinner is a hidden one.
+	// Leave nothing drawn behind: a stopped spinner is an invisible one.
+	r.head = -1
 	for _, dot := range r.dots {
 		circle := dot.(*canvas.Circle)
 		circle.FillColor = color.Transparent
@@ -135,41 +166,36 @@ func (r *audioSpinnerRenderer) stop() {
 	}
 }
 
-// tick drives the three circles from one animation, each a third of a cycle
-// apart, so one is always swelling as another fades out.
+// tick advances the bright head around the ring, repainting only when it has
+// actually moved on to the next dot.
 func (r *audioSpinnerRenderer) tick(done float32) {
+	head := int(done * spinnerDots)
+	if head >= spinnerDots {
+		head = spinnerDots - 1
+	}
+	if head == r.head {
+		return
+	}
+	r.head = head
+
 	for i, dot := range r.dots {
-		phase := done + float32(i)/3
-		if phase >= 1 {
-			phase -= 1
+		// How far this dot sits behind the head, 0 (the head itself) to 1.
+		behind := float32((head-i+spinnerDots)%spinnerDots) / spinnerDots
+		strength := 1 - behind*(1-spinnerTrailDim)
+
+		circle := dot.(*canvas.Circle)
+		circle.FillColor = color.NRGBA{
+			R: r.baseCol.R,
+			G: r.baseCol.G,
+			B: r.baseCol.B,
+			A: uint8(float32(r.baseCol.A) * strength),
 		}
-		r.drawDot(dot.(*canvas.Circle), triangle(phase))
+		circle.Refresh()
 	}
-}
-
-// triangle turns a 0..1 position in the cycle into a 0..1..0 swell, so each
-// circle grows and shrinks once per cycle rather than jumping back at the end.
-func triangle(phase float32) float32 {
-	if phase > 0.5 {
-		return 2 - phase*2
-	}
-	return phase * 2
-}
-
-// drawDot sizes and fades one circle: off 0 is fully grown and invisible, off 1
-// is small and at full strength.
-func (r *audioSpinnerRenderer) drawDot(dot *canvas.Circle, off float32) {
-	rad := r.maxRad - r.maxRad*off/1.2
-	mid := fyne.NewPos(r.bound.Width/2, r.bound.Height/2)
-
-	dot.Move(mid.Subtract(fyne.NewSquareOffsetPos(rad)))
-	dot.Resize(fyne.NewSquareSize(rad * 2))
-	dot.FillColor = color.NRGBA{R: r.maxCol.R, G: r.maxCol.G, B: r.maxCol.B, A: uint8(float32(r.maxCol.A) * off)}
-	dot.Refresh()
 }
 
 func (r *audioSpinnerRenderer) updateColor() {
 	variant := fyne.CurrentApp().Settings().ThemeVariant()
 	rr, gg, bb, aa := r.parent.Theme().Color(theme.ColorNameForeground, variant).RGBA()
-	r.maxCol = color.NRGBA{R: uint8(rr >> 8), G: uint8(gg >> 8), B: uint8(bb >> 8), A: uint8(aa >> 8)}
+	r.baseCol = color.NRGBA{R: uint8(rr >> 8), G: uint8(gg >> 8), B: uint8(bb >> 8), A: uint8(aa >> 8)}
 }
