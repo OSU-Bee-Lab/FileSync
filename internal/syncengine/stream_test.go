@@ -136,3 +136,27 @@ func TestStreamFileErrorsWhenNoLocationHasIt(t *testing.T) {
 		t.Fatal("expected an error when no location holds the file")
 	}
 }
+
+// TestStreamReadAfterCloseDoesNotPanic: a FileStream has one consumer by
+// design, but a Close racing a read crashed the app once (the read
+// dereferenced the reader Close had just cleared). Read must fail rather than
+// panic even when the contract is broken.
+func TestStreamReadAfterCloseDoesNotPanic(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "rec.mp3"), strings.Repeat("a", 4096))
+
+	stream, _, err := StreamFile(context.Background(), []Location{localLoc(root)}, "rec.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 100)
+	if _, err := stream.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Read(buf); err == nil {
+		t.Fatal("reading a closed stream succeeded, want an error")
+	}
+}

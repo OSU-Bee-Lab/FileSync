@@ -98,15 +98,24 @@ func (s *FileStream) Read(p []byte) (int, error) {
 		return 0, io.EOF
 	}
 	for attempt := 0; ; attempt++ {
-		if s.rc == nil {
+		// The open reader is held in a local: a Close arriving from another
+		// goroutine mid-read (which shouldn't happen - one consumer per
+		// stream - but crashed the app once when it did) then costs a failed
+		// read rather than dereferencing a nil s.rc.
+		rc := s.rc
+		if rc == nil {
 			if err := s.open(); err != nil {
 				if attempt >= streamReopenAttempts || s.ctx.Err() != nil {
 					return 0, err
 				}
 				continue
 			}
+			rc = s.rc
+			if rc == nil {
+				return 0, io.ErrClosedPipe
+			}
 		}
-		n, err := s.rc.Read(p)
+		n, err := rc.Read(p)
 		s.offset += int64(n)
 		switch {
 		case err == nil || errors.Is(err, io.EOF):
@@ -115,7 +124,7 @@ func (s *FileStream) Read(p []byte) (int, error) {
 			// the new offset on the next Read rather than reporting the file
 			// as finished early.
 			if errors.Is(err, io.EOF) && s.offset < s.obj.Size() {
-				s.rc.Close()
+				rc.Close()
 				s.rc = nil
 				if n > 0 {
 					return n, nil
@@ -127,7 +136,7 @@ func (s *FileStream) Read(p []byte) (int, error) {
 			}
 			return n, err
 		default:
-			s.rc.Close()
+			rc.Close()
 			s.rc = nil
 			if n > 0 {
 				// Hand back what was read; the reopen happens on the next call.

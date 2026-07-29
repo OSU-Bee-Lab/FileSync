@@ -9,11 +9,18 @@ import (
 )
 
 // countingSource reports how much has been pulled out of it, standing in for
-// a network stream whose read volume is what we care about bounding.
+// a network stream whose read volume is what we care about bounding, and
+// records whether it was closed - the read-ahead owns closing its stream.
 type countingSource struct {
-	data []byte
-	off  int
-	read atomic.Int64
+	data   []byte
+	off    int
+	read   atomic.Int64
+	closes atomic.Int64
+}
+
+func (s *countingSource) Close() error {
+	s.closes.Add(1)
+	return nil
 }
 
 func (s *countingSource) Read(p []byte) (int, error) {
@@ -94,7 +101,7 @@ func TestReadAheadDeliversEverythingInOrder(t *testing.T) {
 	for i := range want {
 		want[i] = byte(i % 253)
 	}
-	ra := newReadAhead(bytes.NewReader(want))
+	ra := newReadAhead(io.NopCloser(bytes.NewReader(want)))
 	defer ra.Close()
 
 	got, err := io.ReadAll(ra)
@@ -103,5 +110,58 @@ func TestReadAheadDeliversEverythingInOrder(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("read %d bytes, want %d, and contents differ", len(got), len(want))
+	}
+}
+
+// blockingSource parks in Read until released, standing in for a stream waiting
+// on a remote, and records closes so double- or non-closes show up.
+type blockingSource struct {
+	release chan struct{}
+	closed  chan struct{}
+	closes  atomic.Int64
+}
+
+func (s *blockingSource) Read(p []byte) (int, error) {
+	<-s.release
+	return 0, io.EOF
+}
+
+func (s *blockingSource) Close() error {
+	if s.closes.Add(1) == 1 {
+		close(s.closed)
+	}
+	return nil
+}
+
+// TestReadAheadClosesItsStreamOnce is the shape of a crash this had: teardown
+// closed the stream while the filler was parked in a read against it, and
+// FileStream - single-consumer by design - nil'd the reader mid-read. The
+// read-ahead owns the close so there is only ever one closer, and it happens
+// after the filler is finished with it.
+func TestReadAheadClosesItsStreamOnce(t *testing.T) {
+	src := &blockingSource{release: make(chan struct{}), closed: make(chan struct{})}
+	ra := newReadAhead(src)
+
+	// Filler is now parked inside Read. Tearing down must not touch the stream
+	// itself; it's the filler that closes it, once its read returns.
+	ra.Close()
+	if n := src.closes.Load(); n != 0 {
+		t.Fatalf("stream closed %d times while a read was still in flight, want 0", n)
+	}
+
+	// Cancelling the stream's context is what unblocks a real read; releasing
+	// it stands in for that.
+	close(src.release)
+	select {
+	case <-src.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the filler never closed the stream it owns")
+	}
+
+	// A second Close must not close the stream again.
+	ra.Close()
+	time.Sleep(50 * time.Millisecond)
+	if n := src.closes.Load(); n != 1 {
+		t.Errorf("stream closed %d times, want exactly 1", n)
 	}
 }

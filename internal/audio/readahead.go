@@ -21,6 +21,15 @@ const (
 //
 // It is bounded on purpose — once the queue is full the filler blocks, which
 // is what keeps a paused preview from continuing to transfer.
+//
+// It also owns the stream it reads: the filler goroutine closes it on the way
+// out, and nothing else may. Close only signals the filler and returns
+// immediately (it cannot wait — the filler may be parked in a read against a
+// remote), so a caller that closed the stream itself would be pulling it out
+// from under a live read. That crashed the app: syncengine.FileStream is a
+// single-consumer stream, and closing it mid-read nil'd the reader the filler
+// was using. Cancel the stream's context to get the filler out of a blocked
+// read promptly, then Close here.
 type readAhead struct {
 	chunks chan []byte
 	done   chan struct{}
@@ -32,20 +41,21 @@ type readAhead struct {
 	closeOnce sync.Once
 }
 
-func newReadAhead(r io.Reader) *readAhead {
+func newReadAhead(rc io.ReadCloser) *readAhead {
 	ra := &readAhead{
 		chunks: make(chan []byte, readAheadChunks),
 		done:   make(chan struct{}),
 	}
-	go ra.fill(r)
+	go ra.fill(rc)
 	return ra
 }
 
-func (ra *readAhead) fill(r io.Reader) {
+func (ra *readAhead) fill(rc io.ReadCloser) {
+	defer rc.Close()
 	defer close(ra.chunks)
 	for {
 		buf := make([]byte, readAheadChunk)
-		n, err := r.Read(buf)
+		n, err := rc.Read(buf)
 		if n > 0 {
 			select {
 			case ra.chunks <- buf[:n]:
@@ -93,8 +103,9 @@ func (ra *readAhead) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// Close stops the filler goroutine. The underlying stream is the caller's to
-// close.
+// Close signals the filler goroutine to stop; the filler closes the underlying
+// stream as it exits. Returns without waiting for that, so pair it with
+// cancelling the stream's context when the filler may be mid-read.
 func (ra *readAhead) Close() error {
 	ra.closeOnce.Do(func() { close(ra.done) })
 	return nil

@@ -105,13 +105,17 @@ type Player struct {
 	lastUI uiState
 
 	cancel    context.CancelFunc
-	src       io.Closer
 	ra        *readAhead
 	dec       Decoder
 	oto       *oto.Player
 	counter   *countingReader
 	paused    bool
 	stopWatch chan struct{}
+
+	// volume scales playback, 0..1. Only reason it exists is that tests drive
+	// real playback through the real audio device, and they shouldn't come out
+	// of the machine's speakers.
+	volume float64
 }
 
 // uiState is the subset of State the controls actually render, used to
@@ -127,7 +131,24 @@ type uiState struct {
 	err     string
 }
 
-func NewPlayer() *Player { return &Player{} }
+func NewPlayer() *Player { return &Player{volume: 1} }
+
+// SetVolume scales playback between 0 (silent) and 1 (full), taking effect
+// immediately and applying to whatever plays next.
+func (p *Player) SetVolume(v float64) {
+	switch {
+	case v < 0:
+		v = 0
+	case v > 1:
+		v = 1
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.volume = v
+	if p.oto != nil {
+		p.oto.SetVolume(v)
+	}
+}
 
 // SetOnChange registers a callback fired whenever the rendered playback
 // state changes. It runs on an internal goroutine.
@@ -246,12 +267,14 @@ func (p *Player) load(gen int, filename string, open Opener, startPaused bool) {
 		p.failLoad(gen, err)
 		return
 	}
+	// From here on the read-ahead owns rc and is the only thing that may close
+	// it (see readAhead), so the error paths below cancel and signal rather
+	// than closing the stream themselves.
 	ra := newReadAhead(rc)
 	dec, err := drv.Open(ra)
 	if err != nil {
-		ra.Close()
-		rc.Close()
 		cancel()
+		ra.Close()
 		p.failLoad(gen, fmt.Errorf("reading %s: %w", filename, err))
 		return
 	}
@@ -264,17 +287,16 @@ func (p *Player) load(gen int, filename string, open Opener, startPaused bool) {
 		p.mu.Unlock()
 		otoPlayer.Reset()
 		dec.Close()
-		ra.Close()
-		rc.Close()
 		cancel()
+		ra.Close()
 		return
 	}
 	p.cancel = cancel
-	p.src = rc
 	p.ra = ra
 	p.dec = dec
 	p.oto = otoPlayer
 	p.counter = counter
+	otoPlayer.SetVolume(p.volume)
 	p.st.Loading = false
 	p.st.Position = 0
 	if startPaused {
@@ -407,17 +429,17 @@ func (p *Player) teardownLocked() {
 		p.dec.Close()
 		p.dec = nil
 	}
-	if p.ra != nil {
-		p.ra.Close()
-		p.ra = nil
-	}
-	if p.src != nil {
-		p.src.Close()
-		p.src = nil
-	}
+	// Cancel before signalling the read-ahead: cancelling aborts a read already
+	// in flight against a remote, so the filler goroutine gets out promptly and
+	// closes the stream itself. Closing the stream from here instead would be
+	// closing it under that live read.
 	if p.cancel != nil {
 		p.cancel()
 		p.cancel = nil
+	}
+	if p.ra != nil {
+		p.ra.Close()
+		p.ra = nil
 	}
 	p.counter = nil
 	p.paused = false

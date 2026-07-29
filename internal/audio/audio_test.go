@@ -2,8 +2,25 @@ package audio
 
 import (
 	"io"
+	"maps"
+	"slices"
 	"testing"
 )
+
+// isolateRegistry restores the driver registry after the test. The registry is
+// package-global and panics on a duplicate extension, so a test that registers
+// into it has to put it back or it can only ever run once per process.
+func isolateRegistry(t *testing.T) {
+	t.Helper()
+	mu.Lock()
+	oldByExt, oldDrivers := maps.Clone(byExt), slices.Clone(drivers)
+	mu.Unlock()
+	t.Cleanup(func() {
+		mu.Lock()
+		byExt, drivers = oldByExt, oldDrivers
+		mu.Unlock()
+	})
+}
 
 type stubDriver struct {
 	name string
@@ -15,6 +32,7 @@ func (d stubDriver) Extensions() []string            { return d.exts }
 func (d stubDriver) Open(io.Reader) (Decoder, error) { return nil, nil }
 
 func TestRegistryMatchesExtensionsCaseInsensitively(t *testing.T) {
+	isolateRegistry(t)
 	Register(stubDriver{name: "stub", exts: []string{".stub"}})
 
 	for _, name := range []string{"rec.stub", "REC.STUB", "a/b/260623_0900.Stub"} {
@@ -34,6 +52,7 @@ func TestRegistryMatchesExtensionsCaseInsensitively(t *testing.T) {
 }
 
 func TestRegisterPanicsOnDuplicateExtension(t *testing.T) {
+	isolateRegistry(t)
 	Register(stubDriver{name: "first", exts: []string{".dupe"}})
 	defer func() {
 		if recover() == nil {

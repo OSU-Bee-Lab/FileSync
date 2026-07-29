@@ -50,6 +50,9 @@ func newProbeBrowser(t *testing.T, dir, filename string) (*destFolderBrowser, fy
 		w.Close()
 	})
 
+	// These tests drive the real audio device; keep them out of the speakers.
+	audioPlayer().SetVolume(0)
+
 	b := newDestFolderBrowser(w, false)
 	b.showFiles = true
 	b.selectFiles = true
@@ -372,5 +375,54 @@ func TestRestartPreservesPausedState(t *testing.T) {
 	waitFor(t, func() bool { return audioPlayer().State().Playing })
 	if st := audioPlayer().State(); st.AtStart {
 		t.Error("atStart not cleared when a parked preview was played")
+	}
+}
+
+// TestRapidStartStopDoesNotCrash reproduces the shape of a crash this had in
+// the app: stopping a preview while its read-ahead was mid-read against the
+// stream. Teardown closed that stream from the UI goroutine while the filler
+// goroutine was inside a read on it, and the read dereferenced a reader that
+// had just been cleared. Playing and stopping repeatedly - which is what
+// browsing while a preview runs does - is how that window gets hit.
+func TestRapidStartStopDoesNotCrash(t *testing.T) {
+	dir := t.TempDir()
+	writeToneWAV(t, filepath.Join(dir, "a.wav"), 30)
+	writeToneWAV(t, filepath.Join(dir, "b.wav"), 30)
+	b, _ := newProbeBrowser(t, dir, "a.wav")
+
+	play := func(name string) {
+		audioPlayer().Toggle(name, name, audioOpener(b.locs, name))
+	}
+
+	play("a.wav")
+	waitFor(t, func() bool { return !audioPlayer().State().Loading })
+	if err := audioPlayer().State().Err; err != nil {
+		if strings.Contains(err.Error(), "audio device") {
+			t.Skipf("no audio device available: %v", err)
+		}
+		t.Fatalf("playback failed: %v", err)
+	}
+
+	// Stop, restart, and switch files at intervals around the read-ahead's own
+	// timing, so teardown lands at varying points inside a read.
+	for i := 0; i < 25; i++ {
+		time.Sleep(time.Duration(i%7) * time.Millisecond)
+		switch i % 5 {
+		case 0:
+			audioPlayer().Stop()
+		case 1:
+			play("a.wav")
+		case 2:
+			audioPlayer().Restart()
+		case 3:
+			play("b.wav")
+		case 4:
+			stopAudio()
+		}
+	}
+
+	audioPlayer().Stop()
+	if st := audioPlayer().State(); st.Key != "" || st.Playing {
+		t.Errorf("player did not come to rest: %+v", st)
 	}
 }
