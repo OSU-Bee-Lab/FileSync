@@ -16,7 +16,10 @@ import (
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
-	_ "github.com/rclone/rclone/backend/local" // the probe files live on disk
+	// Registers the rclone backends, the local one included - the probe files
+	// live on disk. Via the project's own registration package, so this stays
+	// free of direct rclone imports.
+	_ "github.com/OSU-Bee-Lab/filesync/internal/rcbackends"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/audio"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"

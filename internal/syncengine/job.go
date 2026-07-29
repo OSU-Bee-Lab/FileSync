@@ -417,6 +417,17 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 	groupName := "filesync-job-" + random.String(8)
 	ctx = accounting.WithStatsGroup(ctx, groupName)
 
+	// Create the stats group here, before anything else can ask for it.
+	// rclone's accounting.Stats looks the group up and creates it if missing
+	// without holding the registry lock, so two goroutines asking for a
+	// brand-new group both create one and the later registration wins. When
+	// that happened here — the copy goroutine below and this function's own
+	// progress polling both reaching for the group at once — the copy reported
+	// into one StatsInfo while progress polled the other, and every snapshot
+	// read zero bytes transferred all the way to completion. Asking for it
+	// once up front means every later lookup finds this one.
+	stats := accounting.Stats(ctx)
+
 	job := &Job{cancel: cancel}
 
 	go func() {
@@ -450,7 +461,6 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
-		stats := accounting.Stats(ctx)
 
 		var speed speedAverager
 
