@@ -246,7 +246,7 @@ func (p *Player) load(gen int, filename string, open Opener) {
 	if gen != p.gen {
 		// Superseded while loading: this pipeline was never heard, so drop it.
 		p.mu.Unlock()
-		otoPlayer.Close()
+		otoPlayer.Reset()
 		dec.Close()
 		ra.Close()
 		rc.Close()
@@ -359,13 +359,23 @@ func (p *Player) streamErrLocked() error {
 
 // teardownLocked closes the pipeline from the device end inwards and cancels
 // any read in flight. Leaves key/opener alone: Restart needs them.
+//
+// It also invalidates any load still in flight (see gen): without that, a
+// stop issued while a file was still opening would be overtaken by its own
+// load finishing, and playback would start after the stop.
 func (p *Player) teardownLocked() {
+	p.gen++
 	if p.stopWatch != nil {
 		close(p.stopWatch)
 		p.stopWatch = nil
 	}
 	if p.oto != nil {
-		p.oto.Close()
+		// Reset, not Close: oto's Player.Close has been a no-op since v3.4
+		// (it defers to a finalizer), so closing would leave whatever the
+		// device had already buffered to play on after the stream was shut
+		// down. Reset pauses and discards that buffer, which is what makes
+		// stopping actually silent.
+		p.oto.Reset()
 		p.oto = nil
 	}
 	if p.dec != nil {

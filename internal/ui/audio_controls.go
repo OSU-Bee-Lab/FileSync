@@ -58,41 +58,101 @@ func audioOpener(locs []syncengine.Location, relPath string) audio.Opener {
 	}
 }
 
-// audioRowControls is the per-row transport: play/pause, plus a back-to-start
-// button that only appears once the file being previewed has moved off its
-// first sample. Both are hidden for rows that aren't a playable audio file.
+// audioRowControls is the per-row transport: a play button that becomes a
+// pause button while that row is playing and a spinner while it's still
+// opening, plus a back-to-start button for whichever row is loaded. All of it
+// is hidden for rows that aren't a playable audio file.
 type audioRowControls struct {
 	restart *widget.Button
 	play    *widget.Button
+	spinner *widget.Activity
 	box     *fyne.Container
+
+	// row is the whole row this transport sits in. Showing or hiding a
+	// control changes the space the transport needs, and Fyne won't re-run
+	// the row's layout on its own, so the row is refreshed whenever
+	// visibility changes - otherwise a newly shown button is laid out at zero
+	// width and simply never appears.
+	row *fyne.Container
 }
 
-func newAudioRowControls() *audioRowControls {
+// audioRow builds a list row: content, with transport controls pinned to the
+// trailing edge. The objects are passed to container.New explicitly (rather
+// than via container.NewBorder) so their order in Objects is fixed and a
+// pooled row can be picked apart again with audioControlsFrom.
+func audioRow(content fyne.CanvasObject) *fyne.Container {
 	c := &audioRowControls{
 		restart: widget.NewButtonWithIcon("", theme.MediaSkipPreviousIcon(), nil),
 		play:    widget.NewButtonWithIcon("", theme.MediaPlayIcon(), nil),
+		spinner: widget.NewActivity(),
 	}
 	c.restart.Importance = widget.LowImportance
 	c.play.Importance = widget.LowImportance
 	c.restart.Hide()
 	c.play.Hide()
-	c.box = container.NewHBox(c.restart, c.play)
-	return c
+	c.spinner.Hide()
+	c.box = container.NewHBox(c.restart, c.spinner, c.play)
+
+	c.row = container.New(layout.NewBorderLayout(nil, nil, nil, c.box), content, c.box)
+	return c.row
+}
+
+// audioControlsFrom recovers the transport from a row built by audioRow. List
+// rows are pooled and reused as the list scrolls, so the widgets have to be
+// found again by position rather than held onto.
+func audioControlsFrom(row *fyne.Container) *audioRowControls {
+	box := row.Objects[1].(*fyne.Container)
+	return &audioRowControls{
+		restart: box.Objects[0].(*widget.Button),
+		spinner: box.Objects[1].(*widget.Activity),
+		play:    box.Objects[2].(*widget.Button),
+		box:     box,
+		row:     row,
+	}
+}
+
+// setVisible applies the visibility of all three controls at once, relaying
+// out the row only when something actually changed (this runs on every list
+// refresh, several times a second during playback).
+func (c *audioRowControls) setVisible(restart, spinner, play bool) {
+	changed := false
+	for _, v := range []struct {
+		obj  fyne.CanvasObject
+		want bool
+	}{{c.restart, restart}, {c.spinner, spinner}, {c.play, play}} {
+		if v.obj.Visible() == v.want {
+			continue
+		}
+		changed = true
+		if v.want {
+			v.obj.Show()
+		} else {
+			v.obj.Hide()
+		}
+	}
+	if !changed {
+		return
+	}
+	// The spinner only animates while it's on screen, and only costs anything
+	// while it's animating.
+	if spinner {
+		c.spinner.Start()
+	} else {
+		c.spinner.Stop()
+	}
+	c.row.Refresh()
 }
 
 // hide blanks the controls, for a row that isn't a file at all (a folder, or
 // the trailing add-folder row).
 func (c *audioRowControls) hide() {
-	c.play.Hide()
+	c.setVisible(false, false, false)
 	c.play.OnTapped = nil
-	c.restart.Hide()
 	c.restart.OnTapped = nil
 }
 
 // update points the controls at the file at relPath (streamed from locs) and
-// renders them against the current playback state. Called from a list row's
-// update function, so it must handle being pointed at a different file than
-// last time - rows are pooled and reused as the list scrolls.
+// renders them against the current playback state.
 func (c *audioRowControls) update(locs []syncengine.Location, relPath, filename string) {
 	if !audio.CanPlay(filename) || len(locs) == 0 {
 		c.hide()
@@ -101,39 +161,31 @@ func (c *audioRowControls) update(locs []syncengine.Location, relPath, filename 
 
 	p := audioPlayer()
 	st := p.State()
+	// A row is the active one from the moment its play button is tapped until
+	// playback stops or the file ends - which is exactly when back-to-start
+	// applies, since anything loaded is either past its first sample or on its
+	// way there.
 	active := st.Key == relPath
 
-	c.play.Show()
 	switch {
 	case active && st.Loading:
-		// Opening the file / reaching the location: the tap has registered,
-		// but there's nothing to pause yet.
-		c.play.SetIcon(theme.MediaPauseIcon())
-		c.play.Disable()
+		// Reaching the location and parsing the header: a spinner stands in
+		// for the play button, since there's nothing to pause yet.
+		c.setVisible(true, true, false)
 	case active && st.Playing:
 		c.play.SetIcon(theme.MediaPauseIcon())
-		c.play.Enable()
+		c.setVisible(true, false, true)
+	case active:
+		// Loaded but paused.
+		c.play.SetIcon(theme.MediaPlayIcon())
+		c.setVisible(true, false, true)
 	default:
 		c.play.SetIcon(theme.MediaPlayIcon())
-		c.play.Enable()
+		c.setVisible(false, false, true)
 	}
+
 	c.play.OnTapped = func() {
 		p.Toggle(relPath, filename, audioOpener(locs, relPath))
 	}
-
-	if active && !st.Loading && (st.Playing || st.Position > 0) {
-		c.restart.Show()
-		c.restart.OnTapped = func() { p.Restart() }
-	} else {
-		c.restart.Hide()
-		c.restart.OnTapped = nil
-	}
-}
-
-// audioRow lays a list row's main content out with transport controls pinned
-// to its trailing edge. The objects are passed to container.New explicitly
-// (rather than via container.NewBorder) so their order in Objects is fixed
-// and a pooled row can be picked apart again by index.
-func audioRow(content fyne.CanvasObject, controls *audioRowControls) *fyne.Container {
-	return container.New(layout.NewBorderLayout(nil, nil, nil, controls.box), content, controls.box)
+	c.restart.OnTapped = func() { p.Restart() }
 }

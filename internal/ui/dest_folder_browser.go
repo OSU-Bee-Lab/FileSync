@@ -158,7 +158,7 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
 			entry.Hide()
-			return audioRow(container.NewStack(widget.NewButton("", nil), entry), newAudioRowControls())
+			return audioRow(container.NewStack(widget.NewButton("", nil), entry))
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) { b.updateRow(id, obj) },
 	)
@@ -364,14 +364,9 @@ func (b *destFolderBrowser) fileLabel(e syncengine.Entry) string {
 func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObject) {
 	row := obj.(*fyne.Container)
 	stack := row.Objects[0].(*fyne.Container)
-	controls := row.Objects[1].(*fyne.Container)
 	btn := stack.Objects[0].(*widget.Button)
 	entry := stack.Objects[1].(*widget.Entry)
-	audioControls := &audioRowControls{
-		restart: controls.Objects[0].(*widget.Button),
-		play:    controls.Objects[1].(*widget.Button),
-		box:     controls,
-	}
+	audioControls := audioControlsFrom(row)
 
 	if id < len(b.entries) {
 		e := b.entries[id]
