@@ -72,6 +72,12 @@ type State struct {
 	Playing  bool
 	Position time.Duration
 
+	// AtStart marks a loaded file parked at its first sample and not playing -
+	// the state "back to start" leaves a paused preview in. It's the one case
+	// where a loaded file has nowhere to go back to, so back-to-start doesn't
+	// apply to it.
+	AtStart bool
+
 	// Err is the last playback failure, cleared when playback next starts.
 	Err error
 }
@@ -110,7 +116,9 @@ type Player struct {
 
 // uiState is the subset of State the controls actually render, used to
 // suppress no-op OnChange calls — the position poll ticks several times a
-// second and must not repaint the file list each time.
+// second and must not repaint the file list each time. Position itself is
+// deliberately absent: nothing on screen tracks it, so a tick that only moved
+// the position is not worth a repaint.
 type uiState struct {
 	key     string
 	loading bool
@@ -154,6 +162,7 @@ func (p *Player) Toggle(key, filename string, open Opener) {
 			p.paused = false
 			p.oto.Play()
 			p.st.Playing = true
+			p.st.AtStart = false
 			p.notifyLocked()
 			return
 		default:
@@ -164,18 +173,23 @@ func (p *Player) Toggle(key, filename string, open Opener) {
 			return
 		}
 	}
-	p.startLocked(key, filename, open)
+	p.startLocked(key, filename, open, false)
 }
 
-// Restart takes playback back to the start of the currently loaded file and
-// plays from there. No-op when nothing is loaded.
+// Restart takes the loaded file back to its beginning, preserving whether it
+// was playing: a live preview keeps playing from the start, while a paused one
+// is parked at the start and waits to be played again. No-op when nothing is
+// loaded.
 func (p *Player) Restart() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.key == "" || p.opener == nil {
 		return
 	}
-	p.startLocked(p.key, p.filename, p.opener)
+	// Restarting during the initial load counts as playing: the user pressed
+	// play, and playback simply hasn't begun yet.
+	paused := !p.st.Playing && !p.st.Loading
+	p.startLocked(p.key, p.filename, p.opener, paused)
 }
 
 // Stop ends playback and releases the stream.
@@ -193,7 +207,9 @@ func (p *Player) Stop() {
 	p.notifyLocked()
 }
 
-func (p *Player) startLocked(key, filename string, open Opener) {
+// startLocked opens key from its first byte. startPaused parks the file at the
+// start instead of playing it, for a back-to-start on a paused preview.
+func (p *Player) startLocked(key, filename string, open Opener, startPaused bool) {
 	p.teardownLocked()
 
 	p.gen++
@@ -201,17 +217,17 @@ func (p *Player) startLocked(key, filename string, open Opener) {
 	p.key = key
 	p.filename = filename
 	p.opener = open
-	p.paused = false
-	p.st = State{Key: key, Loading: true}
+	p.paused = startPaused
+	p.st = State{Key: key, Loading: true, AtStart: startPaused}
 	p.notifyLocked()
 
-	go p.load(gen, filename, open)
+	go p.load(gen, filename, open, startPaused)
 }
 
 // load does everything that can block — opening the audio device, reaching
 // the location, parsing the format header — off the caller's goroutine, then
 // installs the pipeline if it hasn't been superseded in the meantime.
-func (p *Player) load(gen int, filename string, open Opener) {
+func (p *Player) load(gen int, filename string, open Opener, startPaused bool) {
 	drv := DriverFor(filename)
 	if drv == nil {
 		p.failLoad(gen, fmt.Errorf("no audio driver for %s", filename))
@@ -260,9 +276,18 @@ func (p *Player) load(gen int, filename string, open Opener) {
 	p.oto = otoPlayer
 	p.counter = counter
 	p.st.Loading = false
-	p.st.Playing = true
 	p.st.Position = 0
-	otoPlayer.Play()
+	if startPaused {
+		// Parked at the start: the pipeline is open and ready, but nothing is
+		// pulled from it until the user presses play.
+		p.paused = true
+		p.st.Playing = false
+		p.st.AtStart = true
+	} else {
+		otoPlayer.Play()
+		p.st.Playing = true
+		p.st.AtStart = false
+	}
 	stop := make(chan struct{})
 	p.stopWatch = stop
 	p.notifyLocked()
@@ -403,7 +428,7 @@ func (p *Player) notifyLocked() {
 		key:     p.st.Key,
 		loading: p.st.Loading,
 		playing: p.st.Playing,
-		atStart: p.st.Position == 0,
+		atStart: p.st.AtStart,
 	}
 	if p.st.Err != nil {
 		cur.err = p.st.Err.Error()

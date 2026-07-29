@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"math"
 	"os"
@@ -27,14 +28,16 @@ import (
 // pieces rather than in any one of them. Each piece passed in isolation while
 // the row on screen never changed.
 //
-// Two things about testing this. Playback state changes reach the UI through
-// fyne.Do, which does nothing in a test binary (there is no app event loop to
-// drain it), so these tests call refreshAudioRows directly at the point the
-// app would have run it - TestPlaybackNotifiesTheUI covers the delivery that
-// leads up to that. And a list row only re-runs its update function when the
-// list is refreshed, so a browser must be rendered (transportOf does it)
-// before any state change, or the assertions measure the first render rather
-// than the update.
+// Two things about testing this. Playback changes reach the UI through
+// fyne.Do, which the real driver marshals onto the main thread but the test
+// driver runs inline on whichever goroutine called it - so left alone, the
+// player's notifications race the test goroutine over the same List and Fyne
+// panics inside its own layout code. newProbeBrowser therefore silences
+// notifications and each test drives refreshAudioRows itself, at the point the
+// app would have run it; TestPlaybackNotifiesTheUI covers the delivery that
+// leads up to that. Separately, a list row only re-runs its update function
+// when the list is refreshed, so a browser has to be rendered before any state
+// change or the assertions measure the first render rather than the update.
 
 // newProbeBrowser renders a file browser showing one file, without going
 // through a listing.
@@ -56,6 +59,12 @@ func newProbeBrowser(t *testing.T, dir, filename string) (*destFolderBrowser, fy
 
 	w.SetContent(b.CanvasObject())
 	w.Resize(fyne.NewSize(500, 400))
+
+	// Render once so the browser subscribes to playback changes (registration
+	// happens as rows render), then silence delivery so only the test drives
+	// repaints - see the note at the top of this file.
+	transportOf(t, b)
+	audioPlayer().SetOnChange(nil)
 	return b, w
 }
 
@@ -140,7 +149,6 @@ func TestTransportTracksPlayback(t *testing.T) {
 	dir := t.TempDir()
 	writeToneWAV(t, filepath.Join(dir, "tone.wav"), 10)
 	b, _ := newProbeBrowser(t, dir, "tone.wav")
-	transportOf(t, b) // render the row so later refreshes update it
 
 	audioPlayer().Toggle("tone.wav", "tone.wav", audioOpener(b.locs, "tone.wav"))
 	waitFor(t, func() bool { return !audioPlayer().State().Loading })
@@ -187,8 +195,6 @@ func TestTransportUpdatesEveryLiveBrowser(t *testing.T) {
 	dir := t.TempDir()
 	first, _ := newProbeBrowser(t, dir, "rec.mp3")
 	second, _ := newProbeBrowser(t, dir, "rec.mp3")
-	transportOf(t, first) // render both, so both subscribe
-	transportOf(t, second)
 
 	blocked := make(chan struct{})
 	defer close(blocked)
@@ -259,39 +265,112 @@ func writeToneWAV(t *testing.T, path string, seconds int) {
 	}
 }
 
-// TestPlaybackNotifiesTheUI covers the half of the chain the tests above skip:
-// the player telling the UI that something changed. Without this, a change
-// that never fires would leave the controls frozen no matter how correct their
-// rendering is - which is exactly how this feature first shipped broken.
+// TestPlaybackNotifiesTheUI covers the half of the chain the tests above
+// silence: the player telling the UI that something changed. Without this, a
+// change that never fires would leave the controls frozen no matter how
+// correct their rendering is - which is how this feature first shipped broken.
+//
+// The callback is a bare "something changed" signal and reads the state when it
+// runs, so the state it observes is whatever is current by then. That's why the
+// load is held open here rather than allowed to race to completion.
 func TestPlaybackNotifiesTheUI(t *testing.T) {
 	p := audio.NewPlayer()
-	notified := make(chan audio.State, 8)
-	p.SetOnChange(func() { notified <- p.State() })
+	notified := make(chan struct{}, 16)
+	p.SetOnChange(func() { notified <- struct{}{} })
 
-	// An unrecognized extension fails before the audio device is touched,
-	// while still exercising the notify path either side of the load.
-	p.Toggle("f.unplayable", "f.unplayable", func(ctx context.Context) (io.ReadCloser, error) {
-		return io.NopCloser(strings.NewReader("")), nil
+	release := make(chan struct{})
+	p.Toggle("f.wav", "f.wav", func(ctx context.Context) (io.ReadCloser, error) {
+		<-release
+		return nil, errors.New("could not reach the location")
 	})
 
-	var loading, failed bool
-	for i := 0; i < 2; i++ {
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pressing play was never reported to the UI, so no spinner would ever appear")
+	}
+	if st := p.State(); st.Err != nil && strings.Contains(st.Err.Error(), "audio device") {
+		t.Skipf("no audio device available: %v", st.Err)
+	} else if !st.Loading {
+		t.Errorf("state while the file was still opening = %+v, want Loading", st)
+	}
+
+	close(release)
+	deadline := time.After(2 * time.Second)
+	for {
+		if p.State().Err != nil {
+			return
+		}
 		select {
-		case st := <-notified:
-			if st.Loading {
-				loading = true
-			}
-			if st.Err != nil {
-				failed = true
-			}
-		case <-time.After(2 * time.Second):
-			t.Fatal("playback state change was never reported to the UI")
+		case <-notified:
+		case <-deadline:
+			t.Fatal("the failure was never reported to the UI")
 		}
 	}
-	if !loading {
-		t.Error("no notification carried the loading state, so no spinner would ever appear")
+}
+
+// TestRestartPreservesPausedState: back-to-start on a live preview keeps
+// playing from the beginning, but on a paused one it parks at the beginning
+// and waits - pressing it must never start audio the user had stopped.
+func TestRestartPreservesPausedState(t *testing.T) {
+	dir := t.TempDir()
+	writeToneWAV(t, filepath.Join(dir, "tone.wav"), 10)
+	b, _ := newProbeBrowser(t, dir, "tone.wav")
+
+	play := func() {
+		audioPlayer().Toggle("tone.wav", "tone.wav", audioOpener(b.locs, "tone.wav"))
 	}
-	if !failed {
-		t.Error("the failure was never reported")
+
+	play()
+	waitFor(t, func() bool { return !audioPlayer().State().Loading })
+	if err := audioPlayer().State().Err; err != nil {
+		if strings.Contains(err.Error(), "audio device") {
+			t.Skipf("no audio device available: %v", err)
+		}
+		t.Fatalf("playback failed: %v", err)
+	}
+	waitFor(t, func() bool { return audioPlayer().State().Position > 0 })
+
+	// Restart while playing: still playing, back at the beginning.
+	audioPlayer().Restart()
+	waitFor(t, func() bool { return !audioPlayer().State().Loading })
+	if st := audioPlayer().State(); !st.Playing || st.AtStart {
+		t.Errorf("restart while playing left playing=%v atStart=%v, want playing and not parked", st.Playing, st.AtStart)
+	}
+
+	// Pause, then restart: parked at the start, and silent.
+	play()
+	waitFor(t, func() bool { return !audioPlayer().State().Playing })
+	audioPlayer().Restart()
+	waitFor(t, func() bool { return !audioPlayer().State().Loading })
+
+	st := audioPlayer().State()
+	if st.Playing {
+		t.Error("back-to-start resumed playback on a paused preview")
+	}
+	if !st.AtStart {
+		t.Error("back-to-start did not park the paused preview at the start")
+	}
+	if st.Position != 0 {
+		t.Errorf("position after restart = %v, want 0", st.Position)
+	}
+
+	// Give it a moment to prove it stays silent rather than merely starting late.
+	time.Sleep(400 * time.Millisecond)
+	if st := audioPlayer().State(); st.Playing || st.Position > 0 {
+		t.Errorf("parked preview started itself: playing=%v position=%v", st.Playing, st.Position)
+	}
+
+	// The control itself is hidden while parked - there is nothing to go back to.
+	refreshAudioRows()
+	if c := transportOf(t, b); c.restart.Visible() {
+		t.Error("back-to-start still shown while the file is parked at its start")
+	}
+
+	// And playing again from parked works.
+	play()
+	waitFor(t, func() bool { return audioPlayer().State().Playing })
+	if st := audioPlayer().State(); st.AtStart {
+		t.Error("atStart not cleared when a parked preview was played")
 	}
 }

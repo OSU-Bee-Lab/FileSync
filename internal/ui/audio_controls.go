@@ -220,21 +220,22 @@ func (c *audioRowControls) update(owner *destFolderBrowser, locs []syncengine.Lo
 	// way there. A failed preview isn't active: there's nothing to restart.
 	active := st.Key == relPath && st.Err == nil
 
+	// Nothing to go back to when the file is parked at its own start, which is
+	// where back-to-start leaves a paused preview.
+	showRestart := active && !st.AtStart
+
 	switch {
 	case active && st.Loading:
 		// Reaching the location and parsing the header: a spinner stands in
 		// for the play button, since there's nothing to pause yet.
-		c.setVisible(true, true, false)
+		c.setVisible(showRestart, true, false)
 	case active && st.Playing:
 		c.play.SetIcon(theme.MediaPauseIcon())
-		c.setVisible(true, false, true)
-	case active:
-		// Loaded but paused.
-		c.play.SetIcon(theme.MediaPlayIcon())
-		c.setVisible(true, false, true)
+		c.setVisible(showRestart, false, true)
 	default:
+		// Idle, or loaded and paused.
 		c.play.SetIcon(theme.MediaPlayIcon())
-		c.setVisible(false, false, true)
+		c.setVisible(showRestart, false, true)
 	}
 
 	c.play.OnTapped = func() {
