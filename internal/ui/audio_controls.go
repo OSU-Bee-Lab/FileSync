@@ -116,7 +116,7 @@ func audioOpener(locs []syncengine.Location, relPath string) audio.Opener {
 type audioRowControls struct {
 	restart *widget.Button
 	play    *widget.Button
-	spinner *widget.Activity
+	spinner *audioSpinner
 	box     *fyne.Container
 
 	// row is the whole row this transport sits in. Showing or hiding a
@@ -135,7 +135,7 @@ func audioRow(content fyne.CanvasObject) *fyne.Container {
 	c := &audioRowControls{
 		restart: widget.NewButtonWithIcon("", theme.MediaSkipPreviousIcon(), nil),
 		play:    widget.NewButtonWithIcon("", theme.MediaPlayIcon(), nil),
-		spinner: widget.NewActivity(),
+		spinner: newAudioSpinner(),
 	}
 	c.restart.Importance = widget.LowImportance
 	c.play.Importance = widget.LowImportance
@@ -155,7 +155,7 @@ func audioControlsFrom(row *fyne.Container) *audioRowControls {
 	box := row.Objects[1].(*fyne.Container)
 	return &audioRowControls{
 		restart: box.Objects[0].(*widget.Button),
-		spinner: box.Objects[1].(*widget.Activity),
+		spinner: box.Objects[1].(*audioSpinner),
 		play:    box.Objects[2].(*widget.Button),
 		box:     box,
 		row:     row,
