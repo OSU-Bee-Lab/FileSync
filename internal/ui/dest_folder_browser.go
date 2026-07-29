@@ -158,12 +158,25 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
 			entry.Hide()
-			return container.NewStack(widget.NewButton("", nil), entry)
+			return audioRow(container.NewStack(widget.NewButton("", nil), entry), newAudioRowControls())
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) { b.updateRow(id, obj) },
 	)
 
 	b.backBtn = widget.NewButtonWithIcon("", theme.NavigateBackIcon(), func() { b.ascend() })
+
+	// Repaint the rows whenever playback state changes, so the row being
+	// previewed swaps its play button for a pause button (and back again when
+	// the file ends). Only the newest browser is on screen - setContent has
+	// replaced any earlier one - so overwriting the callback is right.
+	audioPlayer().SetOnChange(func() {
+		fyne.Do(func() {
+			if err := audioPlayer().State().Err; err != nil {
+				b.statusLbl.SetText("Couldn't play that file. " + classifyError(err).String())
+			}
+			b.list.Refresh()
+		})
+	})
 
 	b.root = container.NewBorder(
 		container.NewHBox(b.backBtn, b.breadcrumb),
@@ -349,14 +362,30 @@ func (b *destFolderBrowser) fileLabel(e syncengine.Entry) string {
 }
 
 func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObject) {
-	stack := obj.(*fyne.Container)
+	row := obj.(*fyne.Container)
+	stack := row.Objects[0].(*fyne.Container)
+	controls := row.Objects[1].(*fyne.Container)
 	btn := stack.Objects[0].(*widget.Button)
 	entry := stack.Objects[1].(*widget.Entry)
+	audioControls := &audioRowControls{
+		restart: controls.Objects[0].(*widget.Button),
+		play:    controls.Objects[1].(*widget.Button),
+		box:     controls,
+	}
 
 	if id < len(b.entries) {
 		e := b.entries[id]
 		entry.Hide()
 		btn.Show()
+		// Every file row offers playback if its format is one a driver
+		// recognizes, whether or not the row is selectable - hearing the
+		// announcement at the start of a recording is useful for confirming
+		// you're looking at the right file, not just for picking it.
+		if e.IsDir {
+			audioControls.hide()
+		} else {
+			audioControls.update(b.locs, joinRel(b.relPath, e.Name), e.Name)
+		}
 		if e.IsDir {
 			btn.Importance = widget.MediumImportance
 			btn.SetText("\U0001F4C1 " + e.Name)
@@ -386,6 +415,7 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 	}
 
 	// Trailing "+ Add Folder" row.
+	audioControls.hide()
 	if b.addingFolder {
 		btn.Hide()
 		entry.Show()
@@ -488,6 +518,10 @@ func (b *destFolderBrowser) listingFailed(gen int) bool {
 }
 
 func (b *destFolderBrowser) reload() {
+	// The only controls for a preview are on the row it was started from, so
+	// browsing away from that row stops it rather than leaving audio playing
+	// with no way to pause it.
+	stopAudio()
 	b.selectedFile = ""
 	b.breadcrumbNote = ""
 	b.updateBreadcrumbText()

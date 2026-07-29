@@ -183,6 +183,7 @@ func currentOrDefaultSize(w fyne.Window, fallback fyne.Size) fyne.Size {
 // screen can stretch the window past windowSize.
 func (s *state) setContent(content fyne.CanvasObject) {
 	s.quitCheck = nil
+	stopAudio()
 	size := currentOrDefaultSize(s.win, windowSize)
 	bounded := container.New(&boundedWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(bounded)
@@ -227,6 +228,7 @@ func (l *growingWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 // should keep using setContent.
 func (s *state) setContentResizable(content fyne.CanvasObject) {
 	s.quitCheck = nil
+	stopAudio()
 	size := currentOrDefaultSize(s.win, windowSize)
 	bounded := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(bounded)

@@ -10,6 +10,8 @@ remotes (SharePoint/OneDrive, Google Drive, Dropbox, S3) via rclone.
 - `internal/syncengine` — rclone-backed sync/copy/scan logic and Location model.
 - `internal/rcbackends` — remote backend definitions and field metadata.
 - `internal/appconfig` — persisted config (Locations, filters, preferences).
+- `internal/audio` — streamed playback of recordings for in-app preview, with
+  one driver per format under `internal/audio/drivers`.
 
 ## Data schema
 
