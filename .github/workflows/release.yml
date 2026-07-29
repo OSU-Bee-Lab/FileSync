@@ -71,7 +71,11 @@ jobs:
         run: |
           fyne package -os darwin -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
           codesign --force --deep --sign - "$APP_NAME.app"
-          ditto -c -k --keepParent --sequesterRsrc "$APP_NAME.app" "$APP_NAME-macOS.zip"
+
+          dmg_dir="$(mktemp -d)"
+          mv "$APP_NAME.app" "$dmg_dir/"
+          ln -s /Applications "$dmg_dir/Applications"
+          hdiutil create -volname "$APP_NAME" -srcfolder "$dmg_dir" -ov -format UDZO "$APP_NAME-macOS.dmg"
 
       - name: Package (Linux)
         if: matrix.os == 'linux'
@@ -137,7 +141,7 @@ jobs:
           draft: true
           prerelease: false
           files: |
-            ${{ env.APP_NAME }}-macOS.zip
+            ${{ env.APP_NAME }}-macOS.dmg
             ${{ env.APP_NAME }}-Linux.tar.xz
             ${{ env.APP_NAME }}-Linux.deb
             ${{ env.APP_NAME }}-Windows.exe
