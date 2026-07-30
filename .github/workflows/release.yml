@@ -66,11 +66,54 @@ jobs:
           version="${tag#v}"
           echo "GOFLAGS=-ldflags=-X=github.com/OSU-Bee-Lab/filesync/internal/appversion.Version=${version:-0.0.0}" >> "$GITHUB_ENV"
 
+      # Signs the .app with a self-signed certificate. This does not satisfy
+      # Gatekeeper (users still see the unidentified-developer dialog once),
+      # but it gives the bundle a stable designated requirement so macOS keeps
+      # folder-access and Keychain approvals across relaunches and updates.
+      # Generate the cert with scripts/macos-signing-cert.sh.
+      - name: Import macOS signing certificate
+        if: matrix.os == 'darwin'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$MACOS_CERTIFICATE" ]; then
+            echo "MACOS_CERTIFICATE not set — building unsigned (ad-hoc)."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PW="$(uuidgen)"
+          echo "$MACOS_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+
+          security create-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PW" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+          # codesign refuses to build a chain to an untrusted self-signed root,
+          # so the leaf has to be trusted on the runner itself.
+          # System LibreSSL, not the Homebrew OpenSSL 3 on PATH — the latter
+          # needs the legacy provider to read the 3DES-encrypted p12.
+          /usr/bin/openssl pkcs12 -in "$RUNNER_TEMP/cert.p12" \
+            -passin pass:"$MACOS_CERTIFICATE_PASSWORD" \
+            -nokeys -clcerts -out "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/cert.pem"
+
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/cert.pem"
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
       - name: Package (macOS)
         if: matrix.os == 'darwin'
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
           fyne package -os darwin -icon Icon.png -name "$APP_NAME" -appID "$APP_ID"
-          codesign --force --deep --sign - "$APP_NAME.app"
+          codesign --force --deep --sign "${MACOS_SIGNING_IDENTITY:--}" "$APP_NAME.app"
 
           dmg_dir="$(mktemp -d)"
           mv "$APP_NAME.app" "$dmg_dir/"
@@ -145,3 +188,48 @@ jobs:
             ${{ env.APP_NAME }}-Linux.tar.xz
             ${{ env.APP_NAME }}-Linux.deb
             ${{ env.APP_NAME }}-Windows.exe
+
+  # Guards against silently shipping an unsigned bundle: a linker-adhoc binary
+  # reports "Sealed Resources=none" and no designated requirement, which is
+  # exactly the state that makes macOS re-prompt for folder-access permissions
+  # on every launch and update.
+  #
+  # This checks the published DMG rather than the build tree: the tree is not
+  # reliably still there once the build job finishes, and the shipped
+  # artifact is what actually matters anyway.
+  verify-macos-signature:
+    needs: build
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    env:
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Verify signature on the published DMG
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$MACOS_SIGNING_IDENTITY" ]; then
+            echo "No signing identity configured — skipping verification."
+            exit 0
+          fi
+
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p '*.dmg' -D . --clobber
+          DMG=$(ls ./*.dmg | head -1)
+          echo "Verifying $DMG"
+
+          hdiutil attach "$DMG" -nobrowse -readonly -mountpoint ./mnt >/dev/null
+          trap 'hdiutil detach ./mnt -quiet || true' EXIT
+          APP=./mnt/FileSync.app
+
+          codesign -dvvv "$APP"
+          codesign -d -r- "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
+          # An ad-hoc/linker signature has no designated requirement at all,
+          # so this is the assertion that actually catches a regression.
+          if ! codesign -d -r- "$APP" 2>&1 | grep -q 'designated =>'; then
+            echo "No designated requirement — bundle is effectively unsigned." >&2
+            exit 1
+          fi
