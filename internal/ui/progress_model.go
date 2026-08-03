@@ -297,7 +297,7 @@ func folderSyncRank(f *folderUIState) int {
 	switch {
 	case f.copyTotalFiles == 0 || f.copyFilesDone >= f.copyTotalFiles:
 		return 2
-	case f.copyFilesDone > 0:
+	case f.copyFilesDone > 0 || f.copyBytesDone > 0:
 		return 0
 	default:
 		return 1
