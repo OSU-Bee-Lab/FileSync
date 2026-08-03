@@ -157,6 +157,11 @@ func locationButtonRow(s *state, id int, loc syncengine.Location) *fyne.Containe
 }
 
 func locationRowContent(s *state, id int, loc syncengine.Location, priorityLabels []string, priorityIdx int) fyne.CanvasObject {
+	// No badge here: locationNumbers assigns a fixed global index, but a
+	// picker only ever shows badges for whichever subset is offered there
+	// (e.g. local-only, or a Location list narrowed by selection) - showing
+	// a permanent number on this screen would imply a sequence that isn't
+	// actually fixed anywhere sync selection happens.
 	nameLabel := widget.NewLabelWithStyle(loc.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	pathLabel := widget.NewLabel(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
 	trailing := locationButtonRow(s, id, loc)

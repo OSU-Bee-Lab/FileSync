@@ -85,8 +85,8 @@ func transportOf(t *testing.T, b *destFolderBrowser) *audioRowControls {
 		}
 		if c, ok := o.(*fyne.Container); ok {
 			if len(c.Objects) == 2 {
-				if box, ok := c.Objects[1].(*fyne.Container); ok && len(box.Objects) == 3 {
-					if _, ok := box.Objects[0].(*widget.Button); ok {
+				if box, ok := c.Objects[1].(*fyne.Container); ok && len(box.Objects) == 4 {
+					if _, ok := box.Objects[1].(*widget.Button); ok {
 						found = c
 						return
 					}

@@ -90,7 +90,15 @@ func ListChildren(ctx context.Context, loc Location, relPath string) ([]Entry, e
 // file" (e.g. every remote's token expired) - if even one location listed
 // successfully, the others' hard errors are swallowed the same as a
 // Location simply not having this folder.
-func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (entries []Entry, notFound bool, isFile bool, err error) {
+// presence is one entry's Location-by-Location membership, in the same
+// order the caller's locs slice was given - one bool per Location, true if
+// that Location's listing contained the entry. Shared by ListChildrenUnion
+// and the Union*Stream listers below so a presence-indicator UI can show
+// exactly which Locations hold a given file/folder alongside the union
+// listing they already have to build.
+type presence = map[string][]bool
+
+func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (entries []Entry, notFound bool, isFile bool, pres presence, err error) {
 	type result struct {
 		entries []Entry
 		err     error
@@ -108,10 +116,11 @@ func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (en
 	wg.Wait()
 
 	seen := make(map[string]Entry)
+	pres = make(presence)
 	anyOK := false
 	anyIsFile := false
 	var firstHardErr error
-	for _, r := range results {
+	for i, r := range results {
 		if r.err != nil {
 			switch {
 			case errors.Is(r.err, fs.ErrorIsFile):
@@ -130,10 +139,14 @@ func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (en
 			if existing, ok := seen[e.Name]; !ok || (!existing.IsDir && e.IsDir) {
 				seen[e.Name] = e
 			}
+			if pres[e.Name] == nil {
+				pres[e.Name] = make([]bool, len(locs))
+			}
+			pres[e.Name][i] = true
 		}
 	}
 	if !anyOK && firstHardErr != nil {
-		return nil, false, false, firstHardErr
+		return nil, false, false, nil, firstHardErr
 	}
 
 	out := make([]Entry, 0, len(seen))
@@ -146,7 +159,7 @@ func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (en
 		}
 		return out[i].Name < out[j].Name
 	})
-	return out, !anyOK && !anyIsFile, anyIsFile, nil
+	return out, !anyOK && !anyIsFile, anyIsFile, pres, nil
 }
 
 // ListRemoteDirsOnDrive lists only the sub-directories (not files) directly
@@ -230,16 +243,17 @@ func UnionChildDirNames(ctx context.Context, locs []Location, relPath string) []
 // immediately rather than blocking on a slow one (e.g. a remote). onUpdate
 // is only ever called from one goroutine at a time. Locations that fail to
 // list are silently skipped, same as UnionChildDirNames.
-func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(names []string)) {
+func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(names []string, pres presence)) {
 	if len(locs) == 0 {
 		return
 	}
 	var mu sync.Mutex
 	seen := make(map[string]bool)
+	pres := make(presence)
 	var wg sync.WaitGroup
-	for _, loc := range locs {
+	for li, loc := range locs {
 		wg.Add(1)
-		go func(loc Location) {
+		go func(li int, loc Location) {
 			defer wg.Done()
 			entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
 			if err != nil {
@@ -249,7 +263,12 @@ func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath stri
 			defer mu.Unlock()
 			for _, e := range entries {
 				if _, isDir := e.(fs.Directory); isDir {
-					seen[dirName(e)] = true
+					name := dirName(e)
+					seen[name] = true
+					if pres[name] == nil {
+						pres[name] = make([]bool, len(locs))
+					}
+					pres[name][li] = true
 				}
 			}
 			names := make([]string, 0, len(seen))
@@ -257,10 +276,24 @@ func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath stri
 				names = append(names, n)
 			}
 			sort.Strings(names)
-			onUpdate(names)
-		}(loc)
+			onUpdate(names, clonePresence(pres))
+		}(li, loc)
 	}
 	wg.Wait()
+}
+
+// clonePresence deep-copies pres so a caller reading it on another
+// goroutine (e.g. the UI thread via fyne.Do) never races the still-running
+// listing goroutines that keep mutating the original after handing a
+// snapshot to onUpdate.
+func clonePresence(pres presence) presence {
+	out := make(presence, len(pres))
+	for name, p := range pres {
+		cp := make([]bool, len(p))
+		copy(cp, p)
+		out[name] = cp
+	}
+	return out
 }
 
 // UnionChildEntriesStream is UnionChildDirNamesStream, but includes files
@@ -268,16 +301,17 @@ func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath stri
 // only. It backs the "Edit Sync Locations" browse dialog, where seeing the
 // files already at a candidate path helps confirm it's the right one before
 // adopting it as the Location's root.
-func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry)) {
+func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry, pres presence)) {
 	if len(locs) == 0 {
 		return
 	}
 	var mu sync.Mutex
 	seen := make(map[string]Entry)
+	pres := make(presence)
 	var wg sync.WaitGroup
-	for _, loc := range locs {
+	for li, loc := range locs {
 		wg.Add(1)
-		go func(loc Location) {
+		go func(li int, loc Location) {
 			defer wg.Done()
 			entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
 			if err != nil {
@@ -286,15 +320,23 @@ func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath strin
 			mu.Lock()
 			defer mu.Unlock()
 			for _, e := range entries {
+				var name string
 				switch v := e.(type) {
 				case fs.Directory:
-					seen[dirName(e)] = Entry{Name: dirName(e), IsDir: true}
+					name = dirName(e)
+					seen[name] = Entry{Name: name, IsDir: true}
 				case fs.Object:
-					name := dirName(e)
+					name = dirName(e)
 					if _, exists := seen[name]; !exists {
 						seen[name] = Entry{Name: name, IsDir: false, Size: v.Size()}
 					}
+				default:
+					continue
 				}
+				if pres[name] == nil {
+					pres[name] = make([]bool, len(locs))
+				}
+				pres[name][li] = true
 			}
 			out := make([]Entry, 0, len(seen))
 			for _, entry := range seen {
@@ -306,8 +348,8 @@ func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath strin
 				}
 				return out[i].Name < out[j].Name
 			})
-			onUpdate(out)
-		}(loc)
+			onUpdate(out, clonePresence(pres))
+		}(li, loc)
 	}
 	wg.Wait()
 }

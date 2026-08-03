@@ -127,11 +127,15 @@ type audioRowControls struct {
 	row *fyne.Container
 }
 
-// audioRow builds a list row: content, with transport controls pinned to the
-// trailing edge. The objects are passed to container.New explicitly (rather
-// than via container.NewBorder) so their order in Objects is fixed and a
-// pooled row can be picked apart again with audioControlsFrom.
-func audioRow(content fyne.CanvasObject) *fyne.Container {
+// audioRow builds a list row: content, with a leading indicator (e.g. a
+// presenceIndicator - never nil, since Fyne containers can't hold a nil
+// child; pass an empty one to show nothing) and transport controls both
+// pinned to the trailing edge, in that order, so the indicator sits
+// immediately before the transport controls rather than past them. The
+// objects are passed to container.New explicitly (rather than via
+// container.NewBorder) so their order in Objects is fixed and a pooled row
+// can be picked apart again with audioControlsFrom/presenceFrom.
+func audioRow(content, leading fyne.CanvasObject) *fyne.Container {
 	c := &audioRowControls{
 		restart: widget.NewButtonWithIcon("", theme.MediaSkipPreviousIcon(), nil),
 		play:    widget.NewButtonWithIcon("", theme.MediaPlayIcon(), nil),
@@ -142,7 +146,7 @@ func audioRow(content fyne.CanvasObject) *fyne.Container {
 	c.restart.Hide()
 	c.play.Hide()
 	c.spinner.Hide()
-	c.box = container.NewHBox(c.restart, c.spinner, c.play)
+	c.box = container.NewHBox(leading, c.restart, c.spinner, c.play)
 
 	c.row = container.New(layout.NewBorderLayout(nil, nil, nil, c.box), content, c.box)
 	return c.row
@@ -154,12 +158,18 @@ func audioRow(content fyne.CanvasObject) *fyne.Container {
 func audioControlsFrom(row *fyne.Container) *audioRowControls {
 	box := row.Objects[1].(*fyne.Container)
 	return &audioRowControls{
-		restart: box.Objects[0].(*widget.Button),
-		spinner: box.Objects[1].(*audioSpinner),
-		play:    box.Objects[2].(*widget.Button),
+		restart: box.Objects[1].(*widget.Button),
+		spinner: box.Objects[2].(*audioSpinner),
+		play:    box.Objects[3].(*widget.Button),
 		box:     box,
 		row:     row,
 	}
+}
+
+// presenceFrom recovers the leading indicator from a row built by audioRow.
+func presenceFrom(row *fyne.Container) *presenceIndicator {
+	box := row.Objects[1].(*fyne.Container)
+	return box.Objects[0].(*presenceIndicator)
 }
 
 // setVisible applies the visibility of all three controls at once, relaying

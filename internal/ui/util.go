@@ -196,6 +196,20 @@ func idsFromLocations(locs []syncengine.Location) []string {
 	return ids
 }
 
+// locationNumbers maps every Location's Name to its 1-based position within
+// all - always the full, canonical s.cfg.Locations, never a filtered
+// subset, so a Location's badge number is identical everywhere it's shown
+// even though different pickers offer different subsets (e.g. local-only vs
+// remote-only). Purely a live display index, not persisted: reordering
+// Locations on the Locations screen renumbers them.
+func locationNumbers(all []syncengine.Location) map[string]int {
+	out := make(map[string]int, len(all))
+	for i, l := range all {
+		out[l.Name] = i + 1
+	}
+	return out
+}
+
 // joinRel joins a browsing breadcrumb path with a child name, both always
 // forward-slash separated (an rclone-relative path, not an OS path).
 func joinRel(base, name string) string {
@@ -221,6 +235,7 @@ var (
 type toggleChip struct {
 	widget.BaseWidget
 	label    string
+	number   int // 0 = no badge
 	selected bool
 	onTapped func()
 
@@ -228,11 +243,17 @@ type toggleChip struct {
 	text *canvas.Text
 }
 
-func newToggleChip(label string, onTapped func()) *toggleChip {
-	c := &toggleChip{label: label, onTapped: onTapped}
+func newToggleChip(label string, number int, onTapped func()) *toggleChip {
+	c := &toggleChip{label: label, number: number, onTapped: onTapped}
 	c.ExtendBaseWidget(c)
 	return c
 }
+
+// chipBadgeOverhang is how far a toggleChip's numbered badge pokes outside
+// the chip's own top-right corner, notification-bubble style - half the
+// badge's own size, so the badge is centered exactly on the corner rather
+// than tucked inside it overlapping the label.
+const chipBadgeOverhang = locationBadgeSize / 2
 
 func (c *toggleChip) CreateRenderer() fyne.WidgetRenderer {
 	c.bg = canvas.NewRectangle(color.Transparent)
@@ -240,9 +261,82 @@ func (c *toggleChip) CreateRenderer() fyne.WidgetRenderer {
 	c.text = canvas.NewText(c.label, theme.Color(theme.ColorNameForeground))
 	c.text.Alignment = fyne.TextAlignCenter
 	c.refresh()
-	pad := container.NewPadded(container.NewCenter(c.text))
-	return widget.NewSimpleRenderer(container.NewStack(c.bg, pad))
+	r := &toggleChipRenderer{c: c}
+	if c.number != 0 {
+		r.badge = newLocationBadge(c.number)
+	}
+	return r
 }
+
+// toggleChipRenderer lays the chip's background+label out inset from the
+// widget's own top-right corner by chipBadgeOverhang (only when there's a
+// badge), then centers the badge on that corner - so the badge floats half
+// outside the chip's border like a notification count, never overlapping
+// the label. A plain custom renderer rather than nested stack/border
+// containers, since "half outside the box" isn't expressible with Fyne's
+// stock layouts.
+type toggleChipRenderer struct {
+	c     *toggleChip
+	badge *locationBadge
+}
+
+func (r *toggleChipRenderer) marginTop() float32 {
+	if r.badge == nil {
+		return 0
+	}
+	return chipBadgeOverhang
+}
+
+func (r *toggleChipRenderer) marginRight() float32 {
+	if r.badge == nil {
+		return 0
+	}
+	return chipBadgeOverhang
+}
+
+func (r *toggleChipRenderer) Layout(size fyne.Size) {
+	mt, mr := r.marginTop(), r.marginRight()
+	bgSize := fyne.NewSize(size.Width-mr, size.Height-mt)
+	r.c.bg.Move(fyne.NewPos(0, mt))
+	r.c.bg.Resize(bgSize)
+
+	textMin := r.c.text.MinSize()
+	r.c.text.Resize(textMin)
+	r.c.text.Move(fyne.NewPos((bgSize.Width-textMin.Width)/2, mt+(bgSize.Height-textMin.Height)/2))
+
+	if r.badge != nil {
+		r.badge.Resize(fyne.NewSize(locationBadgeSize, locationBadgeSize))
+		r.badge.Move(fyne.NewPos(bgSize.Width-locationBadgeSize/2, mt-locationBadgeSize/2))
+	}
+}
+
+func (r *toggleChipRenderer) MinSize() fyne.Size {
+	pad := theme.Padding()
+	textMin := r.c.text.MinSize()
+	bgMin := fyne.NewSize(textMin.Width+4*pad, textMin.Height+2*pad)
+	return fyne.NewSize(bgMin.Width+r.marginRight(), bgMin.Height+r.marginTop())
+}
+
+func (r *toggleChipRenderer) Refresh() {
+	r.c.refresh()
+	r.c.text.Text = r.c.label
+	r.c.text.Color = theme.Color(theme.ColorNameForeground)
+	r.c.text.Refresh()
+	if r.badge != nil {
+		r.badge.Refresh()
+	}
+	r.Layout(r.c.Size())
+}
+
+func (r *toggleChipRenderer) Objects() []fyne.CanvasObject {
+	objs := []fyne.CanvasObject{r.c.bg, r.c.text}
+	if r.badge != nil {
+		objs = append(objs, r.badge)
+	}
+	return objs
+}
+
+func (r *toggleChipRenderer) Destroy() {}
 
 func (c *toggleChip) refresh() {
 	if c.selected {
@@ -284,8 +378,10 @@ type toggleGroup struct {
 }
 
 // newToggleGroup builds a toggleGroup offering one chip per name in
-// options, initially selected per selected.
-func newToggleGroup(options []string, selected []string) *toggleGroup {
+// options, initially selected per selected. numbers gives each chip its
+// badge number by name (see locationNumbers) - a name missing from numbers,
+// or mapped to 0, gets no badge.
+func newToggleGroup(options []string, selected []string, numbers map[string]int) *toggleGroup {
 	g := &toggleGroup{
 		box:      container.NewHBox(),
 		options:  options,
@@ -297,7 +393,7 @@ func newToggleGroup(options []string, selected []string) *toggleGroup {
 	}
 	for _, name := range options {
 		name := name
-		chip := newToggleChip(name, func() { g.toggle(name) })
+		chip := newToggleChip(name, numbers[name], func() { g.toggle(name) })
 		chip.SetSelected(g.selected[name])
 		g.chips[name] = chip
 		g.box.Add(chip)

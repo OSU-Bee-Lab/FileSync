@@ -4,9 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path"
-	"sort"
 	"strings"
-	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -62,13 +60,11 @@ func syncModeToggle(s *state) *widget.RadioGroup {
 // (never guessed; see syncengine.compareObjectsN).
 func showSyncExperimentsAllWay(s *state) {
 	allNames := locationNames(s.cfg.Locations)
-	statusLabel := widget.NewLabel("")
-	loading := newLoadingBar()
 
 	if len(s.syncExperimentsLocationNames) == 0 {
 		s.syncExperimentsLocationNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncExperimentsLocationIDs)
 	}
-	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...))
+	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...), locationNumbers(s.cfg.Locations))
 
 	// setLocationNames caches the selection for the session (as before) and
 	// persists it to cfg so it's restored the next time the app opens,
@@ -79,13 +75,23 @@ func showSyncExperimentsAllWay(s *state) {
 		s.saveConfig()
 	}
 
+	// expBrowser shows the union of top-level experiment directories across
+	// every selected Location (destFolderBrowser's own reload/Union*Stream
+	// listing - the same one that drives its presence dots) with selectDirs
+	// on: tapping a row picks it rather than descending, since an
+	// experiment is always exactly one level deep and there's nothing below
+	// it to browse into here.
+	expBrowser := newDestFolderBrowser(s.win, false)
+	expBrowser.selectDirs = true
+	expBrowser.multiSelect = true
+	expBrowser.SetSelectedFiles(s.syncExperimentsExpNames)
+
 	var quickScanBtn, fullScanBtn *widget.Button
-	var expGroup *widget.CheckGroup
 	updateScanBtn := func() {
 		if quickScanBtn == nil || fullScanBtn == nil {
 			return
 		}
-		if len(locGroup.Selected()) >= 2 && len(expGroup.Selected) > 0 {
+		if len(locGroup.Selected()) >= 2 && len(expBrowser.SelectedFiles()) > 0 {
 			quickScanBtn.Enable()
 			fullScanBtn.Enable()
 		} else {
@@ -93,44 +99,21 @@ func showSyncExperimentsAllWay(s *state) {
 			fullScanBtn.Disable()
 		}
 	}
-
-	// setExpGroup replaces expGroup wholesale rather than mutating its
-	// Options/Selected fields in place. Fyne's widget.CheckGroup renderer
-	// (checkGroupRenderer.updateItems, checked_group.go) has a bug: when
-	// reused across an Options change, it reads a reused Check item's stale
-	// Text (from the option that used to live at that index) to decide
-	// Checked *before* overwriting Text with the new option — so a row can
-	// render checked for whatever option happens to land at an index that
-	// previously held a selected one. We rebuild the union incrementally as
-	// locations report in (see refresh below), which reorders/inserts
-	// options on essentially every update and reliably tripped this. A
-	// brand-new CheckGroup always starts with zero items, so every Check is
-	// constructed fresh with its correct name baked in — no stale index to
-	// misread.
-	expScroll := container.NewVScroll(widget.NewCheckGroup(nil, nil))
-	setExpGroup := func(options, selected []string) {
-		g := widget.NewCheckGroup(options, nil)
-		g.Selected = selected
-		g.OnChanged = func(sel []string) {
-			s.syncExperimentsExpNames = sel
-			updateScanBtn()
-		}
-		g.Refresh()
-		expGroup = g
-		expScroll.Content = g
-		expScroll.Refresh()
+	expBrowser.OnPathChanged = func(string) {
+		s.syncExperimentsExpNames = expBrowser.SelectedFiles()
+		updateScanBtn()
 	}
-	setExpGroup(nil, nil)
 
-	// refresh reloads the experiment list as the union of every experiment
-	// visible from any of the currently-selected locations.
+	// refresh points expBrowser at the currently-selected Locations,
+	// preserving whatever experiments are already picked (SetLocationsKeepSelection,
+	// not SetLocations - picking experiments from one Location shouldn't be
+	// lost just because another Location gets toggled on afterward).
 	var refresh func()
 	refresh = func() {
 		names := locGroup.Selected()
 		if len(names) == 0 {
-			setExpGroup(nil, nil)
+			expBrowser.SetLocationsKeepSelection(nil)
 			updateScanBtn()
-			statusLabel.SetText("")
 			return
 		}
 		locs := locationsFromNamesAny(s.cfg.Locations, names)
@@ -155,101 +138,8 @@ func showSyncExperimentsAllWay(s *state) {
 			return
 		}
 
-		statusLabel.SetText("")
-		loading.Show()
+		expBrowser.SetLocationsKeepSelection(locs)
 		updateScanBtn()
-
-		// applyUnion re-renders expGroup from the current union/seen state -
-		// called both incrementally (as each location's listing lands, so a
-		// fast location's experiments show right away instead of waiting on
-		// a slow one) and once more at the end for the final status text.
-		applyUnion := func(union []string, seen map[string]bool) {
-			keep := make([]string, 0, len(s.syncExperimentsExpNames))
-			for _, name := range s.syncExperimentsExpNames {
-				if seen[name] {
-					keep = append(keep, name)
-				}
-			}
-			s.syncExperimentsExpNames = keep
-			setExpGroup(union, keep)
-			updateScanBtn()
-		}
-
-		// Seed the union with whatever's already showing (from the prior
-		// selection) so adding a location grows the list in place instead of
-		// blanking it while the fresh scan's goroutines report back in one
-		// at a time - mirrors dest_folder_browser's union-preserving reload.
-		var seedNames []string
-		if expGroup != nil {
-			seedNames = append(seedNames, expGroup.Options...)
-		}
-
-		go func() {
-			ctx := context.Background()
-			var mu sync.Mutex
-			seen := map[string]bool{}
-			var union []string
-			for _, name := range seedNames {
-				if !seen[name] {
-					seen[name] = true
-					union = append(union, name)
-				}
-			}
-			var firstErr error
-			var wg sync.WaitGroup
-			for _, loc := range locs {
-				wg.Add(1)
-				go func(loc syncengine.Location) {
-					defer wg.Done()
-					exps, err := syncengine.ListExperiments(ctx, loc)
-					mu.Lock()
-					if err != nil {
-						if firstErr == nil {
-							firstErr = err
-						}
-						mu.Unlock()
-						return
-					}
-					for _, e := range exps {
-						if !seen[e.Name] {
-							seen[e.Name] = true
-							union = append(union, e.Name)
-						}
-					}
-					sort.Strings(union)
-					unionCopy := append([]string{}, union...)
-					seenCopy := make(map[string]bool, len(seen))
-					for k := range seen {
-						seenCopy[k] = true
-					}
-					mu.Unlock()
-
-					fyne.Do(func() {
-						if !equalStringSets(locGroup.Selected(), names) {
-							return // selection changed mid-load; a newer refresh is in flight
-						}
-						applyUnion(unionCopy, seenCopy)
-					})
-				}(loc)
-			}
-			wg.Wait()
-
-			mu.Lock()
-			finalUnion, finalErr := append([]string{}, union...), firstErr
-			mu.Unlock()
-
-			fyne.Do(func() {
-				loading.Hide()
-				if !equalStringSets(locGroup.Selected(), names) {
-					return // selection changed mid-load; a newer refresh is in flight
-				}
-				if finalErr != nil {
-					statusLabel.SetText(fmt.Sprintf("%s found (one or more locations failed to list: %v)", plural(len(finalUnion), "experiment", ""), finalErr))
-				} else {
-					statusLabel.SetText(fmt.Sprintf("%s found across %s", plural(len(finalUnion), "experiment", ""), plural(len(locs), "location", "")))
-				}
-			})
-		}()
 	}
 
 	locGroup.OnChanged = func(sel []string) {
@@ -262,7 +152,7 @@ func showSyncExperimentsAllWay(s *state) {
 
 	startScanMode := func(mode syncengine.NWayScanMode) {
 		names := locGroup.Selected()
-		expNames := append([]string{}, expGroup.Selected...)
+		expNames := expBrowser.SelectedFiles()
 		if len(names) < 2 {
 			dialog.ShowInformation("Pick locations", "Choose at least two locations to converge.", s.win)
 			return
@@ -306,13 +196,12 @@ func showSyncExperimentsAllWay(s *state) {
 			container.NewPadded(syncModeToggle(s)),
 			widget.NewLabel("Pick two or more locations to sync."),
 			container.NewPadded(locGroup.CanvasObject()),
-			loading.CanvasObject(),
-			statusLabel,
+			widget.NewLabel("Pick one or more experiments to sync."),
 			widget.NewSeparator(),
 		),
 		container.NewHBox(quickScanBtn, fullScanBtn, backBtn),
 		nil, nil,
-		expScroll,
+		expBrowser.CanvasObject(),
 	)
 	s.setContent(container.NewPadded(content))
 }
@@ -350,7 +239,7 @@ func showSyncExperimentsOneWay(s *state) {
 	if len(s.syncOneWayToNames) == 0 {
 		s.syncOneWayToNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncOneWayLocationIDs)
 	}
-	locGroup := newToggleGroup(names, append([]string{}, s.syncOneWayToNames...))
+	locGroup := newToggleGroup(names, append([]string{}, s.syncOneWayToNames...), locationNumbers(s.cfg.Locations))
 	browser := newDestFolderBrowser(s.win, true)
 
 	selectedLocs := func() []syncengine.Location {
@@ -920,23 +809,4 @@ func applyNWayResolutions(s *state, expNames []string, results []syncengine.NWay
 			buildAndRun(applyOverwrites(freshResults))
 		})
 	}()
-}
-
-// equalStringSets reports whether a and b contain the same set of strings,
-// ignoring order (used to detect a stale async refresh whose selection has
-// since changed).
-func equalStringSets(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	set := make(map[string]bool, len(a))
-	for _, s := range a {
-		set[s] = true
-	}
-	for _, s := range b {
-		if !set[s] {
-			return false
-		}
-	}
-	return true
 }

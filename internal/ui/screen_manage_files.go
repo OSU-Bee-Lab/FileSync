@@ -109,7 +109,7 @@ func (e *focusEntry) FocusLost() {
 // operation or how simple it looks.
 func showManageFiles(s *state) {
 	names := locationNames(s.cfg.Locations)
-	locGroup := newToggleGroup(names, selectedFromIDs(s.cfg.Locations, s.cfg.ManageFilesLocationIDs))
+	locGroup := newToggleGroup(names, selectedFromIDs(s.cfg.Locations, s.cfg.ManageFilesLocationIDs), locationNumbers(s.cfg.Locations))
 	mirrorWarning := widget.NewLabel("")
 	mirrorWarning.Wrapping = fyne.TextWrapWord
 
@@ -180,12 +180,12 @@ func showManageFiles(s *state) {
 		b.lister = func(gen int, relPath string) {
 			locs := selectedLocs()
 			if len(locs) == 0 {
-				b.listingDone(gen, nil)
+				b.listingDone(gen, nil, nil)
 				b.setBreadcrumbOverride("Select a Location above first.")
 				return
 			}
 			go func() {
-				result, notFound, isFile, err := syncengine.ListChildrenUnion(context.Background(), locs, relPath)
+				result, notFound, isFile, pres, err := syncengine.ListChildrenUnion(context.Background(), locs, relPath)
 				fyne.Do(func() {
 					if err != nil {
 						// Every selected Location failed with something other
@@ -201,12 +201,12 @@ func showManageFiles(s *state) {
 						// yet (naming a new "To" destination) or that names a
 						// bare file (which has no children) is expected, not
 						// an error - show it empty.
-						if b.listingDone(gen, nil) && b.allowCreate && notFound {
+						if b.listingDone(gen, nil, nil) && b.allowCreate && notFound {
 							b.setBreadcrumbNote(" (new folder)")
 						}
 						return
 					}
-					b.listingDone(gen, result)
+					b.listingDone(gen, result, pres)
 				})
 			}()
 		}

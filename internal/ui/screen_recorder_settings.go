@@ -135,9 +135,9 @@ func showSyncRecorders(s *state) {
 	// stage from). uploadGroup offers cloud Locations, uploaded to only
 	// after the local copy completes.
 	destGroup := newToggleGroup(locationNamesByKind(s.cfg.Locations, syncengine.LocationLocal),
-		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs))
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs), locationNumbers(s.cfg.Locations))
 	uploadGroup := newToggleGroup(locationNamesByKind(s.cfg.Locations, syncengine.LocationRemote),
-		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs))
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs), locationNumbers(s.cfg.Locations))
 
 	// browser replaces free-typed experiment name + subpath entry: its
 	// root level *is* the experiment picker (each top-level folder is an

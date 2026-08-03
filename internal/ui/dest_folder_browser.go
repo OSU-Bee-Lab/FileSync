@@ -64,6 +64,15 @@ type destFolderBrowser struct {
 	// directory.
 	selectFiles bool
 
+	// selectDirs is selectFiles' directory analogue: a directory row
+	// becomes tappable-to-select (via the same selectFile/selectedFiles
+	// machinery, name and all - directories and files never collide within
+	// one folder listing) instead of descending into it. For Sync
+	// Experiments' All-Way picker, where the browser only ever shows one
+	// level (the union of top-level experiment directories) and tapping
+	// one should pick it, not browse inside it.
+	selectDirs bool
+
 	// showFileSize appends a "(size)" suffix to each file row - on for
 	// Manage Files (where the size helps confirm the right file/folder to
 	// move or delete), off elsewhere.
@@ -134,6 +143,12 @@ type destFolderBrowser struct {
 	list       *widget.List
 	entries    []syncengine.Entry
 
+	// presence is entries' per-Location membership, keyed by name, one bool
+	// per b.locs in order - built alongside entries by every listing path
+	// (reload's Union* calls, and Manage Files' custom lister) and read by
+	// updateRow to drive each row's presenceIndicator dots.
+	presence map[string][]bool
+
 	// addingFolder is whether the trailing list row is in text-entry
 	// mode. addFolderText mirrors that entry's content - kept on the
 	// browser rather than read back off the (pooled, possibly
@@ -165,7 +180,7 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
 			entry.Hide()
-			return audioRow(container.NewStack(widget.NewButton("", nil), entry))
+			return audioRow(container.NewStack(widget.NewButton("", nil), entry), newPresenceIndicator())
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) { b.updateRow(id, obj) },
 	)
@@ -231,6 +246,21 @@ func (b *destFolderBrowser) ClearSelectedFiles() {
 	b.list.Refresh()
 }
 
+// SetSelectedFiles preloads the multiSelect selection from a caller's own
+// cached names (e.g. Sync Experiments restoring a prior pick across a mode
+// toggle's screen rebuild) - names are bare, as if picked at relPath "".
+func (b *destFolderBrowser) SetSelectedFiles(names []string) {
+	if len(names) == 0 {
+		b.selectedFiles = nil
+		return
+	}
+	b.selectedFiles = make(map[string]bool, len(names))
+	for _, n := range names {
+		b.selectedFiles[joinRel(b.relPath, n)] = true
+	}
+	b.list.Refresh()
+}
+
 // NavigateTo re-anchors the browser at relPath and re-lists it, as if the
 // user had browsed there - used when an external field (Manage Files' typed
 // From/To entry, or a target switch) is the source of truth for where to
@@ -282,6 +312,19 @@ func (b *destFolderBrowser) selectFile(name string) {
 func (b *destFolderBrowser) SetLocations(locs []syncengine.Location) {
 	b.locs = locs
 	b.selectedFiles = nil
+	b.closeAddFolder()
+	b.reload()
+	b.notifyPathChanged()
+}
+
+// SetLocationsKeepSelection is SetLocations but preserves the current
+// multiSelect selection across the Location-set change, for a picker (Sync
+// Experiments' All-Way flow) where toggling which Locations to look at
+// shouldn't discard experiments already chosen - unlike Pull Files/Recorder
+// Settings, where changing the browsed Location makes any prior file
+// selection meaningless.
+func (b *destFolderBrowser) SetLocationsKeepSelection(locs []syncengine.Location) {
+	b.locs = locs
 	b.closeAddFolder()
 	b.reload()
 	b.notifyPathChanged()
@@ -361,11 +404,19 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 	btn := stack.Objects[0].(*widget.Button)
 	entry := stack.Objects[1].(*widget.Entry)
 	audioControls := audioControlsFrom(row)
+	presence := presenceFrom(row)
 
 	if id < len(b.entries) {
 		e := b.entries[id]
 		entry.Hide()
 		btn.Show()
+		// With one Location selected, presence is trivially "everywhere it
+		// exists" for every row - not worth a checkmark on every line.
+		if len(b.locs) > 1 {
+			presence.Update(b.presence[e.Name])
+		} else {
+			presence.Update(nil)
+		}
 		// Every file row offers playback if its format is one a driver
 		// recognizes, whether or not the row is selectable - hearing the
 		// announcement at the start of a recording is useful for confirming
@@ -375,7 +426,21 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 		} else {
 			audioControls.update(b, b.locs, joinRel(b.relPath, e.Name), e.Name)
 		}
-		if e.IsDir {
+		if e.IsDir && b.selectDirs {
+			name := e.Name
+			selected := b.selectedFile == name
+			if b.multiSelect {
+				selected = b.selectedFiles[joinRel(b.relPath, name)]
+			}
+			if selected {
+				btn.Importance = widget.HighImportance
+				btn.SetText("✅ " + name)
+			} else {
+				btn.Importance = widget.MediumImportance
+				btn.SetText("\U0001F4C1 " + name)
+			}
+			btn.OnTapped = func() { b.selectFile(name) }
+		} else if e.IsDir {
 			btn.Importance = widget.MediumImportance
 			btn.SetText("\U0001F4C1 " + e.Name)
 			btn.OnTapped = func() { b.descend(e.Name) }
@@ -405,6 +470,7 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 
 	// Trailing "+ Add Folder" row.
 	audioControls.hide()
+	presence.Update(nil)
 	if b.addingFolder {
 		btn.Hide()
 		entry.Show()
@@ -485,11 +551,12 @@ func (b *destFolderBrowser) updateBackBtn() {
 // dropping it (and returning false) if a newer reload has superseded it. A
 // nil entries slice is a valid empty listing. Hides the loading bar. Must be
 // called on the UI goroutine.
-func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry) bool {
+func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pres map[string][]bool) bool {
 	if gen != b.scanGen {
 		return false
 	}
 	b.entries = entries
+	b.presence = pres
 	b.list.Refresh()
 	b.loading.Hide()
 	return true
@@ -521,6 +588,7 @@ func (b *destFolderBrowser) reload() {
 	// A custom lister (Manage Files) owns listing entirely from here.
 	if b.lister != nil {
 		b.entries = nil
+		b.presence = nil
 		b.list.Refresh()
 		b.statusLbl.SetText("")
 		b.loading.Show()
@@ -533,6 +601,7 @@ func (b *destFolderBrowser) reload() {
 
 	if len(locs) == 0 {
 		b.entries = nil
+		b.presence = nil
 		b.list.Refresh()
 		b.statusLbl.SetText("")
 		b.loading.Hide()
@@ -540,29 +609,31 @@ func (b *destFolderBrowser) reload() {
 	}
 
 	b.entries = nil
+	b.presence = nil
 	b.list.Refresh()
 	b.statusLbl.SetText("")
 	b.loading.Show()
 	go func() {
 		ctx := context.Background()
-		onUpdate := func(entries []syncengine.Entry) {
+		onUpdate := func(entries []syncengine.Entry, pres map[string][]bool) {
 			fyne.Do(func() {
 				if gen != b.scanGen {
 					return
 				}
 				b.entries = entries
+				b.presence = pres
 				b.list.Refresh()
 			})
 		}
 		if b.showFiles {
 			syncengine.UnionChildEntriesStream(ctx, locs, relPath, onUpdate)
 		} else {
-			syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string) {
+			syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string, pres map[string][]bool) {
 				entries := make([]syncengine.Entry, len(names))
 				for i, n := range names {
 					entries[i] = syncengine.Entry{Name: n, IsDir: true}
 				}
-				onUpdate(entries)
+				onUpdate(entries, pres)
 			})
 		}
 		fyne.Do(func() {
