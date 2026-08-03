@@ -124,6 +124,53 @@ func TestExistingConfigsGetHTTP2Disabled(t *testing.T) {
 	}
 }
 
+// TestLoadBackfillsJunkExcludeRules guards a config saved before the
+// junk-filter feature existed: excludeRules is absent (unmarshals to nil),
+// and Load must seed it with the default junk rules exactly once, recording
+// that via JunkFilterDefaultsApplied so it never re-adds them after a user
+// deliberately empties the list.
+func TestLoadBackfillsJunkExcludeRules(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	path, err := Path()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"checkers":8,"transfers":4}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.DefaultFilter.ExcludeRules) != len(syncengine.DefaultJunkExcludeRules()) {
+		t.Fatalf("expected %d default exclude rules backfilled, got %d",
+			len(syncengine.DefaultJunkExcludeRules()), len(cfg.DefaultFilter.ExcludeRules))
+	}
+	if !cfg.JunkFilterDefaultsApplied {
+		t.Fatal("expected JunkFilterDefaultsApplied to be set after backfill")
+	}
+
+	// A user who deliberately empties the list (and saves) must not have it
+	// silently repopulated on the next load.
+	cfg.DefaultFilter.ExcludeRules = nil
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reloaded.DefaultFilter.ExcludeRules) != 0 {
+		t.Fatalf("expected deliberately emptied exclude rules to stay empty, got %v", reloaded.DefaultFilter.ExcludeRules)
+	}
+}
+
 func TestPathIsUnderFileSyncSubdir(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", "")

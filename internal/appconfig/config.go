@@ -83,6 +83,13 @@ type Config struct {
 	// SyncOneWayLocationIDs persists the Sync Locations screen's
 	// last-selected destination Locations for One Way Sync across restarts.
 	SyncOneWayLocationIDs []string `json:"syncOneWayLocationIds,omitempty"`
+	// JunkFilterDefaultsApplied records whether DefaultFilter.ExcludeRules
+	// has already been seeded with syncengine.DefaultJunkExcludeRules(). An
+	// empty ExcludeRules is a legitimate user choice (they deleted every
+	// rule in Settings), so unlike Checkers/Transfers this can't be
+	// backfilled just by checking for a zero value - this flag is the only
+	// way to tell "never seeded" apart from "deliberately emptied".
+	JunkFilterDefaultsApplied bool `json:"junkFilterDefaultsApplied,omitempty"`
 }
 
 // DefaultTimestampToleranceMinutes is the fallback timestamp tolerance used
@@ -97,7 +104,8 @@ const DefaultTimestampToleranceMinutes = 60
 // machine, before any Locations have been added.
 func Default() Config {
 	return Config{
-		DefaultFilter: syncengine.DefaultFilterSettings(),
+		DefaultFilter:             syncengine.DefaultFilterSettings(),
+		JunkFilterDefaultsApplied: true,
 		RecorderSettings: RecorderSettings{
 			AutoDeleteAfterVerify:     true,
 			BatchUpload:               true,
@@ -161,6 +169,13 @@ func Load() (Config, error) {
 	// too - the same backfill Checkers/Transfers get above.
 	if cfg.RecorderSettings.TimestampToleranceMinutes <= 0 {
 		cfg.RecorderSettings.TimestampToleranceMinutes = DefaultTimestampToleranceMinutes
+	}
+	// A config saved before the junk-filter feature existed has never had
+	// its ExcludeRules seeded - do that once, the same way the fields above
+	// backfill defaults for pre-existing configs.
+	if !cfg.JunkFilterDefaultsApplied {
+		cfg.DefaultFilter.ExcludeRules = append(syncengine.DefaultJunkExcludeRules(), cfg.DefaultFilter.ExcludeRules...)
+		cfg.JunkFilterDefaultsApplied = true
 	}
 	return cfg, nil
 }

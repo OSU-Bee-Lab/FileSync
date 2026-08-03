@@ -3,9 +3,11 @@ package ui
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -142,6 +144,30 @@ func showSettings(s *state) {
 		"straight away, and Cancel always works.")
 	retriesHint.Wrapping = fyne.TextWrapWord
 
+	excludeRows := container.NewVBox()
+	rebuildExcludeRows(s, excludeRows)
+
+	excludeHint := widget.NewLabel("Files matching an enabled pattern below are never scanned or copied. " +
+		"Patterns are gitignore-style: a name with no \"/\" (e.g. \".DS_Store\") matches at any depth; " +
+		"\"*\" and \"?\" wildcards are supported (e.g. \"._*\"). Uncheck a row to keep it without applying it; " +
+		"the trash icon removes it.")
+	excludeHint.Wrapping = fyne.TextWrapWord
+
+	addPatternEntry := widget.NewEntry()
+	addPatternEntry.SetPlaceHolder("e.g. *.tmp")
+	addPattern := func() {
+		pattern := strings.TrimSpace(addPatternEntry.Text)
+		if pattern == "" {
+			return
+		}
+		s.cfg.DefaultFilter.ExcludeRules = append(s.cfg.DefaultFilter.ExcludeRules, syncengine.ExcludeRule{Pattern: pattern, Enabled: true})
+		s.saveConfig()
+		addPatternEntry.SetText("")
+		rebuildExcludeRows(s, excludeRows)
+	}
+	addPatternEntry.OnSubmitted = func(string) { addPattern() }
+	addPatternBtn := widget.NewButtonWithIcon("Add", theme.ContentAddIcon(), addPattern)
+
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	scroll := container.NewVScroll(container.NewVBox(
@@ -158,6 +184,9 @@ func showSettings(s *state) {
 		widget.NewLabel("Retries"), retriesForever, retriesEntry, retriesHint,
 		widget.NewSeparator(),
 		widget.NewLabel("Connections"), http2Check, http2Hint,
+		widget.NewSeparator(),
+		widget.NewLabel("Excluded files/folders"), excludeHint, excludeRows,
+		container.NewBorder(nil, nil, nil, addPatternBtn, addPatternEntry),
 	))
 	fixEntryScrolling(scroll.Content, scroll)
 
@@ -168,4 +197,28 @@ func showSettings(s *state) {
 		scroll,
 	)
 	s.setContent(container.NewPadded(content))
+}
+
+// rebuildExcludeRows repopulates rows with one line per
+// s.cfg.DefaultFilter.ExcludeRules entry - a checkbox (enabled state) and a
+// delete button - and is called again after every toggle/add/delete so the
+// list always reflects the current config.
+func rebuildExcludeRows(s *state, rows *fyne.Container) {
+	rows.RemoveAll()
+	for i, rule := range s.cfg.DefaultFilter.ExcludeRules {
+		i := i
+		check := widget.NewCheck(rule.Pattern, func(enabled bool) {
+			s.cfg.DefaultFilter.ExcludeRules[i].Enabled = enabled
+			s.saveConfig()
+		})
+		check.SetChecked(rule.Enabled)
+		deleteBtn := widget.NewButtonWithIcon("", theme.DeleteIcon(), func() {
+			rules := s.cfg.DefaultFilter.ExcludeRules
+			s.cfg.DefaultFilter.ExcludeRules = append(append([]syncengine.ExcludeRule{}, rules[:i]...), rules[i+1:]...)
+			s.saveConfig()
+			rebuildExcludeRows(s, rows)
+		})
+		rows.Add(container.NewBorder(nil, nil, nil, deleteBtn, check))
+	}
+	rows.Refresh()
 }
