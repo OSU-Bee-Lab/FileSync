@@ -747,7 +747,7 @@ func (sc *recorderSyncScreen) onVolumeDetached(vol recorder.Volume) {
 
 func (sc *recorderSyncScreen) endSync() {
 	sc.cancelWatch()
-	showSyncExperiments(sc.s)
+	showHome(sc.s)
 }
 
 // syncingCount returns how many rows are actively mid-transfer.
