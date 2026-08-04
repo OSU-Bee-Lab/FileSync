@@ -489,6 +489,35 @@ func (sc *recorderSyncScreen) recordBatchUploadPaths(recorderID string, files ma
 	}
 }
 
+// renameBatchUploadPaths mirrors, for sc.batchUploadPaths' keys, exactly the
+// renames recorder.ApplyTimestampFix is about to make on disk for this
+// recorder: same parser, same files, same correct func, same
+// ParseTimestamp/RenameForTimestamp pair. Without this, a batch upload's
+// allow-list keeps the pre-correction filenames while the scan that follows
+// sees the post-correction ones on disk, so runBatchUploadScan's
+// allowedPaths filter (screen_recorder_sync.go, filtering on f.RelPath)
+// matches nothing and this recorder's files silently drop out of the batch
+// upload.
+func (sc *recorderSyncScreen) renameBatchUploadPaths(recorderID string, parser recorder.TimestampParser, sourceFiles []recorder.SourceFile, correct func(time.Time) time.Time) {
+	prefix := append(append([]string{}, splitSubpathUI(sc.params.subpath)...), recorderID)
+	for _, f := range sourceFiles {
+		t, ok := parser.ParseTimestamp(f.DestRelPath)
+		if !ok {
+			continue
+		}
+		newRel := parser.RenameForTimestamp(f.DestRelPath, correct(t))
+		if newRel == f.DestRelPath {
+			continue
+		}
+		oldKey := filepath.ToSlash(filepath.Join(append(append([]string{}, prefix...), f.DestRelPath)...))
+		newKey := filepath.ToSlash(filepath.Join(append(append([]string{}, prefix...), newRel)...))
+		if sc.batchUploadPaths[oldKey] {
+			delete(sc.batchUploadPaths, oldKey)
+			sc.batchUploadPaths[newKey] = true
+		}
+	}
+}
+
 func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 	row.started = true
 	row.status = jobSyncing
@@ -662,6 +691,9 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 			// files are always local here - rather than Manage Files' rclone
 			// rename across arbitrary Locations.
 			apply: func(correct func(time.Time) time.Time) error {
+				if sc.params.batchUpload {
+					sc.renameBatchUploadPaths(e.row.id, parser, sourceFiles, correct)
+				}
 				return recorder.ApplyTimestampFix(destDirs, parser, sourceFiles, correct)
 			},
 		})
