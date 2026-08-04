@@ -263,6 +263,11 @@ type timestampReviewHost struct {
 	s   *state
 	win fyne.Window
 
+	// continueLabel/exitLabel must name the same destination twice, differing
+	// only in whether the corrections are applied ("Apply & End Sync" vs "End
+	// Without Applying") - both buttons go to the same next screen, so a label
+	// pair that hides that (the old "End Sync"/"Exit Sync") reads as two
+	// different outcomes.
 	continueLabel string
 	onContinue    func()
 
@@ -337,23 +342,30 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	continueBtn.Importance = widget.HighImportance
 	continueBtn.OnTapped = tr.applyAndContinue
 
-	// exitBtn mirrors the caller's own escape hatch (Sync Recorders' Exit
-	// Sync, Manage Files' Cancel): it leaves without applying any of the
-	// corrections being reviewed here, same as bypassing the check
-	// entirely - it deliberately calls host.onExit directly, not
-	// applyAndContinue or host.onContinue, neither of which it wants to run.
-	// Warns first, since it's easy to tap expecting the usual "leave"
-	// behavior without registering that anything typed into the review is
-	// about to be silently discarded.
+	// exitBtn leaves without applying any of the corrections being reviewed
+	// here, same as bypassing the check entirely - it deliberately calls
+	// host.onExit directly, not applyAndContinue or host.onContinue, neither
+	// of which it wants to run. Warns first, since it's easy to tap without
+	// registering that anything typed into the review is about to be
+	// discarded.
+	//
+	// Amber, not red: both buttons on this screen land in the same place
+	// (Sync Recorders ends the session either way, Manage Files returns to
+	// its setup screen either way), and the only difference between them is
+	// whether the corrections are applied. Styling that difference as
+	// blue-vs-red would read as "safe vs destructive" when nothing here
+	// deletes anything - so the labels carry the distinction (the host
+	// supplies both, and must phrase them as the same destination with and
+	// without the corrections) and the color just marks discarded work.
 	exitBtn := widget.NewButton(host.exitLabel, func() {
-		showDangerConfirm("Corrections not applied", host.exitWarning,
+		showCautionConfirm("Corrections not applied", host.exitWarning,
 			host.exitLabel, "Return to Review", func(ok bool) {
 				if ok {
 					host.onExit()
 				}
 			}, host.win)
 	})
-	exitBtn.Importance = widget.DangerImportance
+	exitBtn.Importance = widget.WarningImportance
 
 	header := widget.NewLabelWithStyle("Review Recorder Timestamps", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	sub := widget.NewLabel("Each recorder's clock is assumed wrong (or right) for its entire session - adjusting one applies the same correction to every file from that recorder.")
@@ -372,7 +384,7 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 
 	content := container.NewBorder(
 		container.NewVBox(header, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
-		container.NewHBox(continueBtn, exitBtn),
+		actionRow(exitBtn, continueBtn),
 		nil, nil,
 		split,
 	)

@@ -417,7 +417,7 @@ func showManageFiles(s *state) {
 		fromPathError,
 		toForm,
 		deleteForm,
-		container.NewHBox(previewBtn, backBtn),
+		actionRow(backBtn, previewBtn),
 	)
 
 	// browserSlot stacks both browsers; only the active target's is shown
@@ -544,10 +544,10 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	showTimestampReview(timestampReviewHost{
 		s:             s,
 		win:           s.win,
-		continueLabel: "Apply",
+		continueLabel: "Apply Corrections",
 		onContinue:    func() { showManageFiles(s) },
-		exitLabel:     "Cancel",
-		exitWarning:   "Cancelling now will not apply any timestamp corrections - every recorder's files keep their original names.",
+		exitLabel:     "Back Without Applying",
+		exitWarning:   "Going back now will not apply any timestamp corrections - every recorder's files keep their original names.",
 		onExit:        func() { showManageFiles(s) },
 	}, reviewRows, tolerance)
 }
@@ -888,8 +888,18 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 	}
 
 	backBtn := widget.NewButton("Back", func() { showManageFiles(s) })
-	applyBtn := widget.NewButton("Apply", nil)
-	applyBtn.Importance = widget.DangerImportance
+	// Red is reserved for the delete, which really does destroy data; a
+	// move/merge is the ordinary affirmative action of this screen and is
+	// styled like every other screen's - and both say which operation they're
+	// about to run rather than a bare "Apply", since this screen is reached
+	// for either. The ellipsis on Delete marks the irreversible-action confirm
+	// that follows.
+	applyBtn := widget.NewButton("Apply Move", nil)
+	applyBtn.Importance = widget.HighImportance
+	if req.op == manageOpDelete {
+		applyBtn.SetText("Delete Files…")
+		applyBtn.Importance = widget.DangerImportance
+	}
 	applyBtn.Disable()
 
 	// managePlanCompute is the pure-data result of planning one Location's
@@ -1051,7 +1061,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 
 	// buttonRow holds Back/Apply until the operation finishes, then gets
 	// swapped for a single Done button (see applyBtn.OnTapped below).
-	buttonRow := container.NewHBox(backBtn, applyBtn)
+	buttonRow := actionRow(backBtn, applyBtn)
 
 	applyBtn.OnTapped = func() {
 		run := func() {

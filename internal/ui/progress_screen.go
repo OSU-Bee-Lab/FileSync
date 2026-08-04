@@ -410,17 +410,19 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	})
 
 	// Batch Upload never returns to a prior screen - like End Sync, onBack
-	// here ends the recorder-sync session outright - so its Back button is
-	// labeled "Exit Sync" to reflect that.
+	// here ends the recorder-sync session outright, leaving the offloaded
+	// files unuploaded - so its Back button says so, in amber: it's only
+	// enabled while nothing is running (see applyPhaseChrome), so it
+	// interrupts nothing and deletes nothing.
 	backLabel := "Back"
 	if ps.extras.syncingTitle == "Batch Upload" {
-		backLabel = "Exit Sync"
+		backLabel = "Exit Without Uploading"
 	}
 	ps.backBtn = widget.NewButton(backLabel, ps.onBack)
-	if backLabel == "Exit Sync" {
-		ps.backBtn.Importance = widget.DangerImportance
-	} else {
+	if backLabel == "Back" {
 		ps.backBtn.Importance = widget.MediumImportance
+	} else {
+		ps.backBtn.Importance = widget.WarningImportance
 	}
 
 	ps.syncBtn = widget.NewButton("Sync", func() {
@@ -467,7 +469,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 
 	content := container.NewBorder(
 		header,
-		container.NewHBox(ps.cancelBtn, ps.scanBtn, ps.resolveBtn, ps.retryBtn, ps.syncBtn, ps.backBtn),
+		actionRow(ps.backBtn, ps.cancelBtn, ps.scanBtn, ps.resolveBtn, ps.retryBtn, ps.syncBtn),
 		nil, nil,
 		columns,
 	)

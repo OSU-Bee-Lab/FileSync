@@ -132,13 +132,16 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 	go sc.watchVolumes()
 
 	sc.cancelBtn = widget.NewButton("End Sync", sc.confirmEndSync)
-	// Exit Sync deliberately calls doConfirmEndSync directly, not
+	// exitBtn deliberately calls doConfirmEndSync directly, not
 	// confirmEndSync - it's the escape hatch off the idle screen without
 	// committing to Batch Upload, so it should just end the session, not
 	// also run the timestamp check (that's what Check Times/Batch Upload
 	// are for).
-	sc.exitBtn = widget.NewButton("Exit Sync", sc.doConfirmEndSync)
-	sc.exitBtn.Importance = widget.DangerImportance
+	// Amber, not red: it's only ever shown while everything is idle in
+	// batch-upload mode (see refreshCancelBtn), so it interrupts nothing and
+	// deletes nothing - it just leaves offloaded files sitting unuploaded.
+	sc.exitBtn = widget.NewButton("Exit Without Uploading", sc.doConfirmEndSync)
+	sc.exitBtn.Importance = widget.WarningImportance
 	sc.exitBtn.Hide()
 	sc.refreshCancelBtn()
 
@@ -174,7 +177,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 			widget.NewLabelWithStyle("Syncing to: "+strings.Join(identParts, "/"), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewSeparator(),
 		),
-		container.NewHBox(sc.cancelBtn, sc.exitBtn),
+		actionRow(sc.exitBtn, sc.cancelBtn),
 		nil, nil,
 		main,
 	)
@@ -626,13 +629,16 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 
 	reviewRows := buildTimestampReviewRows(inputs, sc.params.timestampTolerance)
 
-	continueLabel := "End Sync"
+	// Without batch upload both buttons land in the same place - the session
+	// ends either way - so they're labeled as that one destination with and
+	// without the corrections, rather than as an "end" and an "exit" that
+	// sound like different outcomes. With batch upload they genuinely differ
+	// (continue uploads, exit doesn't), and the labels say so.
+	continueLabel, exitLabel := "Apply & End Sync", "End Without Applying"
+	exitWarning := "Ending now will not apply any timestamp corrections - every recorder's files keep their original names."
 	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
-		continueLabel = "Batch Upload"
-	}
-	exitWarning := "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names."
-	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
-		exitWarning += " Nothing will be uploaded to the remote destination either."
+		continueLabel, exitLabel = "Apply & Upload", "Exit Without Uploading"
+		exitWarning = "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names. Nothing will be uploaded to the remote destination either."
 	}
 
 	// Leaving Screen 2 for the review screen now, same as the Batch Upload
@@ -645,7 +651,7 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 		win:           sc.s.win,
 		continueLabel: continueLabel,
 		onContinue:    next,
-		exitLabel:     "Exit Sync",
+		exitLabel:     exitLabel,
 		exitWarning:   exitWarning,
 		onExit:        sc.doConfirmEndSync,
 		afterFix: func(row timestampReviewRow, delta time.Duration) {

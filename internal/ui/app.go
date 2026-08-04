@@ -291,17 +291,21 @@ func Run() {
 		msg := widget.NewLabel("An instance of FileSync is already open. Running multiple instances of FileSync will cause issues if multiple syncs are run simultaneously. Running another instance is not recommended.")
 		msg.Wrapping = fyne.TextWrapWord
 
+		// Exit is the recommended way out of this dialog, so it gets the
+		// primary styling and the rightmost slot; Continue is the discouraged
+		// escape hatch and is styled as the hazard it is (two instances
+		// copying to the same destination can corrupt each other's work).
 		closeBtn := widget.NewButton("Exit", func() { w.Close() })
-		closeBtn.Importance = widget.LowImportance
+		closeBtn.Importance = widget.HighImportance
 
-		continueBtn := widget.NewButton("Continue", func() {
+		continueBtn := widget.NewButton("Open Anyway", func() {
 			startApp()
 		})
 		continueBtn.Importance = widget.DangerImportance
 
 		content := container.NewVBox(
 			msg,
-			container.NewHBox(layout.NewSpacer(), closeBtn, continueBtn, layout.NewSpacer()),
+			container.NewHBox(layout.NewSpacer(), actionRow(continueBtn, closeBtn), layout.NewSpacer()),
 		)
 		w.Resize(fyne.NewSize(420, 200))
 		w.SetContent(content)
