@@ -280,24 +280,35 @@ func (sc *recorderSyncScreen) refreshRow(rr *rowRenderer) {
 	}
 }
 
-// sortRows normally puts finished (jobDone) recorders in the top rows,
-// then orders the rest by descending progress (closest to finishing next),
-// keeping relative order stable among otherwise-equal rows. When
-// sortByPlugOrder is set it does nothing, leaving rows in attach order -
-// new rows are always appended to rows in attach order, and reconnects
-// update the existing row in place, so leaving rows untouched here is
-// enough to preserve that order.
+// sortRows normally puts disconnected (jobDisconnected) recorders in the
+// very top rows - they need the user's attention above all else - then
+// finished (jobDone) recorders, then orders the rest by descending
+// progress (closest to finishing next), keeping relative order stable
+// among otherwise-equal rows. When sortByPlugOrder is set it does nothing,
+// leaving rows in attach order - new rows are always appended to rows in
+// attach order, and reconnects update the existing row in place, so
+// leaving rows untouched here is enough to preserve that order.
 func (sc *recorderSyncScreen) sortRows() {
 	if sc.sortByPlugOrder {
 		return
 	}
-	sort.SliceStable(sc.rows, func(i, j int) bool {
-		iDone := sc.rows[i].status == jobDone
-		jDone := sc.rows[j].status == jobDone
-		if iDone != jDone {
-			return iDone
+	rank := func(st recorderJobStatus) int {
+		switch st {
+		case jobDisconnected:
+			return 0
+		case jobDone:
+			return 1
+		default:
+			return 2
 		}
-		if iDone {
+	}
+	sort.SliceStable(sc.rows, func(i, j int) bool {
+		iRank := rank(sc.rows[i].status)
+		jRank := rank(sc.rows[j].status)
+		if iRank != jRank {
+			return iRank < jRank
+		}
+		if iRank != 2 {
 			return false
 		}
 		return sc.rows[i].progress > sc.rows[j].progress
