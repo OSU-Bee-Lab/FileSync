@@ -39,8 +39,9 @@ func stopAudio() {
 	}
 }
 
-// audioRefreshers are the browsers whose rows currently show transport
-// controls, and audioRefreshGen is bumped whenever the screen is replaced so
+// audioRefreshers are the screen's subscribers to playback state changes -
+// one callback per browser/screen that shows transport controls, not one per
+// row - and audioRefreshGen is bumped whenever the screen is replaced so
 // browsers left behind on the old screen re-register (or don't) rather than
 // accumulating for the life of the session.
 //
@@ -50,20 +51,30 @@ func stopAudio() {
 // actually being played from sat frozen on its play button. That was the whole
 // of the "nothing updates" bug.
 //
-// Only ever touched on the UI goroutine: browsers register as their rows
+// Only ever touched on the UI goroutine: subscribers register as their rows
 // render, and the fan-out runs inside fyne.Do.
 var (
-	audioRefreshers []*destFolderBrowser
+	audioRefreshers []func()
 	audioRefreshGen int
 )
 
-// clearAudioRefreshers drops the current screen's browsers. Called from
-// setContent, which is also where playback stops - browsers register when
+// clearAudioRefreshers drops the current screen's subscribers. Called from
+// setContent, which is also where playback stops - subscribers register when
 // their rows render, which is after the new content is installed, so this
-// can't drop the incoming screen's browser.
+// can't drop the incoming screen's own registration.
 func clearAudioRefreshers() {
 	audioRefreshers = nil
 	audioRefreshGen++
+}
+
+// registerAudioRefreshFunc subscribes fn to playback state changes - the
+// generic form behind registerAudioRefresh (destFolderBrowser's per-browser,
+// dedup'd registration) and used directly by screens that show playable rows
+// outside a destFolderBrowser (e.g. the timestamp review screen), where one
+// registration for the whole screen, made once, is enough.
+func registerAudioRefreshFunc(fn func()) {
+	audioRefreshers = append(audioRefreshers, fn)
+	audioPlayer().SetOnChange(func() { fyne.Do(refreshAudioRows) })
 }
 
 // registerAudioRefresh subscribes b's rows to playback state changes. Called
@@ -75,18 +86,19 @@ func registerAudioRefresh(b *destFolderBrowser) {
 	}
 	b.audioRegistered = true
 	b.audioRefreshGen = audioRefreshGen
-	audioRefreshers = append(audioRefreshers, b)
-	audioPlayer().SetOnChange(func() { fyne.Do(refreshAudioRows) })
-}
-
-// refreshAudioRows repaints the rows of every browser on the current screen.
-func refreshAudioRows() {
-	st := audioPlayer().State()
-	for _, b := range audioRefreshers {
+	registerAudioRefreshFunc(func() {
+		st := audioPlayer().State()
 		if st.Err != nil {
 			b.statusLbl.SetText("Couldn't play that file. " + classifyError(st.Err).String())
 		}
 		b.list.Refresh()
+	})
+}
+
+// refreshAudioRows runs every registered subscriber's refresh callback.
+func refreshAudioRows() {
+	for _, fn := range audioRefreshers {
+		fn()
 	}
 }
 
@@ -213,14 +225,20 @@ func (c *audioRowControls) hide() {
 }
 
 // update points the controls at the file at relPath (streamed from locs) and
-// renders them against the current playback state. owner is subscribed to
-// playback changes the first time it renders a playable row.
-func (c *audioRowControls) update(owner *destFolderBrowser, locs []syncengine.Location, relPath, filename string) {
+// renders them against the current playback state. register, when non-nil,
+// is called to (re)subscribe to playback changes the first time this row
+// renders as playable - destFolderBrowser passes a closure that registers
+// itself (deduped per browser, see registerAudioRefresh); callers that
+// already registered once for the whole screen (e.g. the timestamp review
+// screen, see registerAudioRefreshFunc) pass nil.
+func (c *audioRowControls) update(register func(), locs []syncengine.Location, relPath, filename string) {
 	if !audio.CanPlay(filename) || len(locs) == 0 {
 		c.hide()
 		return
 	}
-	registerAudioRefresh(owner)
+	if register != nil {
+		register()
+	}
 
 	p := audioPlayer()
 	st := p.State()

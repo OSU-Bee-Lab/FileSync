@@ -86,6 +86,12 @@ type TimestampIssue struct {
 	// was made: a lone recorder (no otherTimes) has nothing to compare
 	// against.
 	MinutesFromMedian int
+	// RecordedLater is true when this recorder's earliest file sits later in
+	// the day than the other recorders' median start (circularly), false
+	// when earlier - only meaningful when MinutesFromMedian >= 0. Lets a
+	// caller describe a mismatch as "earlier"/"later" rather than a bare,
+	// directionless offset.
+	RecordedLater bool
 }
 
 // ConsensusDate returns the most common (year, month, day) among starts -
@@ -164,6 +170,20 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 		return nil
 	}
 
+	return evaluateTimestamp(earliestRel, earliest, consensusYear, consensusMonth, consensusDay, otherTimes, tolerance)
+}
+
+// EvaluateTimestamp is CheckRecorderTimestamp's comparison on its own,
+// taking a candidate recorded time directly instead of finding it as the
+// earliest of a SourceFile list - used to live-preview how a not-yet
+// -confirmed edited start time would be judged against the other
+// recorders (e.g. the review screen's "New start time" override), without
+// needing a synthetic SourceFile to parse it back out of.
+func EvaluateTimestamp(recorded time.Time, consensusYear int, consensusMonth time.Month, consensusDay int, otherTimes []time.Time, tolerance time.Duration) *TimestampIssue {
+	return evaluateTimestamp("", recorded, consensusYear, consensusMonth, consensusDay, otherTimes, tolerance)
+}
+
+func evaluateTimestamp(earliestRel string, earliest time.Time, consensusYear int, consensusMonth time.Month, consensusDay int, otherTimes []time.Time, tolerance time.Duration) *TimestampIssue {
 	// issue seeds every return with the identifying fields and the consensus
 	// date the caller needs to describe a mismatch; MinutesFromMedian starts
 	// at -1 and is only set once the time-of-day comparison actually runs.
@@ -185,16 +205,22 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 	own := minutesSinceMidnight(earliest)
 	dateMatches := earliest.Year() == consensusYear && earliest.Month() == consensusMonth && earliest.Day() == consensusDay
 
-	// todDist is the circular distance between two times-of-day (minutes),
-	// so 23:59 and 00:01 read as 2 min apart, not 1438, and a ±12 h shift
-	// always reads as the maximal 720.
+	// signedTodDist is the circular signed distance from b to a (minutes):
+	// positive when a is later in the day than b, negative when earlier, so
+	// 23:59 and 00:01 read as 2 min apart (not 1438) and a ±12 h shift always
+	// reads as the maximal magnitude, 720 - the sign is what lets a caller
+	// describe a mismatch as "earlier"/"later" instead of a bare offset.
+	signedTodDist := func(a, b int) int {
+		d := (a - b + 1440) % 1440
+		if d > 720 {
+			d -= 1440
+		}
+		return d
+	}
 	todDist := func(a, b int) int {
-		d := a - b
+		d := signedTodDist(a, b)
 		if d < 0 {
 			d = -d
-		}
-		if d > 720 {
-			d = 1440 - d
 		}
 		return d
 	}
@@ -229,12 +255,14 @@ func CheckRecorderTimestamp(files []SourceFile, parser TimestampParser, consensu
 		}
 	}
 
-	// finish stamps MinutesFromMedian (distance to the median start-of-day,
-	// or -1 when there was no median) onto every returned issue.
+	// finish stamps MinutesFromMedian and RecordedLater (distance and
+	// direction from the median start-of-day, or -1/false when there was no
+	// median) onto every returned issue.
 	finish := func(kind TimestampIssueKind, suspicious bool, suggested time.Time) *TimestampIssue {
 		r := issue(kind, suspicious, suggested)
 		if median >= 0 {
 			r.MinutesFromMedian = todDist(own, median)
+			r.RecordedLater = signedTodDist(own, median) > 0
 		}
 		return r
 	}

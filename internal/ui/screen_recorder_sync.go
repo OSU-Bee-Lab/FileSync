@@ -629,6 +629,24 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	// has no equivalent (it applies via rclone Locations instead).
 	destDirsByID := make(map[string][]string, len(eligible))
 
+	// locs and sessionDir let the review screen stream each recorder's files
+	// for in-place listening (see timestampReviewRow.locs/relDir): locs is
+	// every Location this session's files could actually be found at right
+	// now - the local destinations everything just landed at, plus any
+	// upload targets (already-uploaded from a prior session's Batch Upload,
+	// or mid-upload if this session is not batched) - and sessionDir is the
+	// experiment/subpath prefix common to every recorder this session,
+	// mirroring how reuploadCorrectedFiles builds a remote-relative path.
+	locs := append(append([]syncengine.Location{}, sc.params.destinations...), sc.params.uploads...)
+	sessionDir := sc.params.experimentName
+	for _, part := range splitSubpathUI(sc.params.subpath) {
+		sessionDir = joinRel(sessionDir, part)
+	}
+	parentPath := ""
+	if len(sc.params.destinations) > 0 {
+		parentPath = sc.params.destinations[0].Name + ": " + sessionDir
+	}
+
 	inputs := make([]timestampReviewInput, 0, len(eligible))
 	for _, e := range eligible {
 		parser, sourceFiles, destDirs := e.parser, e.row.sourceFiles, e.row.destDirs
@@ -638,6 +656,8 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 			parser:      parser,
 			sourceFiles: sourceFiles,
 			start:       e.start,
+			locs:        locs,
+			relDir:      joinRel(sessionDir, e.row.id),
 			// Sync Recorders renames the local destination dirs directly - the
 			// files are always local here - rather than Manage Files' rclone
 			// rename across arbitrary Locations.
@@ -669,6 +689,7 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	showTimestampReview(timestampReviewHost{
 		s:             sc.s,
 		win:           sc.s.win,
+		parentPath:    parentPath,
 		continueLabel: continueLabel,
 		onContinue:    next,
 		exitLabel:     exitLabel,

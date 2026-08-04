@@ -511,6 +511,8 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 			parser:      group.Parser,
 			sourceFiles: group.Files,
 			start:       e.start,
+			locs:        locs,
+			relDir:      group.RelDir,
 			// Manage Files renames across whichever Locations the user picked,
 			// via rclone (local or remote), rather than Sync Recorders' local
 			// os.Rename - the one part of the retime that isn't shared.
@@ -544,6 +546,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	showTimestampReview(timestampReviewHost{
 		s:             s,
 		win:           s.win,
+		parentPath:    locs[0].Name + ": " + from,
 		continueLabel: "Apply Corrections",
 		onContinue:    func() { showManageFiles(s) },
 		exitLabel:     "Back Without Applying",

@@ -424,7 +424,7 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 		if e.IsDir {
 			audioControls.hide()
 		} else {
-			audioControls.update(b, b.locs, joinRel(b.relPath, e.Name), e.Name)
+			audioControls.update(func() { registerAudioRefresh(b) }, b.locs, joinRel(b.relPath, e.Name), e.Name)
 		}
 		if e.IsDir && b.selectDirs {
 			name := e.Name

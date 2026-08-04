@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
 // timestampReviewRow is one recorder's line on the timestamp review screen.
@@ -36,6 +37,23 @@ type timestampReviewRow struct {
 	// files untouched. It lets the review screen's tolerance slider re-judge
 	// every recorder live without either caller having to rebuild the screen.
 	recheck func(tolerance time.Duration) recorder.TimestampIssue
+	// recheckAt is recheck's counterpart for a not-yet-confirmed edited start
+	// time: it judges recorded (typed into "New start time") against the
+	// same other-recorder times and consensus date recheck uses, so the
+	// review screen can show live whether an override actually resolves the
+	// mismatch before the user commits it.
+	recheckAt func(recorded time.Time, tolerance time.Duration) recorder.TimestampIssue
+
+	// locs and relDir let the review screen stream this recorder's files for
+	// in-place listening, from the highest-priority location that has them
+	// (see audioOpener) - relDir is this recorder's own directory, relative
+	// to a Location root and forward-slash separated, with each file's
+	// DestRelPath (just a filename, see recorder.SourceFile) joined onto it
+	// to get a full location-relative path. Both are nil/empty when a host
+	// has nothing streamable to offer (locs is what actually gates a play
+	// button - see audioRowControls.update).
+	locs   []syncengine.Location
+	relDir string
 }
 
 // timestampReviewInput is one recorder handed to buildTimestampReviewRows:
@@ -50,6 +68,11 @@ type timestampReviewInput struct {
 	sourceFiles []recorder.SourceFile
 	start       time.Time
 	apply       func(correct func(time.Time) time.Time) error
+
+	// locs and relDir carry through to the same-named timestampReviewRow
+	// fields - see there.
+	locs   []syncengine.Location
+	relDir string
 }
 
 // buildTimestampReviewRows is the single retime pathway both entry points go
@@ -84,13 +107,19 @@ func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Dura
 		recheck := func(tol time.Duration) recorder.TimestampIssue {
 			return *recorder.CheckRecorderTimestamp(in.sourceFiles, in.parser, cy, cm, cd, others, tol)
 		}
+		recheckAt := func(recorded time.Time, tol time.Duration) recorder.TimestampIssue {
+			return *recorder.EvaluateTimestamp(recorded, cy, cm, cd, others, tol)
+		}
 		rows = append(rows, timestampReviewRow{
 			recorderID:  in.recorderID,
 			parser:      in.parser,
 			sourceFiles: in.sourceFiles,
 			check:       recheck(tolerance),
 			recheck:     recheck,
+			recheckAt:   recheckAt,
 			apply:       in.apply,
+			locs:        in.locs,
+			relDir:      in.relDir,
 		})
 	}
 	return rows
@@ -119,7 +148,11 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 	case recorder.IssueWrongDay:
 		return fmt.Sprintf("first file dated %s — the other recorders agree on %s (day is off)", recDate, conDate)
 	case recorder.IssueAMPM:
-		return fmt.Sprintf("first file at %s is about 12 h off the other recorders' start — looks like an AM/PM mix-up", recTime)
+		dir := "earlier than"
+		if check.RecordedLater {
+			dir = "later than"
+		}
+		return fmt.Sprintf("first file at %s is about 12 h %s the other recorders' start — looks like an AM/PM mix-up", recTime, dir)
 	case recorder.IssueOther:
 		sameDate := check.Recorded.Year() == check.ConsensusYear &&
 			check.Recorded.Month() == check.ConsensusMonth &&
@@ -128,7 +161,11 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 			return fmt.Sprintf("first file dated %s — the other recorders agree on %s", recDate, conDate)
 		}
 		if check.MinutesFromMedian >= 0 {
-			return fmt.Sprintf("first file at %s is %d min off the other recorders' median start time (tolerance %d min)", recTime, check.MinutesFromMedian, tolMin)
+			dir := "earlier than"
+			if check.RecordedLater {
+				dir = "later than"
+			}
+			return fmt.Sprintf("first file at %s is %d min %s the other recorders' median start time (tolerance %d min)", recTime, check.MinutesFromMedian, dir, tolMin)
 		}
 		return "doesn't line up with the other recorders — check manually"
 	default:
@@ -148,16 +185,18 @@ func timestampCardColor(suspicious bool) color.Color {
 	return colorRGBA(0xDD, 0xDD, 0xDD, 0xFF)
 }
 
-// timestampCardColorFor picks a card's background from its live entry state:
-// blue whenever the user has opted into a new start time for this recorder
-// (overriding the suspicious/neutral coloring, since the user's edit is now
-// the more important signal than the detector's original verdict), otherwise
-// the usual suspicious/neutral color.
-func timestampCardColorFor(e *timestampReviewEntry) color.Color {
-	if e.adjust {
-		return colorRGBA(0x4A, 0x7B, 0xE0, 0xFF)
+// timestampCardColorFor picks a card's background from its live effective
+// check: blue only once an override (adjust) actually resolves the mismatch
+// (Suspicious false) - an override still outside tolerance stays orange,
+// same as an untouched flagged recorder, so blue always reads as "resolved"
+// rather than merely "touched". Reuses the sync progress screen's light
+// "done" blue (see rowBackgroundColor's jobDone) rather than a darker shade,
+// which read poorly against the card's dark text.
+func timestampCardColorFor(check recorder.TimestampIssue, adjust bool) color.Color {
+	if adjust && !check.Suspicious {
+		return colorRGBA(0xAE, 0xD3, 0xF2, 0xFF)
 	}
-	return timestampCardColor(e.row.check.Suspicious)
+	return timestampCardColor(check.Suspicious)
 }
 
 // ordinalDay formats a day-of-month with its English ordinal suffix
@@ -263,6 +302,12 @@ type timestampReviewHost struct {
 	s   *state
 	win fyne.Window
 
+	// parentPath is shown at the top of the screen, alongside the header, so
+	// the researcher can see at a glance where these files actually live -
+	// "<Location name>: <path>", the sync destination for Sync Recorders or
+	// the Location/path the user browsed to for Manage Files' Retime.
+	parentPath string
+
 	// continueLabel/exitLabel must name the same destination twice, differing
 	// only in whether the corrections are applied ("Apply & End Sync" vs "End
 	// Without Applying") - both buttons go to the same next screen, so a label
@@ -298,6 +343,28 @@ type timestampReviewScreen struct {
 	// lines up" rather than a wall of gray rows the user has to interpret. It
 	// refreshes live as the tolerance slider changes what's flagged.
 	summaryLbl *widget.Label
+
+	// fileAudio is the currently-selected recorder's per-file playback
+	// controls, rebuilt by rebuildDetail every time the detail pane redraws.
+	// The one refresh callback registered with registerAudioRefreshFunc (see
+	// audio_controls.go) walks this slice on every player state change, so
+	// it always repaints whichever recorder is actually on screen rather
+	// than needing to be re-registered per selection.
+	fileAudio []timestampFileAudio
+	// audioStatusLbl surfaces a playback error for the currently open
+	// recorder's files, mirroring destFolderBrowser's statusLbl.
+	audioStatusLbl *widget.Label
+}
+
+// timestampFileAudio is one file row's playback controls plus what they need
+// to keep updating themselves as the player's state changes: the transport
+// widgets built by audioRow, the Location(s) to stream from, and the file's
+// full path relative to a Location root.
+type timestampFileAudio struct {
+	controls *audioRowControls
+	locs     []syncengine.Location
+	relPath  string
+	filename string
 }
 
 // showTimestampReview shows the full-screen review step between a caller
@@ -326,9 +393,10 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	leftBox := container.NewVBox()
 	for i, e := range tr.entries {
 		i := i
-		bg := canvas.NewRectangle(timestampCardColorFor(e))
+		check := tr.effectiveCheck(e)
+		bg := canvas.NewRectangle(timestampCardColorFor(check, e.adjust))
 		idLabel := widget.NewLabelWithStyle(e.row.recorderID, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-		statusLabel := widget.NewLabel(timestampIssueDetail(e.row.check, tr.tolerance))
+		statusLabel := widget.NewLabel(timestampIssueDetail(check, tr.tolerance))
 		statusLabel.Wrapping = fyne.TextWrapWord
 		cell := container.NewStack(bg, container.NewPadded(container.NewVBox(idLabel, statusLabel)))
 		card := newTappableCard(cell, func() { tr.selectRow(i) })
@@ -336,6 +404,14 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 		tr.cards = append(tr.cards, bg)
 		tr.cardLabels = append(tr.cardLabels, statusLabel)
 	}
+
+	// One refresh callback for the whole screen (rather than one per row, the
+	// way destFolderBrowser's pooled list rows need): the detail pane shows
+	// only one recorder's files at a time, and tr.fileAudio is repointed at
+	// whichever one that is every time rebuildDetail runs, so a single
+	// registration here stays correct across selection changes for the life
+	// of this screen.
+	registerAudioRefreshFunc(tr.refreshAudio)
 
 	tr.detailBox = container.NewStack()
 	continueBtn := widget.NewButton(host.continueLabel, nil)
@@ -368,6 +444,9 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	exitBtn.Importance = widget.WarningImportance
 
 	header := widget.NewLabelWithStyle("Review Recorder Timestamps", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	pathLbl := widget.NewLabel(host.parentPath)
+	pathLbl.Truncation = fyne.TextTruncateEllipsis
+	headerRow := container.NewBorder(nil, nil, header, pathLbl)
 	sub := widget.NewLabel("Each recorder's clock is assumed wrong (or right) for its entire session - adjusting one applies the same correction to every file from that recorder.")
 	sub.Wrapping = fyne.TextWrapWord
 
@@ -383,7 +462,7 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	split.SetOffset(0.3)
 
 	content := container.NewBorder(
-		container.NewVBox(header, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
+		container.NewVBox(headerRow, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
 		actionRow(exitBtn, continueBtn),
 		nil, nil,
 		split,
@@ -443,12 +522,37 @@ func (tr *timestampReviewScreen) applyTolerance(minutes int) {
 		if !e.adjust {
 			e.text = e.row.check.Suggested.Format("2006-01-02 15:04")
 		}
-		tr.cards[i].FillColor = timestampCardColorFor(e)
-		tr.cards[i].Refresh()
-		tr.cardLabels[i].SetText(timestampIssueDetail(e.row.check, tr.tolerance))
+		tr.refreshCard(i)
 	}
 	tr.refreshSummary()
 	tr.rebuildDetail()
+}
+
+// effectiveCheck is what actually drives an entry's card color and status
+// text: when e has a valid "New start time" override, the edited candidate
+// time re-judged against the other recorders at the live tolerance (see
+// recheckAt) - otherwise just the original detection. This is what lets a
+// card go blue only once the typed-in time actually resolves the mismatch,
+// rather than the instant the checkbox is ticked.
+func (tr *timestampReviewScreen) effectiveCheck(e *timestampReviewEntry) recorder.TimestampIssue {
+	if e.adjust && e.row.recheckAt != nil {
+		if edited, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location()); err == nil {
+			return e.row.recheckAt(edited, tr.tolerance)
+		}
+	}
+	return e.row.check
+}
+
+// refreshCard repaints entries[i]'s left-hand card - fill color and status
+// line - from its current effective check. Called whenever anything that
+// feeds effectiveCheck changes: the tolerance slider, the New start time
+// text, or the adjust checkbox.
+func (tr *timestampReviewScreen) refreshCard(i int) {
+	e := tr.entries[i]
+	check := tr.effectiveCheck(e)
+	tr.cards[i].FillColor = timestampCardColorFor(check, e.adjust)
+	tr.cards[i].Refresh()
+	tr.cardLabels[i].SetText(timestampIssueDetail(check, tr.tolerance))
 }
 
 // refreshSummary restates how many recorders currently look off. An all-clear
@@ -461,7 +565,7 @@ func (tr *timestampReviewScreen) refreshSummary() {
 	}
 	flagged := 0
 	for _, e := range tr.entries {
-		if e.row.check.Suspicious {
+		if tr.effectiveCheck(e).Suspicious {
 			flagged++
 		}
 	}
@@ -501,15 +605,21 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	e := tr.entries[tr.selected]
 
 	header := widget.NewLabelWithStyle(
-		fmt.Sprintf("%s — %s", e.row.recorderID, timestampIssueDetail(e.row.check, tr.tolerance)),
+		fmt.Sprintf("%s — %s", e.row.recorderID, timestampIssueDetail(tr.effectiveCheck(e), tr.tolerance)),
 		fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	header.Wrapping = fyne.TextWrapWord
+	refreshHeader := func() {
+		header.SetText(fmt.Sprintf("%s — %s", e.row.recorderID, timestampIssueDetail(tr.effectiveCheck(e), tr.tolerance)))
+	}
 
 	entry := widget.NewEntry()
 	entry.SetText(e.text)
 
 	errLbl := widget.NewLabel("")
 	errLbl.Wrapping = fyne.TextWrapWord
+
+	tr.audioStatusLbl = widget.NewLabel("")
+	tr.audioStatusLbl.Wrapping = fyne.TextWrapWord
 
 	previewLbl := widget.NewLabel("")
 	adjustLbl := widget.NewLabel("")
@@ -530,21 +640,32 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	}
 
 	filesBox := container.NewVBox()
+	// addFileRow wraps content in a playable row - a transport (play/
+	// restart/spinner) streaming this file from the highest-priority
+	// Location that has it (see audioOpener), the same controls
+	// destFolderBrowser's rows use. registration with the player's change
+	// notifications happens once for the whole screen (see
+	// showTimestampReview), so update is called with register=nil here.
+	addFileRow := func(sf recorder.SourceFile, content fyne.CanvasObject) {
+		row := audioRow(content, newPresenceIndicator())
+		controls := audioControlsFrom(row)
+		relPath := joinRel(e.row.relDir, sf.DestRelPath)
+		controls.update(nil, e.row.locs, relPath, sf.DestRelPath)
+		tr.fileAudio = append(tr.fileAudio, timestampFileAudio{controls, e.row.locs, relPath, sf.DestRelPath})
+		filesBox.Add(row)
+	}
 	refreshFiles := func() {
 		filesBox.Objects = nil
+		tr.fileAudio = tr.fileAudio[:0]
 		for _, sf := range e.row.sourceFiles {
 			oldT, ok := e.row.parser.ParseTimestamp(sf.DestRelPath)
-			if !ok {
-				filesBox.Add(widget.NewLabel(sf.DestRelPath))
-				continue
-			}
-			if !e.adjust {
-				filesBox.Add(widget.NewLabel(sf.DestRelPath))
+			if !ok || !e.adjust {
+				addFileRow(sf, widget.NewLabel(sf.DestRelPath))
 				continue
 			}
 			edited, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location())
 			if err != nil {
-				filesBox.Add(widget.NewLabel(sf.DestRelPath))
+				addFileRow(sf, widget.NewLabel(sf.DestRelPath))
 				continue
 			}
 			delta := edited.Sub(e.row.check.Recorded)
@@ -554,7 +675,7 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 			newLbl := widget.NewLabelWithStyle(newRel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 			oldCol := container.NewVBox(oldLbl, widget.NewLabel(plainDateTime(oldT)))
 			newCol := container.NewVBox(newLbl, widget.NewLabel(plainDateTime(newT)))
-			filesBox.Add(container.NewHBox(oldCol, widget.NewLabel("→"), newCol))
+			addFileRow(sf, container.NewHBox(oldCol, widget.NewLabel("→"), newCol))
 		}
 		filesBox.Refresh()
 	}
@@ -564,6 +685,8 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 		errLbl.SetText("")
 		refreshPreview()
 		refreshFiles()
+		refreshHeader()
+		tr.refreshCard(tr.selected)
 	}
 
 	adjust := widget.NewCheck("New start time", nil)
@@ -581,8 +704,8 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 		setEnabled(checked)
 		refreshPreview()
 		refreshFiles()
-		tr.cards[tr.selected].FillColor = timestampCardColorFor(e)
-		tr.cards[tr.selected].Refresh()
+		refreshHeader()
+		tr.refreshCard(tr.selected)
 	}
 
 	refreshPreview()
@@ -590,13 +713,29 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 
 	detail := container.NewBorder(
 		container.NewVBox(header, container.NewBorder(nil, nil, adjust, nil, entry), previewLbl, adjustLbl, errLbl, widget.NewSeparator(),
-			widget.NewLabelWithStyle(fmt.Sprintf("Files (%d)", len(e.row.sourceFiles)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})),
+			widget.NewLabelWithStyle(fmt.Sprintf("Files (%d)", len(e.row.sourceFiles)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+			tr.audioStatusLbl),
 		nil, nil, nil,
 		container.NewVScroll(filesBox),
 	)
 
 	tr.detailBox.Objects = []fyne.CanvasObject{container.NewPadded(detail)}
 	tr.detailBox.Refresh()
+}
+
+// refreshAudio is this screen's one player-state-change callback (see
+// registerAudioRefreshFunc in showTimestampReview): it repaints every file
+// row currently on screen for whichever recorder is selected, and surfaces a
+// playback error the same way destFolderBrowser's refresh does.
+func (tr *timestampReviewScreen) refreshAudio() {
+	if tr.audioStatusLbl != nil {
+		if st := audioPlayer().State(); st.Err != nil {
+			tr.audioStatusLbl.SetText("Couldn't play that file. " + classifyError(st.Err).String())
+		}
+	}
+	for _, fa := range tr.fileAudio {
+		fa.controls.update(nil, fa.locs, fa.relPath, fa.filename)
+	}
 }
 
 // applyAndContinue validates every checked entry's correction text, applies
