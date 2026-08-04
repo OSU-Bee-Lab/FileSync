@@ -53,6 +53,9 @@ func showAddLocation(s *state) {
 	kindSelect := widget.NewSelect(kindLabels, nil)
 	kindSelect.SetSelected(kindLabels[0])
 
+	roleSelect := widget.NewSelect(roleLabels, nil)
+	roleSelect.SetSelected(roleLabels[0])
+
 	dynamicArea := container.NewVBox()
 
 	// --- local folder state ---
@@ -247,6 +250,7 @@ func showAddLocation(s *state) {
 				ID:       newLocationID(),
 				Name:     name,
 				Kind:     syncengine.LocationLocal,
+				Role:     roleFromLabel(roleSelect.Selected),
 				RootPath: localPath,
 			})
 			s.saveConfig()
@@ -261,6 +265,7 @@ func showAddLocation(s *state) {
 					ID:         newLocationID(),
 					Name:       strings.TrimSpace(nameEntry.Text),
 					Kind:       syncengine.LocationRemote,
+					Role:       roleFromLabel(roleSelect.Selected),
 					RemoteName: createdRemoteName,
 					RootPath:   strings.TrimSpace(form.pathEntry.Text),
 				})
@@ -288,6 +293,7 @@ func showAddLocation(s *state) {
 	layout := container.NewVBox(
 		widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
 		widget.NewForm(&widget.FormItem{Text: "Type", Widget: kindSelect}),
+		widget.NewForm(&widget.FormItem{Text: "Role", Widget: roleSelect}),
 		dynamicArea,
 	)
 

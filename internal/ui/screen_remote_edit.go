@@ -25,6 +25,9 @@ func showEditLocation(s *state, id int) {
 	nameEntry := widget.NewEntry()
 	nameEntry.SetText(loc.Name)
 
+	roleSelect := widget.NewSelect(roleLabels, nil)
+	roleSelect.SetSelected(labelFromRole(loc.Role))
+
 	saveBtn := widget.NewButton("Save", nil)
 	backBtn := widget.NewButton("Cancel", func() { showLocations(s) })
 
@@ -62,6 +65,7 @@ func showEditLocation(s *state, id int) {
 			}
 			s.cfg.Locations[id].Name = name
 			s.cfg.Locations[id].RootPath = localPath
+			s.cfg.Locations[id].Role = roleFromLabel(roleSelect.Selected)
 			s.saveConfig()
 			showLocations(s)
 		}
@@ -69,6 +73,7 @@ func showEditLocation(s *state, id int) {
 		body = container.NewVBox(
 			widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
 			widget.NewForm(&widget.FormItem{Text: "Folder", Widget: container.NewBorder(nil, nil, chooseFolderBtn, nil, pathLabel)}),
+			widget.NewForm(&widget.FormItem{Text: "Role", Widget: roleSelect}),
 		)
 	} else {
 		bt, currentFields, err := syncengine.RemoteConfig(loc.RemoteName)
@@ -115,6 +120,7 @@ func showEditLocation(s *state, id int) {
 				// round-trip.
 				s.cfg.Locations[id].Name = name
 				s.cfg.Locations[id].RootPath = strings.TrimSpace(form.pathEntry.Text)
+				s.cfg.Locations[id].Role = roleFromLabel(roleSelect.Selected)
 				s.saveConfig()
 				showLocations(s)
 				return
@@ -132,6 +138,7 @@ func showEditLocation(s *state, id int) {
 				}
 				s.cfg.Locations[id].Name = name
 				s.cfg.Locations[id].RootPath = strings.TrimSpace(form.pathEntry.Text)
+				s.cfg.Locations[id].Role = roleFromLabel(roleSelect.Selected)
 				s.saveConfig()
 				showLocations(s)
 			})
@@ -143,6 +150,7 @@ func showEditLocation(s *state, id int) {
 		)
 		body = container.NewVBox(
 			widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
+			widget.NewForm(&widget.FormItem{Text: "Role", Widget: roleSelect}),
 			fieldsArea,
 		)
 	}

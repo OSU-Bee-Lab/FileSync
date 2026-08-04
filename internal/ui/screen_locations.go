@@ -163,7 +163,11 @@ func locationRowContent(s *state, id int, loc syncengine.Location, priorityLabel
 	// a permanent number on this screen would imply a sequence that isn't
 	// actually fixed anywhere sync selection happens.
 	nameLabel := widget.NewLabelWithStyle(loc.Name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	pathLabel := widget.NewLabel(fmt.Sprintf("%s: %s", loc.Kind, describeLocation(loc)))
+	kindText := loc.Kind.String()
+	if loc.Role == syncengine.RoleResults {
+		kindText += " · Results"
+	}
+	pathLabel := widget.NewLabel(fmt.Sprintf("%s: %s", kindText, describeLocation(loc)))
 	trailing := locationButtonRow(s, id, loc)
 	// NewSelect + SetSelectedIndex, in that order, would fire OnChanged
 	// immediately (the previous "" selected value always differs from the

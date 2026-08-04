@@ -45,6 +45,44 @@ func (k *LocationKind) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// LocationRole distinguishes a Location holding recorded audio from one
+// holding buzzdetect results (a mirrored tree of per-file .csv outputs).
+// Orthogonal to LocationKind — a Results location can be local or remote
+// same as an Audio one.
+type LocationRole int
+
+const (
+	RoleAudio LocationRole = iota // zero value - old config.json files load as all-Audio, no migration needed
+	RoleResults
+)
+
+func (r LocationRole) String() string {
+	if r == RoleResults {
+		return "results"
+	}
+	return "audio"
+}
+
+func (r LocationRole) MarshalJSON() ([]byte, error) {
+	return json.Marshal(r.String())
+}
+
+func (r *LocationRole) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return err
+	}
+	switch s {
+	case "audio":
+		*r = RoleAudio
+	case "results":
+		*r = RoleResults
+	default:
+		return fmt.Errorf("unknown location role %q", s)
+	}
+	return nil
+}
+
 // Location is one storage root a collaborator has configured — a local
 // drive/folder or a remote (SharePoint, Drive, Dropbox, S3, ...). Nothing
 // about a Location is hardcoded: every field is user-supplied and
@@ -53,6 +91,10 @@ type Location struct {
 	ID   string       `json:"id"`
 	Name string       `json:"name"`
 	Kind LocationKind `json:"kind"`
+
+	// Role distinguishes recorded audio from buzzdetect results (see
+	// LocationRole) - orthogonal to Kind.
+	Role LocationRole `json:"role,omitempty"`
 
 	// RemoteName is the rclone remote name (as stored in rclone's own
 	// config file) backing this location. Empty when Kind == LocationLocal.

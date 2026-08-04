@@ -154,6 +154,50 @@ func locationNamesByKind(locs []syncengine.Location, kind syncengine.LocationKin
 	return out
 }
 
+// roleLabels are the Add/Edit Location Role select's options, index-matched
+// to syncengine.RoleAudio/RoleResults.
+var roleLabels = []string{"Audio", "Results"}
+
+func roleFromLabel(label string) syncengine.LocationRole {
+	if label == roleLabels[1] {
+		return syncengine.RoleResults
+	}
+	return syncengine.RoleAudio
+}
+
+func labelFromRole(role syncengine.LocationRole) string {
+	if role == syncengine.RoleResults {
+		return roleLabels[1]
+	}
+	return roleLabels[0]
+}
+
+// filterByRole returns every Location whose Role matches role, for pickers
+// that must never mix Audio and Results locations in one N-way run (e.g.
+// Sync Experiments).
+func filterByRole(locs []syncengine.Location, role syncengine.LocationRole) []syncengine.Location {
+	var out []syncengine.Location
+	for _, l := range locs {
+		if l.Role == role {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// locationNamesByKindAndRole is locationNamesByKind additionally filtered to
+// one Role, for pickers that need both splits at once (e.g. Sync Recorders,
+// which offers only RoleAudio locations).
+func locationNamesByKindAndRole(locs []syncengine.Location, kind syncengine.LocationKind, role syncengine.LocationRole) []string {
+	var out []string
+	for _, l := range locs {
+		if l.Kind == kind && l.Role == role {
+			out = append(out, l.Name)
+		}
+	}
+	return out
+}
+
 // locationsFromNamesAny resolves a set of selected Names back into
 // Locations regardless of Kind, for pickers that don't separate local from
 // cloud (e.g. Sync Experiments' "To").

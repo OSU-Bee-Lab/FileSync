@@ -46,6 +46,45 @@ func singleFileSize(ctx context.Context, loc Location, relPath string) (int64, b
 	return obj.Size(), true
 }
 
+// resultsLeaf maps relPath's final path segment from an audio filename to
+// its buzzdetect result counterpart: extension swapped for ".csv", a
+// "_buzzdetect" suffix inserted - e.g. "a/b/rec.wma" -> "a/b/rec_buzzdetect.csv".
+// Only ever applied to a single file's own leaf - a Results Location's
+// directory tree already mirrors an Audio Location's exactly, so nothing
+// about a directory path ever needs mapping.
+func resultsLeaf(relPath string) string {
+	dir := path.Dir(relPath)
+	base := path.Base(relPath)
+	stem := strings.TrimSuffix(base, path.Ext(base))
+	newBase := stem + "_buzzdetect.csv"
+	if dir == "." {
+		return newBase
+	}
+	return path.Join(dir, newBase)
+}
+
+// resolveResultsLeaf resolves relPath against a RoleResults loc: tried
+// literally first (so directly managing a Results Location's own files by
+// their real names just works), then via resultsLeaf if the literal name
+// isn't present as a file. Returns relPath unchanged (mapped=false) for a
+// non-RoleResults loc, a directory path, or when neither name resolves to
+// a file - letting normal directory-walk/not-found handling proceed as
+// today. Reuses the existing singleFileSize probe, no new listing code.
+func resolveResultsLeaf(ctx context.Context, loc Location, relPath string) (resolved string, mapped bool) {
+	if loc.Role != RoleResults {
+		return relPath, false
+	}
+	if _, ok := singleFileSize(ctx, loc, relPath); ok {
+		return relPath, false
+	}
+	if mappedPath := resultsLeaf(relPath); mappedPath != relPath {
+		if _, ok := singleFileSize(ctx, loc, mappedPath); ok {
+			return mappedPath, true
+		}
+	}
+	return relPath, false
+}
+
 // listRecursiveDetail is ListRecursive, additionally reporting whether
 // relPath itself named a single file (the fast path via singleFileSize)
 // rather than a directory that was walked — PlanMove needs to know which,
@@ -120,6 +159,11 @@ type MovePlan struct {
 // round trip, so doing it per file turns a rename of a few hundred files
 // into a few hundred sequential API calls before anything even moves.
 func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) (MovePlan, error) {
+	var mapped bool
+	srcRelPath, mapped = resolveResultsLeaf(ctx, loc, srcRelPath)
+	if mapped {
+		dstRelPath = resultsLeaf(dstRelPath)
+	}
 	// The source and destination listings are independent - run them
 	// concurrently rather than paying two sequential recursive-listing
 	// round trips on a slow remote.
@@ -292,7 +336,15 @@ func ApplyRenames(ctx context.Context, loc Location, dir string, renames map[str
 		oldRel := path.Join(dir, oldName)
 		newRel := path.Join(dir, newName)
 		if _, err := f.NewObject(ctx, oldRel); err != nil {
-			continue
+			if loc.Role != RoleResults {
+				continue
+			}
+			mappedOld := resultsLeaf(oldRel)
+			if _, err := f.NewObject(ctx, mappedOld); err != nil {
+				continue
+			}
+			oldRel = mappedOld
+			newRel = resultsLeaf(newRel)
 		}
 		if err := operations.MoveFile(ctx, f, f, newRel, oldRel); err != nil {
 			return fmt.Errorf("renaming %s to %s at %s: %w", oldRel, newRel, loc.Name, err)
@@ -323,6 +375,7 @@ type DeletePlan struct {
 
 // PlanDelete lists everything under relPath at loc, for preview purposes.
 func PlanDelete(ctx context.Context, loc Location, relPath string) (DeletePlan, error) {
+	relPath, _ = resolveResultsLeaf(ctx, loc, relPath)
 	entries, err := ListRecursive(ctx, loc, relPath)
 	if err != nil {
 		return DeletePlan{}, err
@@ -337,6 +390,7 @@ func PlanDelete(ctx context.Context, loc Location, relPath string) (DeletePlan, 
 // previewed every file it will remove, and confirmed an irreversible-action
 // prompt.
 func ApplyDelete(ctx context.Context, loc Location, relPath string) error {
+	relPath, _ = resolveResultsLeaf(ctx, loc, relPath)
 	f, err := cache.Get(ctx, loc.rcloneSpec())
 	if err != nil {
 		return err

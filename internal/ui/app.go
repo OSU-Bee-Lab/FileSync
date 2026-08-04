@@ -60,6 +60,10 @@ type state struct {
 	syncOneWayFromFolder string
 	syncOneWayToNames    []string
 	syncOneWayToRelPath  string
+	// syncRole is the Sync Locations screen's Audio/Results toggle (see
+	// roleToggle) - session-only, like syncOneWay. Zero value RoleAudio
+	// matches the toggle's default selection.
+	syncRole syncengine.LocationRole
 
 	// pullFilesSourceName, pullFilesDestFolder, pullFilesRelPath, and
 	// pullFilesFullIdent cache the Pull Files screen's source/destination

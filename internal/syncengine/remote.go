@@ -269,6 +269,7 @@ func DeleteRemote(name string) {
 type ExportedLocation struct {
 	Name        string            `json:"name"`
 	RootPath    string            `json:"rootPath"`
+	Role        LocationRole      `json:"role,omitempty"`
 	BackendType BackendType       `json:"backendType"`
 	Fields      map[string]string `json:"fields"`
 }
@@ -296,6 +297,7 @@ func ExportLocation(loc Location) (ExportedLocation, error) {
 	return ExportedLocation{
 		Name:        loc.Name,
 		RootPath:    loc.RootPath,
+		Role:        loc.Role,
 		BackendType: bt,
 		Fields:      fields,
 	}, nil

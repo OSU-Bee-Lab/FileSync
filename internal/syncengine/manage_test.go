@@ -159,3 +159,94 @@ func TestApplyDelete_RemovesSingleFile(t *testing.T) {
 		t.Error("sibling directory should be untouched when deleting a single file")
 	}
 }
+
+func TestResultsLeaf_SwapsExtensionAndInsertsSuffix(t *testing.T) {
+	got := resultsLeaf("exp/r1/230802_0751.wma")
+	want := "exp/r1/230802_0751_buzzdetect.csv"
+	if got != want {
+		t.Errorf("resultsLeaf = %q, want %q", got, want)
+	}
+}
+
+func TestPlanMove_ResultsRole_SingleFileMapsThroughResultsLeaf(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "Results", Kind: LocationLocal, Role: RoleResults, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/r1/230802_0751_buzzdetect.csv"), "csv")
+
+	plan, err := PlanMove(context.Background(), loc, "exp/r1/230802_0751.wma", "exp/r1/230802_0800.wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 1 {
+		t.Fatalf("got %d planned moves, want 1: %+v", len(plan.Moves), plan.Moves)
+	}
+	m := plan.Moves[0]
+	if m.SrcRelPath != "exp/r1/230802_0751_buzzdetect.csv" || m.DstRelPath != "exp/r1/230802_0800_buzzdetect.csv" {
+		t.Errorf("move = %+v, want src/dst mapped through resultsLeaf", m)
+	}
+}
+
+func TestPlanMove_ResultsRole_DirectoryMovePassesThroughUnchanged(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "Results", Kind: LocationLocal, Role: RoleResults, RootPath: root}
+	writeFile(t, filepath.Join(root, "Luke - Wooster 2/r1/230802_0751_buzzdetect.csv"), "csv")
+
+	plan, err := PlanMove(context.Background(), loc, "Luke - Wooster 2", "Luke - Wooster 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 1 || plan.Moves[0].DstRelPath != "Luke - Wooster 1/r1/230802_0751_buzzdetect.csv" {
+		t.Fatalf("directory move should relocate the csv under its own unchanged name, got %+v", plan.Moves)
+	}
+}
+
+func TestPlanMove_ResultsRole_LiteralCsvPathNeedsNoMapping(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "Results", Kind: LocationLocal, Role: RoleResults, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/r1/230802_0751_buzzdetect.csv"), "csv")
+
+	plan, err := PlanMove(context.Background(), loc, "exp/r1/230802_0751_buzzdetect.csv", "exp/r1/renamed_buzzdetect.csv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 1 || plan.Moves[0].SrcRelPath != "exp/r1/230802_0751_buzzdetect.csv" || plan.Moves[0].DstRelPath != "exp/r1/renamed_buzzdetect.csv" {
+		t.Fatalf("managing the Results location's own file by its real name should need no mapping, got %+v", plan.Moves)
+	}
+}
+
+func TestPlanDelete_And_ApplyDelete_ResultsRole_SingleFileResolvesThroughResultsLeaf(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "Results", Kind: LocationLocal, Role: RoleResults, RootPath: root}
+	target := filepath.Join(root, "exp/r1/230802_0751_buzzdetect.csv")
+	writeFile(t, target, "csv")
+
+	ctx := context.Background()
+	plan, err := PlanDelete(ctx, loc, "exp/r1/230802_0751.wma")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Entries) != 1 || plan.Entries[0].RelPath != "exp/r1/230802_0751_buzzdetect.csv" {
+		t.Fatalf("PlanDelete should resolve the audio-shaped relPath to the csv, got %+v", plan.Entries)
+	}
+
+	if err := ApplyDelete(ctx, loc, "exp/r1/230802_0751.wma"); err != nil {
+		t.Fatal(err)
+	}
+	assertFileMissing(t, target)
+}
+
+func TestApplyRenames_ResultsRole_CascadesRetimeStyleRename(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "Results", Kind: LocationLocal, Role: RoleResults, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/r1/230802_0751_buzzdetect.csv"), "csv")
+
+	renames := map[string]string{"230802_0751.wma": "230802_0800.wma"}
+	if err := ApplyRenames(context.Background(), loc, "exp/r1", renames); err != nil {
+		t.Fatal(err)
+	}
+	assertFileMissing(t, filepath.Join(root, "exp/r1/230802_0751_buzzdetect.csv"))
+	data, err := os.ReadFile(filepath.Join(root, "exp/r1/230802_0800_buzzdetect.csv"))
+	if err != nil || string(data) != "csv" {
+		t.Errorf("renamed csv missing or wrong content: %q, err=%v", data, err)
+	}
+}

@@ -19,6 +19,35 @@ const (
 	syncModeOneWay = "One Way Sync"
 )
 
+const (
+	syncRoleAudio   = "Audio"
+	syncRoleResults = "Results"
+)
+
+// roleToggle renders the Audio/Results radio shared by both sync modes —
+// Audio and Results locations must never converge in the same N-way run
+// (see filterByRole), so this picks which set the location picker offers.
+func roleToggle(s *state) *widget.RadioGroup {
+	g := widget.NewRadioGroup([]string{syncRoleAudio, syncRoleResults}, func(choice string) {
+		role := syncengine.RoleAudio
+		if choice == syncRoleResults {
+			role = syncengine.RoleResults
+		}
+		if role == s.syncRole {
+			return
+		}
+		s.syncRole = role
+		showSyncExperiments(s)
+	})
+	g.Horizontal = true
+	if s.syncRole == syncengine.RoleResults {
+		g.Selected = syncRoleResults
+	} else {
+		g.Selected = syncRoleAudio
+	}
+	return g
+}
+
 // showSyncExperiments is the Sync Locations screen's entry point. It
 // dispatches on the last-chosen mode (state.syncOneWay), and the mode
 // toggle each screen renders switches back here so choosing a mode always
@@ -59,7 +88,7 @@ func syncModeToggle(s *state) *widget.RadioGroup {
 // different-content disagreements always surfaced for an explicit decision
 // (never guessed; see syncengine.compareObjectsN).
 func showSyncExperimentsAllWay(s *state) {
-	allNames := locationNames(s.cfg.Locations)
+	allNames := locationNames(filterByRole(s.cfg.Locations, s.syncRole))
 
 	if len(s.syncExperimentsLocationNames) == 0 {
 		s.syncExperimentsLocationNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncExperimentsLocationIDs)
@@ -194,6 +223,7 @@ func showSyncExperimentsAllWay(s *state) {
 		container.NewVBox(
 			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewPadded(syncModeToggle(s)),
+			container.NewPadded(roleToggle(s)),
 			widget.NewLabel("Pick two or more locations to sync."),
 			container.NewPadded(locGroup.CanvasObject()),
 			widget.NewLabel("Pick one or more experiments to sync."),
@@ -221,7 +251,7 @@ func showSyncExperimentsAllWay(s *state) {
 // e.g. pushing a batch of recordings from a laptop up to several remotes, to
 // be reconciled later from a machine with access to everything.
 func showSyncExperimentsOneWay(s *state) {
-	names := locationNames(s.cfg.Locations)
+	names := locationNames(filterByRole(s.cfg.Locations, s.syncRole))
 
 	srcLabel := widget.NewLabel("No source folder chosen")
 	destLabel := widget.NewLabel("No destination chosen")
@@ -368,6 +398,7 @@ func showSyncExperimentsOneWay(s *state) {
 		container.NewVBox(
 			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewPadded(syncModeToggle(s)),
+			container.NewPadded(roleToggle(s)),
 			widget.NewLabel("Push a local folder's contents one-way onto the same folder in one or more locations."),
 			container.NewHBox(chooseSrcBtn, srcLabel),
 			widget.NewLabel("To locations:"),

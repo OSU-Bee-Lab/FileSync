@@ -114,6 +114,7 @@ func runImportLocation(s *state, imported syncengine.ExportedLocation) {
 				ID:         newLocationID(),
 				Name:       imported.Name,
 				Kind:       syncengine.LocationRemote,
+				Role:       imported.Role,
 				RemoteName: remoteName,
 				RootPath:   imported.RootPath,
 			})
