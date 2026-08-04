@@ -12,6 +12,10 @@ remotes (SharePoint/OneDrive, Google Drive, Dropbox, S3) via rclone.
 - `internal/appconfig` — persisted config (Locations, filters, preferences).
 - `internal/audio` — streamed playback of recordings for in-app preview, with
   one driver per format under `internal/audio/drivers`.
+- `internal/recorder` — recorder detection, byte-for-byte offload/verify, and
+  clock-timestamp handling, with one driver per recorder model under
+  `internal/recorder/drivers`.
+- `internal/appversion` — app version string.
 
 ## Data schema
 
@@ -25,8 +29,10 @@ option to scan experiments).
 
 - Always use the OS-native file browser, never Fyne's in-app file/folder
   browser. Route all folder and file picking through `chooseFolder`,
-  `chooseFileSave`, and `chooseFileOpen` (see `folder_picker_darwin.go` for the
-  native implementation and `folder_picker_other.go` for the fallback).
+  `chooseFileSave`, and `chooseFileOpen` — each platform has its own native
+  implementation (`folder_picker_darwin.go`, `folder_picker_linux.go`,
+  `folder_picker_windows.go`), with `folder_picker_fyne_fallback.go` /
+  `folder_picker_other.go` as the fallback for anything else.
 - Never duplicate logic. If an existing pathway needs to be used in another
   place, extract it into a shared abstraction and call it from both, rather
   than copying it.
@@ -39,11 +45,12 @@ option to scan experiments).
 - Commits may be made freely and at-will on the `development` branch — no need
   to wait for the user to test and verify changes first. Never commit or push
   to `main` without explicit user confirmation first.
-- This is a native macOS GUI app (Fyne) with no screenshot/automation
-  harness. Never attempt to "visually verify" UI changes yourself (launching
-  the app to screenshot it, click through it, etc.) — you have no way to see
-  a native window. Build/vet/test to confirm it compiles and passes existing
-  tests, then hand off to the user to check it in the running app.
+- This is a cross-platform desktop GUI app (Fyne; macOS, Linux, Windows) with
+  no screenshot/automation harness. Never attempt to "visually verify" UI
+  changes yourself (launching the app to screenshot it, click through it,
+  etc.) — you have no way to see a native window. Build/vet/test to confirm
+  it compiles and passes existing tests, then hand off to the user to check
+  it in the running app.
 - Worktrees go in ./.claude/worktrees
 - Any user-facing count text (labels, buttons, dialogs, tooltips, status
   text) must be plural-aware. Never hedge with "(s)"/"(y/ies)" (e.g. "3
@@ -57,11 +64,6 @@ option to scan experiments).
   `widget.NewButtonWithIcon("", theme.NavigateBackIcon(), ...)`, never a text
   button (e.g. "Up"). See `dest_folder_browser.go`'s `backBtn` for the
   reference implementation.
-- Features that are incomplete or still being stabilized should stay hidden
-  from release builds by gating them behind `devMode()`
-  (`internal/ui/features.go`), which is on when the `FILESYNC_DEV` env var is
-  set to any non-empty value (`FILESYNC_DEV=1 go run .`). This reveals
-  dev-only features at runtime without rebuilding.
 - **rclone must always use `copy`, never `sync`** — this is a core safety
   invariant. `rclone sync` deletes destination-only files; this app must
   never delete data from a synced destination — with the single narrow,

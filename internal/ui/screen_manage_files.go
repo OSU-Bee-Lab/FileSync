@@ -21,9 +21,9 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
-// manageOpRetime is the radio label for the dev-gated "Retime" option (see
-// devMode) - checking and correcting recorder clock errors already synced to
-// disk, via the same recorder.CheckRecorderTimestamp/ApplyTimestampFix
+// manageOpRetime is the radio label for the "Retime" option - checking and
+// correcting recorder clock errors already synced to disk, via the same
+// recorder.CheckRecorderTimestamp/ApplyTimestampFix
 // pathway and review screen Sync Recorders uses (see runManageFilesRetime),
 // just scanning an arbitrary directory recursively instead of a live volume.
 const manageOpRetime = "Retime (check recorder timestamps)"

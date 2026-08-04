@@ -121,7 +121,6 @@ type recorderSyncParams struct {
 	batchUpload bool
 	// detectBadTimestamps and timestampTolerance gate/configure per-recorder
 	// bad-first-timestamp detection - see recorder.DetectBadFirstTimestamp.
-	// Dev-only for now (see devMode).
 	detectBadTimestamps bool
 	timestampTolerance  time.Duration
 }
