@@ -378,7 +378,7 @@ func showErrorModal(win fyne.Window, errText string) {
 
 	content := container.NewBorder(
 		nil,
-		container.NewCenter(container.NewHBox(copyBtn, closeBtn)),
+		container.NewCenter(actionRow(copyBtn, closeBtn)),
 		nil, nil,
 		scroll,
 	)

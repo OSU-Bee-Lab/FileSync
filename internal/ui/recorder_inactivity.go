@@ -46,7 +46,7 @@ func showInactivitySyncPrompt(s *state, onContinue func(), onEnd func()) {
 		container.NewVBox(
 			widget.NewLabel(fmt.Sprintf("No new recorders have been added in the last %v.",
 				recorderInactivityTimeout(s))),
-			container.NewHBox(endBtn, continueBtn),
+			actionRow(endBtn, continueBtn),
 		), s.win)
 	d.Show()
 }

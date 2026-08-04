@@ -351,7 +351,7 @@ func removeLocation(s *state, id int, loc syncengine.Location) {
 	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
 	d = dialog.NewCustomWithoutButtons("Remove location",
-		container.NewVBox(msg, container.NewCenter(container.NewHBox(unlistBtn, deleteBtn, cancelBtn))), s.win)
+		container.NewVBox(msg, container.NewCenter(actionRow(cancelBtn, unlistBtn, deleteBtn))), s.win)
 	d.Resize(fyne.NewSize(420, 0))
 	d.Show()
 }
@@ -591,7 +591,7 @@ func browseLocation(s *state, id int, loc syncengine.Location) {
 	setBtn.Importance = widget.HighImportance
 	closeBtn := widget.NewButton("Close", func() { d.Hide() })
 
-	body := container.NewBorder(nil, container.NewCenter(container.NewHBox(setBtn, closeBtn)), nil, nil, browser.CanvasObject())
+	body := container.NewBorder(nil, container.NewCenter(actionRow(closeBtn, setBtn)), nil, nil, browser.CanvasObject())
 	d = dialog.NewCustomWithoutButtons("Browse "+loc.Name, body, s.win)
 	d.Resize(fyne.NewSize(480, 500))
 	d.Show()

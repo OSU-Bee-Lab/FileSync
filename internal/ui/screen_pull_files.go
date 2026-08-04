@@ -249,7 +249,7 @@ func showPullFiles(s *state) {
 			fullIdentCheck,
 			previewLabel,
 			spanHintLabel,
-			container.NewHBox(scanBtn, backBtn),
+			actionRow(backBtn, scanBtn),
 		),
 		nil, nil,
 		browser.CanvasObject(),

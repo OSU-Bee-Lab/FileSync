@@ -149,7 +149,7 @@ func showEditLocation(s *state, id int) {
 
 	saveBtn.Importance = widget.HighImportance
 
-	buttons := container.NewHBox(saveBtn, backBtn)
+	buttons := actionRow(backBtn, saveBtn)
 	// OAuth remotes can have their browser sign-in expire independently of any
 	// field change, so offer a dedicated re-authorize action (same path as the
 	// Reconnect prompt) rather than making the user tweak a field to trigger

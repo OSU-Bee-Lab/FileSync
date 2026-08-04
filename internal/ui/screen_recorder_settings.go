@@ -100,7 +100,7 @@ func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDese
 	reconnectBtn.Importance = widget.HighImportance
 
 	d = dialog.NewCustomWithoutButtons("Location not found",
-		container.NewVBox(msgLabel, container.NewCenter(container.NewHBox(deselectBtn, reconnectBtn))), s.win)
+		container.NewVBox(msgLabel, container.NewCenter(actionRow(deselectBtn, reconnectBtn))), s.win)
 	showNext()
 	d.Show()
 }
@@ -298,7 +298,7 @@ func showSyncRecorders(s *state) {
 	bottom := container.NewVBox(
 		syncingToLabel,
 		widget.NewSeparator(),
-		container.NewHBox(backBtn, startBtn),
+		actionRow(backBtn, startBtn),
 	)
 	content := container.NewBorder(top, bottom, nil, nil, columns)
 	s.setContent(container.NewPadded(content))

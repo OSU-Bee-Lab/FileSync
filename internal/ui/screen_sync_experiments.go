@@ -199,7 +199,7 @@ func showSyncExperimentsAllWay(s *state) {
 			widget.NewLabel("Pick one or more experiments to sync."),
 			widget.NewSeparator(),
 		),
-		container.NewHBox(quickScanBtn, fullScanBtn, backBtn),
+		actionRow(backBtn, fullScanBtn, quickScanBtn),
 		nil, nil,
 		expBrowser.CanvasObject(),
 	)
@@ -376,7 +376,7 @@ func showSyncExperimentsOneWay(s *state) {
 		container.NewVBox(
 			widget.NewSeparator(),
 			destLabel,
-			container.NewHBox(quickScanBtn, fullScanBtn, backBtn),
+			actionRow(backBtn, fullScanBtn, quickScanBtn),
 		),
 		nil, nil,
 		browser.CanvasObject(),

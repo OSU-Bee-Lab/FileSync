@@ -110,7 +110,7 @@ func showConflictsPrompt(s *state, conflicts []conflictRow, onProceed func()) {
 	proceedBtn.Importance = widget.WarningImportance
 	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
-	footer := container.NewCenter(container.NewHBox(proceedBtn, cancelBtn))
+	footer := container.NewCenter(actionRow(cancelBtn, proceedBtn))
 	d = dialog.NewCustomWithoutButtons("Conflicts found", container.NewBorder(header, footer, nil, nil, scroll), s.win)
 	d.Resize(fyne.NewSize(560, 420))
 	d.Show()

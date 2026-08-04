@@ -297,7 +297,7 @@ func showAddLocation(s *state) {
 	backBtn := widget.NewButton("Cancel", func() { showLocations(s) })
 	content := container.NewBorder(
 		widget.NewLabelWithStyle("Add Location", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		container.NewHBox(saveBtn, backBtn),
+		actionRow(backBtn, saveBtn),
 		nil, nil,
 		scroll,
 	)

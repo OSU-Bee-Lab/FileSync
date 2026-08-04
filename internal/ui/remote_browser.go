@@ -200,7 +200,7 @@ func browseRemoteSetup(s *state, remoteName, start string, drives []syncengine.D
 	cancelBtn := widget.NewButton("Cancel", func() { d.Hide() })
 
 	header := container.NewBorder(nil, nil, backBtn, nil, pathLabel)
-	footer := container.NewVBox(loading.CanvasObject(), statusLbl, container.NewCenter(container.NewHBox(useBtn, cancelBtn)))
+	footer := container.NewVBox(loading.CanvasObject(), statusLbl, container.NewCenter(actionRow(cancelBtn, useBtn)))
 	body := container.NewBorder(header, footer, nil, nil, scroll)
 
 	d = dialog.NewCustomWithoutButtons("Browse "+remoteName, body, s.win)
