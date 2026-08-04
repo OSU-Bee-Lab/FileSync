@@ -7,6 +7,30 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
+// Button importance ladder
+//
+// One meaning per color, app-wide. Pick by what the button *does*, never by
+// where it sits in the row (that's actionRow's job, see util.go):
+//
+//   - HighImportance (blue): the affirmative action the screen exists to
+//     perform - Sync, Scan, Save, Apply, Start, Continue. At most one per row.
+//   - MediumImportance (default): navigation and alternatives - Back, Done,
+//     Full Scan next to Quick Scan, Cancel of something not yet running.
+//   - WarningImportance (amber): proceeds, but discards work or skips a
+//     safeguard - leaving a review without applying corrections, syncing past
+//     unresolved conflicts, ending a session with uploads still pending.
+//     Nothing is deleted and nothing in flight is interrupted.
+//   - DangerImportance (red): interrupts a transfer that is actually running,
+//     or deletes/overwrites data. Red is the app's "this destroys something"
+//     signal and must not be spent on merely-final actions - two buttons that
+//     end up in the same place should never be styled blue and red.
+//   - LowImportance: incidental affordances that shouldn't compete - Details…,
+//     media transport controls.
+//
+// Row/list styling (e.g. the folder browser's selected-path buttons) uses
+// High/Medium purely as a selected/unselected shade and is outside this
+// ladder.
+//
 // lightenedTheme wraps Fyne's default theme and lightens the primary (blue,
 // widget.HighImportance) and error (red, widget.DangerImportance) colors a
 // few shades, so action/destructive buttons read a little softer than the

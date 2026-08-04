@@ -15,15 +15,47 @@ import (
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
-// showDangerConfirm shows a Yes/No confirmation with plain text buttons (no
-// check/cancel glyphs) whose confirm button is styled DangerImportance
-// (red), for confirming an irreversible or disruptive action rather than a
-// neutral one. Wraps dialog.NewCustomWithoutButtons + SetButtons since
+// actionRow lays out a screen footer's or dialog's buttons under one rule,
+// applied everywhere in the app: the way *out* of the flow (Back, Cancel,
+// Exit) sits leftmost, the button that *advances or completes* the flow sits
+// rightmost, and anything in between (alternative scan modes, a Retry, a
+// utility like Copy Error) goes in the middle. So the rightmost button is
+// always "the thing this screen is for", and the user never has to re-read a
+// row to find out which side commits.
+func actionRow(retreat fyne.CanvasObject, rest ...fyne.CanvasObject) *fyne.Container {
+	objs := make([]fyne.CanvasObject, 0, len(rest)+1)
+	if retreat != nil {
+		objs = append(objs, retreat)
+	}
+	objs = append(objs, rest...)
+	return container.NewHBox(objs...)
+}
+
+// showDangerConfirm shows a Yes/No confirmation whose confirm button is red
+// (DangerImportance), for an action that interrupts a transfer in flight or
+// destroys data. Use showCautionConfirm instead for one that merely
+// discards unsaved work or skips a safeguard - see the importance ladder in
+// theme.go.
+func showDangerConfirm(title, message, confirmText, dismissText string, callback func(bool), parent fyne.Window) (*widget.Label, *widget.Button) {
+	return showConfirmAction(title, message, confirmText, dismissText, widget.DangerImportance, callback, parent)
+}
+
+// showCautionConfirm is showDangerConfirm in amber (WarningImportance): the
+// action is a one-way door worth pausing at, but nothing is deleted and no
+// transfer is interrupted - e.g. leaving a review screen without applying
+// the corrections typed into it.
+func showCautionConfirm(title, message, confirmText, dismissText string, callback func(bool), parent fyne.Window) (*widget.Label, *widget.Button) {
+	return showConfirmAction(title, message, confirmText, dismissText, widget.WarningImportance, callback, parent)
+}
+
+// showConfirmAction shows a Yes/No confirmation with plain text buttons (no
+// check/cancel glyphs), the confirm button styled at the caller's
+// importance. Wraps dialog.NewCustomWithoutButtons + SetButtons since
 // dialog.NewCustomConfirm always adds theme icons to its buttons. Returns
 // the message label and confirm button so callers that need to keep the
 // dialog current (e.g. a syncing count that changes while it's open, and
-// the confirm button's danger styling along with it) can update them live.
-func showDangerConfirm(title, message, confirmText, dismissText string, callback func(bool), parent fyne.Window) (*widget.Label, *widget.Button) {
+// the confirm button's styling along with it) can update them live.
+func showConfirmAction(title, message, confirmText, dismissText string, imp widget.Importance, callback func(bool), parent fyne.Window) (*widget.Label, *widget.Button) {
 	msgLabel := widget.NewLabel(message)
 	msgLabel.Wrapping = fyne.TextWrapWord
 	d := dialog.NewCustomWithoutButtons(title, msgLabel, parent)
@@ -36,7 +68,7 @@ func showDangerConfirm(title, message, confirmText, dismissText string, callback
 		d.Hide()
 		callback(true)
 	})
-	confirmBtn.Importance = widget.DangerImportance
+	confirmBtn.Importance = imp
 	d.SetButtons([]fyne.CanvasObject{dismissBtn, confirmBtn})
 	d.Show()
 	return msgLabel, confirmBtn
