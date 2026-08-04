@@ -157,6 +157,10 @@ func showSyncRecorders(s *state) {
 
 	autoDeleteCheck := widget.NewCheck("Remove files from recorders after sync", nil)
 	autoDeleteCheck.SetChecked(s.cfg.RecorderSettings.AutoDeleteAfterVerify)
+	autoDeleteCheck.OnChanged = func(checked bool) {
+		s.cfg.RecorderSettings.AutoDeleteAfterVerify = checked
+		s.saveConfig()
+	}
 
 	// batchUploadCheck only makes sense once a cloud destination is picked;
 	// see uploadGroup.OnChanged below, which enables/disables it rather than
@@ -167,6 +171,10 @@ func showSyncRecorders(s *state) {
 	// unchecking it.
 	batchUploadCheck := widget.NewCheck("Batch upload after local sync", nil)
 	batchUploadCheck.SetChecked(s.cfg.RecorderSettings.BatchUpload)
+	batchUploadCheck.OnChanged = func(checked bool) {
+		s.cfg.RecorderSettings.BatchUpload = checked
+		s.saveConfig()
+	}
 	batchUploadCheck.Disable()
 	// Hint rides in parens directly under the checkbox's own label rather
 	// than a separate form row - widget.Check's label is a single-line
@@ -180,6 +188,10 @@ func showSyncRecorders(s *state) {
 
 	detectTimestampsCheck := widget.NewCheck("Detect bad recorder timestamps", nil)
 	detectTimestampsCheck.SetChecked(s.cfg.RecorderSettings.DetectBadTimestamps)
+	detectTimestampsCheck.OnChanged = func(checked bool) {
+		s.cfg.RecorderSettings.DetectBadTimestamps = checked
+		s.saveConfig()
+	}
 	// The match tolerance itself is set live on the timestamp review screen
 	// (with a slider that re-judges every recorder as it moves), not here -
 	// that's where seeing its effect is useful. It persists to
@@ -237,13 +249,17 @@ func showSyncRecorders(s *state) {
 		onOK()
 	}
 
-	destGroup.OnChanged = func([]string) {
+	destGroup.OnChanged = func(sel []string) {
 		updateStartEnabled()
 		refreshBrowserLocations()
 		checkMissingDestinations(func() {})
+		s.cfg.RecorderSettings.DestinationLocationIDs = idsFromLocations(locationsFromNames(s.cfg.Locations, sel, syncengine.LocationLocal))
+		s.saveConfig()
 	}
 	uploadGroup.OnChanged = func(sel []string) {
 		refreshBrowserLocations()
+		s.cfg.RecorderSettings.UploadLocationIDs = idsFromLocations(locationsFromNames(s.cfg.Locations, sel, syncengine.LocationRemote))
+		s.saveConfig()
 		if len(sel) > 0 {
 			batchUploadCheck.Enable()
 			batchUploadHint.Importance = widget.MediumImportance
