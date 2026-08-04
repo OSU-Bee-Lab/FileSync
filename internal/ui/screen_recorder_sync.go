@@ -218,13 +218,22 @@ func (sc *recorderSyncScreen) runBlinkTicker() {
 	}
 }
 
+// watchVolumes drains recorder.WatchVolumes and dispatches each event to its
+// own goroutine rather than handling it inline. onVolumeAttached performs
+// disk I/O (recorder.Detect, driver.RecorderID) against the volume before
+// ever reaching fyne.Do, and WatchVolumes' producer blocks on this channel
+// until it's received - so handling events inline here would stall the
+// whole poll loop (and therefore detection of every other recorder) for as
+// long as one volume's I/O takes, which can be minutes if that volume is a
+// stale mount (e.g. a device yanked without a clean unmount).
 func (sc *recorderSyncScreen) watchVolumes() {
 	for ev := range recorder.WatchVolumes(sc.watchCtx, time.Second) {
+		ev := ev
 		switch ev.Type {
 		case recorder.VolumeAttached:
-			sc.onVolumeAttached(ev.Volume)
+			go sc.onVolumeAttached(ev.Volume)
 		case recorder.VolumeDetached:
-			sc.onVolumeDetached(ev.Volume)
+			go sc.onVolumeDetached(ev.Volume)
 		}
 	}
 }
@@ -673,6 +682,32 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	}, reviewRows, sc.params.timestampTolerance)
 }
 
+// volumeIOTimeout bounds how long onVolumeAttached waits on a single
+// volume's disk I/O (recorder.Detect, driver.RecorderID) before giving up
+// on it as stale rather than hanging indefinitely.
+const volumeIOTimeout = 5 * time.Second
+
+// runWithTimeout runs fn (already on its own goroutine per watchVolumes'
+// dispatch) and waits up to timeout for it to finish, reporting false if it
+// doesn't. os.Stat/os.ReadDir against a mount left behind by an unclean
+// device removal can block for minutes waiting on SCSI/USB timeouts; this
+// keeps that from wedging detection of this one volume indefinitely. A
+// timed-out fn is abandoned - it may still complete later, its result
+// simply discarded - since neither os.Stat nor os.ReadDir is cancelable.
+func runWithTimeout(timeout time.Duration, fn func()) (finished bool) {
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
+}
+
 // onVolumeAttached handles a newly attached volume: detects its driver and
 // resolves its recorder ID, then either resumes a previously disconnected
 // row matched by device identity (see findDisconnectedRow) or starts a new
@@ -684,7 +719,11 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 // picking one driver.
 func (sc *recorderSyncScreen) onVolumeAttached(vol recorder.Volume) {
 	sc.inactivity.signalActivity()
-	driver, err := recorder.Detect(vol)
+	var driver recorder.Driver
+	var err error
+	if !runWithTimeout(volumeIOTimeout, func() { driver, err = recorder.Detect(vol) }) {
+		err = fmt.Errorf("timed out reading %s (mount may be stale)", vol.MountPoint)
+	}
 	if driver == nil && err == nil {
 		return
 	}
@@ -694,7 +733,9 @@ func (sc *recorderSyncScreen) onVolumeAttached(vol recorder.Volume) {
 		row.status = jobError
 		row.statusMsg = errString(err)
 	} else {
-		id, err = driver.RecorderID(vol)
+		if !runWithTimeout(volumeIOTimeout, func() { id, err = driver.RecorderID(vol) }) {
+			err = fmt.Errorf("timed out reading %s (mount may be stale)", vol.MountPoint)
+		}
 		if err != nil {
 			row.status = jobError
 			row.statusMsg = errString(err)
@@ -750,6 +791,12 @@ func (sc *recorderSyncScreen) onVolumeDetached(vol recorder.Volume) {
 			}
 			row.status = jobDisconnected
 			row.statusMsg = ""
+			// Blank the stored mount point now that it's gone: findRow
+			// matches by mount point, and the OS can hand that same path
+			// to an entirely different physical recorder later. Without
+			// this, that new recorder's own eventual detach would find
+			// and re-cancel this stale row instead of its own.
+			row.volume.MountPoint = ""
 		}
 		sc.rebuildRows()
 		sc.inactivity.signalActivity()
