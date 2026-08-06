@@ -296,10 +296,43 @@ func TestMP3DriverDecodes(t *testing.T) {
 	assertSimilarSignal(t, "MP3", left, want, 0.1, 0.1)
 }
 
+// TestWMADriverDecodes shells the fixture through ffmpeg twice: once via
+// transcode to produce the .wma, once inside the driver itself to decode it
+// back. Signal-level comparison, not exact samples, since WMA is lossy.
+func TestWMADriverDecodes(t *testing.T) {
+	requireFFmpeg(t)
+	dir := t.TempDir()
+	src := filepath.Join(dir, "tone.wav")
+	want := writeSineWAV(t, src)
+
+	dst := filepath.Join(dir, "tone.wma")
+	transcode(t, src, dst, "-b:a", "192k")
+
+	got, rate, ch := decodeFile(t, dst)
+	if rate != testRate {
+		t.Fatalf("decoded at %d Hz, want %d Hz", rate, testRate)
+	}
+	if ch != 2 {
+		t.Fatalf("decoded %d channels, want 2", ch)
+	}
+	// Stereo output of a mono source: one channel's worth is half the samples.
+	left := make([]int16, 0, len(got)/2)
+	for i := 0; i+1 < len(got); i += 2 {
+		left = append(left, got[i])
+	}
+	assertSimilarSignal(t, "WMA", left, want, 0.1, 0.4)
+}
+
 // TestSupportedExtensions pins what the UI will offer a play button for, so
-// adding a format is a deliberate change to this list.
+// adding a format is a deliberate change to this list. .wma is conditional
+// on this machine having ffmpeg on PATH - present in dev/CI where the other
+// tests' fixtures are transcoded with it, but not guaranteed everywhere this
+// driver runs.
 func TestSupportedExtensions(t *testing.T) {
 	want := map[string]bool{".flac": true, ".mp3": true, ".wav": true, ".wave": true}
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
+		want[".wma"] = true
+	}
 	got := audio.SupportedExtensions()
 	if len(got) != len(want) {
 		t.Fatalf("supported extensions = %v, want exactly %d entries", got, len(want))

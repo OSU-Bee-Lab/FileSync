@@ -13,10 +13,11 @@
 // there. Adding a format is a matter of dropping in a new file — nothing in
 // this package changes.
 //
-// MP3, FLAC and WAV are supported. WMA is deliberately not: there is no Go
-// decoder for it, and macOS dropped WMA support too, so it would mean
-// depending on an external ffmpeg binary. That's a separate decision from
-// this feature — a driver for it drops in here when it's made.
+// MP3, FLAC and WAV decode in pure Go. WMA has no Go decoder, so its driver
+// (internal/audio/drivers/wma.go) shells out to a system ffmpeg instead of
+// bundling one: it registers only when ffmpeg is found on PATH at startup,
+// so WMA playback is a free extra on a machine that has it and simply absent
+// — not broken — on one that doesn't.
 package audio
 
 import (
