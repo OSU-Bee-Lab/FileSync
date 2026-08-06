@@ -60,6 +60,14 @@ const (
 	// consistent with the recorder's clock having been set in the wrong
 	// half of the day.
 	IssueAMPM
+	// IssueDateAndTime: exactly one date field is off from consensus AND,
+	// independently, the time-of-day is off from the other recorders'
+	// median beyond tolerance (and isn't a clean 12h AM/PM flip - that's
+	// caught as IssueAMPM first). A single-field date correction alone
+	// would leave the residual time-of-day error in place, so both are
+	// snapped together: the date field(s) to consensus, the time-of-day to
+	// the median.
+	IssueDateAndTime
 	// IssueOther: a mismatch was detected but doesn't fit any of the above
 	// common-fault patterns cleanly enough to auto-suggest a fix; the user
 	// must supply the correct timestamp themselves.
@@ -83,8 +91,9 @@ type TimestampIssue struct {
 	Kind       TimestampIssueKind
 	// Suggested is the best-guess correct timestamp for DestRelPath: a
 	// confident single-field replacement for IssueWrongYear/Month/Day or
-	// IssueAMPM, or just Recorded unchanged for IssueNone/IssueOther (no
-	// confident guess - left for the user to type their own).
+	// IssueAMPM, a combined date-and-time-of-day snap for IssueDateAndTime,
+	// or just Recorded unchanged for IssueNone/IssueOther (no confident
+	// guess - left for the user to type their own).
 	Suggested time.Time
 	// ConsensusYear/Month/Day is the session-wide agreed recording date this
 	// recorder was checked against (see ConsensusDate), carried through so a
@@ -300,7 +309,14 @@ func evaluateTimestamp(earliestRel string, earliest time.Time, consensusYear int
 
 	// Not an AM/PM flip. A wrong date now means a genuine date-field error
 	// (wrong year/month/day at setup), corrected by snapping to the consensus
-	// date while keeping the (already-fine) time-of-day.
+	// date while keeping the (already-fine) time-of-day - unless the
+	// time-of-day *isn't* fine either: a recorder can be both a day off AND
+	// several hours off at once (e.g. set up on the wrong date, with the
+	// wrong hour too), and that residual time error wouldn't show up as
+	// "already fine" just because it didn't happen to be a clean 12h flip.
+	// Left unchecked, the single-field date fix below would silently ship a
+	// Suggested timestamp with the date corrected but the wrong hour still
+	// baked in.
 	if !dateMatches {
 		diffFields := 0
 		if earliest.Year() != consensusYear {
@@ -311,6 +327,14 @@ func evaluateTimestamp(earliestRel string, earliest time.Time, consensusYear int
 		}
 		if earliest.Day() != consensusDay {
 			diffFields++
+		}
+		if diffFields == 1 && median >= 0 && todDist(own, median) > tolMin {
+			// The date field is confidently identified, but the time-of-day
+			// independently misses the other recorders' median too - not a
+			// single confident correction, so snap both: the date to
+			// consensus, the time-of-day to the median.
+			corrected := time.Date(consensusYear, consensusMonth, consensusDay, median/60, median%60, 0, 0, earliest.Location())
+			return finish(IssueDateAndTime, true, corrected)
 		}
 		corrected := time.Date(consensusYear, consensusMonth, consensusDay, earliest.Hour(), earliest.Minute(), earliest.Second(), 0, earliest.Location())
 		switch {

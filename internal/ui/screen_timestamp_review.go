@@ -153,6 +153,12 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 			dir = "later than"
 		}
 		return fmt.Sprintf("first file at %s is about 12 h %s the other recorders' start — looks like an AM/PM mix-up", recTime, dir)
+	case recorder.IssueDateAndTime:
+		dir := "earlier than"
+		if check.RecordedLater {
+			dir = "later than"
+		}
+		return fmt.Sprintf("first file dated %s at %s — the other recorders agree on %s, and the time is also %d min %s their median start (tolerance %d min)", recDate, recTime, conDate, check.MinutesFromMedian, dir, tolMin)
 	case recorder.IssueOther:
 		sameDate := check.Recorded.Year() == check.ConsensusYear &&
 			check.Recorded.Month() == check.ConsensusMonth &&

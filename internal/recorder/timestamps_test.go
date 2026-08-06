@@ -63,7 +63,11 @@ func TestCheckRecorderTimestamp(t *testing.T) {
 	t.Run("wrong year: whole recorder shifted, not just first file", func(t *testing.T) {
 		// Every one of this recorder's files carries the same wrong year -
 		// there is no correct majority within its own files, so this must be
-		// caught against the session consensus, not against itself.
+		// caught against the session consensus, not against itself. This
+		// fixture's earliest file is also ~4h off the other recorders'
+		// median (17:58 vs 13:54) - a compound error, not a clean year-only
+		// slip, so it must come back as IssueDateAndTime with both fields
+		// snapped, not a year-only IssueWrongYear that leaves the hour wrong.
 		files := []SourceFile{
 			{DestRelPath: "a"}, {DestRelPath: "b"}, {DestRelPath: "c"}, {DestRelPath: "d"},
 		}
@@ -74,16 +78,12 @@ func TestCheckRecorderTimestamp(t *testing.T) {
 			"d": mustTime("2025-07-15 15:29"),
 		}
 		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, otherStarts, time.Hour)
-		if check == nil || !check.Suspicious || check.Kind != IssueWrongYear {
-			t.Fatalf("expected suspicious IssueWrongYear, got %+v", check)
+		if check == nil || !check.Suspicious || check.Kind != IssueDateAndTime {
+			t.Fatalf("expected suspicious IssueDateAndTime, got %+v", check)
 		}
-		if check.Suggested.Year() != 2026 {
-			t.Fatalf("expected suggested year 2026, got %d", check.Suggested.Year())
-		}
-		// The year-only fix doesn't touch the hour - the residual +4h error
-		// on this fixture is a known limitation, not a test bug.
-		if check.Suggested.Hour() != 17 {
-			t.Fatalf("expected the (still wrong) hour to pass through unchanged, got %d", check.Suggested.Hour())
+		want := mustTime("2026-07-10 13:54")
+		if !check.Suggested.Equal(want) {
+			t.Fatalf("expected Suggested %v (consensus date + median time-of-day), got %v", want, check.Suggested)
 		}
 	})
 
@@ -115,6 +115,42 @@ func TestCheckRecorderTimestamp(t *testing.T) {
 		}
 		if !check.Suggested.Equal(check.Recorded) {
 			t.Fatalf("expected Suggested == Recorded for IssueOther (no confident guess), got %+v", check)
+		}
+	})
+
+	t.Run("wrong day AND time-of-day off: compound error snaps both, not just the date", func(t *testing.T) {
+		// Day is off (11th vs the 10th consensus) by itself would look like a
+		// confident single-field fix - but this recorder's time-of-day is
+		// also ~7h off the other recorders' median (13:54) and it's not a
+		// clean 12h AM/PM flip either, so neither IssueWrongDay's date-only
+		// correction nor IssueAMPM's flip applies; this must be caught as a
+		// compound error with a Suggested that fixes both fields.
+		files := []SourceFile{{DestRelPath: "a"}}
+		times := map[string]time.Time{"a": mustTime("2026-07-11 21:00")}
+		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, otherStarts, time.Hour)
+		if check == nil || !check.Suspicious || check.Kind != IssueDateAndTime {
+			t.Fatalf("expected suspicious IssueDateAndTime, got %+v", check)
+		}
+		want := mustTime("2026-07-10 13:54")
+		if !check.Suggested.Equal(want) {
+			t.Fatalf("expected Suggested %v (consensus date + median time-of-day), got %v", want, check.Suggested)
+		}
+	})
+
+	t.Run("multiple date fields AND time-of-day off: no confident guess, stays IssueOther", func(t *testing.T) {
+		// Month, day, and time-of-day (132 min from the median) are all off
+		// at once - unlike the single-date-field compound case, there's no
+		// one clear pattern to anchor a suggestion on, so this must stay
+		// IssueOther with Suggested left at Recorded, same as any other
+		// unrecognized mismatch.
+		files := []SourceFile{{DestRelPath: "a"}}
+		times := map[string]time.Time{"a": mustTime("2026-08-15 16:06")}
+		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, otherStarts, time.Hour)
+		if check == nil || !check.Suspicious || check.Kind != IssueOther {
+			t.Fatalf("expected suspicious IssueOther, got %+v", check)
+		}
+		if !check.Suggested.Equal(check.Recorded) {
+			t.Fatalf("expected Suggested == Recorded when no confident guess applies, got %+v", check)
 		}
 	})
 
