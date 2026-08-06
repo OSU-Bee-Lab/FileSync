@@ -60,6 +60,9 @@ func showEditLocation(s *state, id int) {
 				return
 			}
 			name := strings.TrimSpace(nameEntry.Text)
+			if !requireUniqueLocationName(s.win, s.cfg.Locations, name, loc.ID) {
+				return
+			}
 			if !requireNonEmpty(s.win, localPath, "Folder required", "Choose a local folder first.") {
 				return
 			}
@@ -100,11 +103,26 @@ func showEditLocation(s *state, id int) {
 			showReauth = true
 		}
 
+		// siteURLEntry lets a SharePoint/OneDrive location show (and fix, if
+		// it's gone stale) the site URL the user originally pasted in when
+		// setting it up. rclone itself never stores this - it resolves
+		// straight to drive_id/drive_type - so it's tracked separately on
+		// the Location (SharePointSiteURL) rather than as an rclone field.
+		var siteURLEntry *widget.Entry
+		if bt == syncengine.BackendOneDrive {
+			siteURLEntry = widget.NewEntry()
+			siteURLEntry.SetPlaceHolder("SharePoint site URL")
+			siteURLEntry.SetText(loc.SharePointSiteURL)
+		}
+
 		saveBtn.OnTapped = func() {
 			if !requireNonEmpty(s.win, nameEntry.Text, "Nickname required", "Give this location a nickname first.") {
 				return
 			}
 			name := strings.TrimSpace(nameEntry.Text)
+			if !requireUniqueLocationName(s.win, s.cfg.Locations, name, loc.ID) {
+				return
+			}
 
 			specs, err := syncengine.FieldsFor(bt)
 			if err != nil {
@@ -121,6 +139,9 @@ func showEditLocation(s *state, id int) {
 				s.cfg.Locations[id].Name = name
 				s.cfg.Locations[id].RootPath = strings.TrimSpace(form.pathEntry.Text)
 				s.cfg.Locations[id].Role = roleFromLabel(roleSelect.Selected)
+				if siteURLEntry != nil {
+					s.cfg.Locations[id].SharePointSiteURL = strings.TrimSpace(siteURLEntry.Text)
+				}
 				s.saveConfig()
 				showLocations(s)
 				return
@@ -139,6 +160,9 @@ func showEditLocation(s *state, id int) {
 				s.cfg.Locations[id].Name = name
 				s.cfg.Locations[id].RootPath = strings.TrimSpace(form.pathEntry.Text)
 				s.cfg.Locations[id].Role = roleFromLabel(roleSelect.Selected)
+				if siteURLEntry != nil {
+					s.cfg.Locations[id].SharePointSiteURL = strings.TrimSpace(siteURLEntry.Text)
+				}
 				s.saveConfig()
 				showLocations(s)
 			})
@@ -148,11 +172,15 @@ func showEditLocation(s *state, id int) {
 			form.pathRow(),
 			form.container,
 		)
-		body = container.NewVBox(
+		formRows := []fyne.CanvasObject{
 			widget.NewForm(&widget.FormItem{Text: "Nickname", Widget: nameEntry}),
 			widget.NewForm(&widget.FormItem{Text: "Role", Widget: roleSelect}),
-			fieldsArea,
-		)
+		}
+		if siteURLEntry != nil {
+			formRows = append(formRows, widget.NewForm(&widget.FormItem{Text: "Site URL", Widget: siteURLEntry}))
+		}
+		formRows = append(formRows, fieldsArea)
+		body = container.NewVBox(formRows...)
 	}
 
 	saveBtn.Importance = widget.HighImportance

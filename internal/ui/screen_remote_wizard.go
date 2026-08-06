@@ -242,6 +242,9 @@ func showAddLocation(s *state) {
 			return
 		}
 		name := strings.TrimSpace(nameEntry.Text)
+		if !requireUniqueLocationName(s.win, s.cfg.Locations, name, "") {
+			return
+		}
 		if kindSelect.Selected == kindLabels[0] {
 			if !requireNonEmpty(s.win, localPath, "Folder required", "Choose a local folder first.") {
 				return
@@ -261,14 +264,18 @@ func showAddLocation(s *state) {
 		bt := kindBackends[kindSelect.Selected]
 		ensureRemote(func() {
 			finalize := func() {
-				s.cfg.Locations = append(s.cfg.Locations, syncengine.Location{
+				loc := syncengine.Location{
 					ID:         newLocationID(),
 					Name:       strings.TrimSpace(nameEntry.Text),
 					Kind:       syncengine.LocationRemote,
 					Role:       roleFromLabel(roleSelect.Selected),
 					RemoteName: createdRemoteName,
 					RootPath:   strings.TrimSpace(form.pathEntry.Text),
-				})
+				}
+				if bt == syncengine.BackendOneDrive {
+					loc.SharePointSiteURL = strings.TrimSpace(siteURLEntry.Text)
+				}
+				s.cfg.Locations = append(s.cfg.Locations, loc)
 				s.saveConfig()
 				showLocations(s)
 			}

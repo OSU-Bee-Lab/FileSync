@@ -88,6 +88,26 @@ func requireNonEmpty(win fyne.Window, value, title, msg string) bool {
 	return true
 }
 
+// requireUniqueLocationName rejects a nickname that collides with another
+// location's name (case-insensitive). Location pickers throughout the app
+// (e.g. Manage Files' role toggle group) key locations by Name, so two
+// locations sharing a name become indistinguishable - excludeID lets the
+// edit screen compare against every *other* location without tripping on
+// its own current name.
+func requireUniqueLocationName(win fyne.Window, locs []syncengine.Location, name, excludeID string) bool {
+	for _, l := range locs {
+		if l.ID == excludeID {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(l.Name), name) {
+			dialog.ShowInformation("Nickname already in use",
+				fmt.Sprintf("Another location is already named %q. Give this one a different nickname.", l.Name), win)
+			return false
+		}
+	}
+	return true
+}
+
 // pluralWord returns just the singular or plural form of a noun for a count,
 // with no number attached — for callers that format the count themselves
 // (e.g. through commaInt). pluralForm may be empty for the regular case,
