@@ -561,7 +561,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	showTimestampReview(timestampReviewHost{
 		s:                 s,
 		win:               s.win,
-		parentPath:        locs[0].Name + ": " + from,
+		parentPath:        from,
 		continueLabel:     "Apply Corrections",
 		continueBaseLabel: "Continue",
 		onContinue:        func() { showManageFiles(s) },

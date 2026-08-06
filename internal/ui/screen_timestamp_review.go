@@ -302,10 +302,14 @@ type timestampReviewHost struct {
 	s   *state
 	win fyne.Window
 
-	// parentPath is shown at the top of the screen, alongside the header, so
-	// the researcher can see at a glance where these files actually live -
-	// "<Location name>: <path>", the sync destination for Sync Recorders or
-	// the Location/path the user browsed to for Manage Files' Retime.
+	// parentPath is shown at the top of the screen, below the header, so the
+	// researcher can see at a glance which session/path is under review: the
+	// sync destination's relative path for Sync Recorders (single local
+	// destination, so its Location name is included - "<Location name>:
+	// <path>"), or the relative path the user browsed to for Manage Files'
+	// Retime (no Location name - Retime applies across every selected
+	// Location, so naming just one of them would misstate where this
+	// actually reaches).
 	parentPath string
 
 	// continueLabel/exitLabel must name the same destination twice, differing
@@ -481,7 +485,6 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	header := widget.NewLabelWithStyle("Review Recorder Timestamps", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	pathLbl := widget.NewLabel(host.parentPath)
 	pathLbl.Truncation = fyne.TextTruncateEllipsis
-	headerRow := container.NewBorder(nil, nil, header, pathLbl)
 	sub := widget.NewLabel("Each recorder's clock is assumed wrong (or right) for its entire session - adjusting one applies the same correction to every file from that recorder.")
 	sub.Wrapping = fyne.TextWrapWord
 
@@ -503,7 +506,7 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	rightBtns = append(rightBtns, continueBtn)
 
 	content := container.NewBorder(
-		container.NewVBox(headerRow, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
+		container.NewVBox(header, pathLbl, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
 		actionRow(exitBtn, rightBtns...),
 		nil, nil,
 		split,
