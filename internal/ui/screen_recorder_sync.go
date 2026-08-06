@@ -611,7 +611,14 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 // is what ever reaches the cloud. Guarded by timestampsHandled so it only
 // ever shows the review once per session, even if called again (e.g. the
 // user backs out of a confirm dialog and retries).
-func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
+//
+// forBatchUpload names which of the two callers (confirmEndSync or
+// confirmBatchUpload) is driving this - it decides the review screen's
+// button labels/wiring below, rather than re-deriving them from
+// sc.params.batchUpload, so a batch-mode session ending via confirmEndSync
+// (e.g. the inactivity prompt, which always calls confirmEndSync even in
+// batch mode) still gets labels that match what next actually does.
+func (sc *recorderSyncScreen) checkTimestampsThen(forBatchUpload bool, next func()) {
 	if sc.timestampsHandled || !sc.params.detectBadTimestamps {
 		next()
 		return
@@ -704,13 +711,21 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	// Without batch upload both buttons land in the same place - the session
 	// ends either way - so they're labeled as that one destination with and
 	// without the corrections, rather than as an "end" and an "exit" that
-	// sound like different outcomes. With batch upload they genuinely differ
-	// (continue uploads, exit doesn't), and the labels say so.
+	// sound like different outcomes. With batch upload, ending (next) and
+	// uploading (doConfirmBatchUpload) genuinely differ, so continue/exit
+	// name that outcome, and a third, middle button - apply the corrections
+	// but end without uploading - fills the gap those two leave: otherwise
+	// applying a correction in batch mode would force an upload right now,
+	// with no way to just fix the filenames and upload later.
 	continueLabel, exitLabel := "Apply & End Sync", "End Without Applying"
 	exitWarning := "Ending now will not apply any timestamp corrections - every recorder's files keep their original names."
-	if sc.params.batchUpload && len(sc.params.uploads) > 0 {
+	var applyOnlyLabel string
+	var onApplyOnly func()
+	if forBatchUpload {
 		continueLabel, exitLabel = "Apply & Upload", "Exit Without Uploading"
 		exitWarning = "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names. Nothing will be uploaded to the remote destination either."
+		applyOnlyLabel = "Apply & End Sync"
+		onApplyOnly = sc.doConfirmEndSync
 	}
 
 	// Leaving Screen 2 for the review screen now, same as the Batch Upload
@@ -719,14 +734,16 @@ func (sc *recorderSyncScreen) checkTimestampsThen(next func()) {
 	// running to pop its dialog on top of it.
 	sc.cancelWatch()
 	showTimestampReview(timestampReviewHost{
-		s:             sc.s,
-		win:           sc.s.win,
-		parentPath:    parentPath,
-		continueLabel: continueLabel,
-		onContinue:    next,
-		exitLabel:     exitLabel,
-		exitWarning:   exitWarning,
-		onExit:        sc.doConfirmEndSync,
+		s:              sc.s,
+		win:            sc.s.win,
+		parentPath:     parentPath,
+		continueLabel:  continueLabel,
+		onContinue:     next,
+		applyOnlyLabel: applyOnlyLabel,
+		onApplyOnly:    onApplyOnly,
+		exitLabel:      exitLabel,
+		exitWarning:    exitWarning,
+		onExit:         sc.doConfirmEndSync,
 		afterFix: func(row timestampReviewRow, delta time.Duration) {
 			if !sc.params.batchUpload && len(sc.params.uploads) > 0 {
 				reuploadCorrectedFiles(sc, row, destDirsByID[row.recorderID], delta)
@@ -931,7 +948,7 @@ func (sc *recorderSyncScreen) confirmEndSync() {
 		sc.doConfirmEndSync()
 		return
 	}
-	sc.checkTimestampsThen(sc.doConfirmEndSync)
+	sc.checkTimestampsThen(false, sc.doConfirmEndSync)
 }
 
 // doConfirmEndSync warns before ending the session if anything is actively
@@ -961,7 +978,7 @@ func (sc *recorderSyncScreen) doConfirmEndSync() {
 // before doConfirmBatchUpload starts the actual upload - the corrected
 // filename, not the original bad one, is what reaches the remote.
 func (sc *recorderSyncScreen) confirmBatchUpload() {
-	sc.checkTimestampsThen(sc.doConfirmBatchUpload)
+	sc.checkTimestampsThen(true, sc.doConfirmBatchUpload)
 }
 
 // doConfirmBatchUpload runs a Quick Scan-equivalent existence check between

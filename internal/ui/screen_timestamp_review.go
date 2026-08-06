@@ -316,6 +316,16 @@ type timestampReviewHost struct {
 	continueLabel string
 	onContinue    func()
 
+	// applyOnlyLabel/onApplyOnly optionally add a third button between exit
+	// and continue: apply the corrections, same as continue, but hand off to
+	// onApplyOnly instead of onContinue. Sync Recorders' batch-upload mode
+	// uses this so applying a clock-drift fix doesn't force committing to
+	// the upload right now; leave both zero to omit the button entirely
+	// (Manage Files and non-batch Sync Recorders, where continue and
+	// "apply only" would go to the same place anyway).
+	applyOnlyLabel string
+	onApplyOnly    func()
+
 	exitLabel   string
 	exitWarning string
 	onExit      func()
@@ -418,6 +428,17 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	continueBtn.Importance = widget.HighImportance
 	continueBtn.OnTapped = tr.applyAndContinue
 
+	// applyOnlyBtn, when the host supplies it, sits between exit and
+	// continue: same correction-applying behavior as continue, but hands
+	// off to onApplyOnly instead. Medium importance - it commits to
+	// applying, same as continue, but isn't "the thing this screen is for"
+	// (see actionRow), which stays the rightmost button.
+	var applyOnlyBtn *widget.Button
+	if host.applyOnlyLabel != "" {
+		applyOnlyBtn = widget.NewButton(host.applyOnlyLabel, tr.applyAndFinish)
+		applyOnlyBtn.Importance = widget.MediumImportance
+	}
+
 	// exitBtn leaves without applying any of the corrections being reviewed
 	// here, same as bypassing the check entirely - it deliberately calls
 	// host.onExit directly, not applyAndContinue or host.onContinue, neither
@@ -461,9 +482,15 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	split := container.NewHSplit(left, right)
 	split.SetOffset(0.3)
 
+	rightBtns := []fyne.CanvasObject{}
+	if applyOnlyBtn != nil {
+		rightBtns = append(rightBtns, applyOnlyBtn)
+	}
+	rightBtns = append(rightBtns, continueBtn)
+
 	content := container.NewBorder(
 		container.NewVBox(headerRow, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
-		actionRow(exitBtn, continueBtn),
+		actionRow(exitBtn, rightBtns...),
 		nil, nil,
 		split,
 	)
@@ -738,11 +765,12 @@ func (tr *timestampReviewScreen) refreshAudio() {
 	}
 }
 
-// applyAndContinue validates every checked entry's correction text, applies
+// applyFixes validates every checked entry's correction text and applies
 // them all (renaming every file for that recorder - see
-// recorder.ApplyTimestampFix - and re-uploading outside batch mode), then
-// hands off to onContinue (Batch Upload or End Sync).
-func (tr *timestampReviewScreen) applyAndContinue() {
+// recorder.ApplyTimestampFix - and re-uploading outside batch mode). It
+// reports false, having selected the offending recorder instead of applying
+// anything, if any checked entry's text fails to parse.
+func (tr *timestampReviewScreen) applyFixes() bool {
 	type parsedFix struct {
 		entry *timestampReviewEntry
 		delta time.Duration
@@ -755,7 +783,7 @@ func (tr *timestampReviewScreen) applyAndContinue() {
 		edited, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location())
 		if err != nil {
 			tr.selectForEntry(e)
-			return
+			return false
 		}
 		delta := edited.Sub(e.row.check.Recorded)
 		if delta == 0 {
@@ -770,7 +798,24 @@ func (tr *timestampReviewScreen) applyAndContinue() {
 			tr.host.afterFix(f.entry.row, f.delta)
 		}
 	}
-	tr.host.onContinue()
+	return true
+}
+
+// applyAndContinue applies every checked correction (see applyFixes), then
+// hands off to onContinue (Batch Upload or End Sync).
+func (tr *timestampReviewScreen) applyAndContinue() {
+	if tr.applyFixes() {
+		tr.host.onContinue()
+	}
+}
+
+// applyAndFinish is applyAndContinue's counterpart for the optional
+// applyOnlyBtn: applies every checked correction, then hands off to
+// onApplyOnly instead of onContinue.
+func (tr *timestampReviewScreen) applyAndFinish() {
+	if tr.applyFixes() {
+		tr.host.onApplyOnly()
+	}
 }
 
 // selectForEntry switches the detail pane to e (used to surface a parse

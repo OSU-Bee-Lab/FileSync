@@ -115,6 +115,15 @@ type Location struct {
 	// BuildNWayTransferPlan actually iterates for its tie-break.
 	Priority int `json:"priority,omitempty"`
 
+	// SharePointSiteURL is the SharePoint site URL the user pasted in when
+	// setting up this location, kept only so Edit Location can show it back
+	// to them - rclone itself never persists it (see
+	// syncengine.SharePointSiteURLKey), resolving straight to drive_id /
+	// drive_type instead. Only meaningful for a OneDrive/SharePoint remote
+	// location; empty for anything else, including OneDrive locations added
+	// before this field existed.
+	SharePointSiteURL string `json:"sharePointSiteURL,omitempty"`
+
 	// reachAnchor is an rclone spec that must be reachable for a "directory
 	// not found" at this location's own root to count as benign-empty (a
 	// folder that simply hasn't been created yet) rather than a hard listing
