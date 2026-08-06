@@ -314,7 +314,7 @@ func showAddLocation(s *state) {
 		nil, nil,
 		scroll,
 	)
-	s.setContent(container.NewPadded(content))
+	s.setContent(centerMaxWidth(container.NewPadded(content), windowSize.Width))
 }
 
 // populateRemoteFields renders the FieldSpecs for bt into remoteFieldsBox /

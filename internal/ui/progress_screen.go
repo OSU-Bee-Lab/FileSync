@@ -225,7 +225,7 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 	}
 
 	content := ps.buildLayout()
-	ps.s.setContentResizable(container.NewPadded(content))
+	ps.s.setContent(container.NewPadded(content))
 	ps.s.quitCheck = ps.quitState
 
 	if len(tasks) == 0 {

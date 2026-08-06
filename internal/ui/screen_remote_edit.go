@@ -211,5 +211,5 @@ func showEditLocation(s *state, id int) {
 		nil, nil,
 		scroll,
 	)
-	s.setContent(container.NewPadded(content))
+	s.setContent(centerMaxWidth(container.NewPadded(content), windowSize.Width))
 }

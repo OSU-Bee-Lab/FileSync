@@ -196,7 +196,7 @@ func showSettings(s *state) {
 		nil, nil,
 		scroll,
 	)
-	s.setContent(container.NewPadded(content))
+	s.setContent(centerMaxWidth(container.NewPadded(content), windowSize.Width))
 }
 
 // rebuildExcludeRows repopulates rows with one line per

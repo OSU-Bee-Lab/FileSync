@@ -102,7 +102,7 @@ type state struct {
 	// would interrupt or abandon anything, so the window-close handler can
 	// warn before actually closing. Only the screens that can leave
 	// something in that state (progressScreen, recorderSyncScreen) set it,
-	// once they've built their content - setContent/setContentResizable
+	// once they've built their content - setContent
 	// clear it back to nil on every screen change first, so navigating away
 	// (e.g. via Back) always reverts to "nothing to warn about" unless the
 	// new screen re-sets it itself.
@@ -124,14 +124,13 @@ type quitState struct {
 }
 
 // boundedWidthLayout caps the reported minimum width of its content to
-// maxWidth. Fyne sets a window's minimum size from its content's minimum size,
-// so any single wide child (a long path label, a wide entry, long form hint
-// text) would otherwise force the window wider than windowSize - which on
-// multi-monitor setups stretches it across displays. Capping the min width
-// here fixes that once for every screen instead of per-widget. The child is
-// always laid out at the container's full width, so fillable widgets (entries,
-// forms) simply fill it; text that overflows is the child's concern (set
-// Truncation on labels that hold long paths).
+// maxWidth and centers it within whatever width it's actually given. Used in
+// two places: as centerMaxWidth, for wrapping an individual screen's
+// narrow, form-only content (entries/selects that would look absurd
+// stretched edge to edge across a maximized window) so it stays a
+// comfortable reading width and centers instead of hugging the left edge;
+// and, historically, as the layout under every screen via setContent - see
+// growingWidthLayout below for why that's no longer the default.
 type boundedWidthLayout struct{ maxWidth float32 }
 
 func (l *boundedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
@@ -149,12 +148,6 @@ func (l *boundedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 }
 
 func (l *boundedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	// Cap the content's actual width at maxWidth and center it. Fyne's glfw
-	// driver can hand us a size far wider than windowSize (the multi-monitor
-	// stretch described on windowSize); without this cap, fillable widgets
-	// like text entries would expand to that full width and look absurdly
-	// wide. Clamping here keeps every screen's content at most windowSize wide
-	// regardless of the window the driver actually gives us.
 	w := size.Width
 	if w > l.maxWidth {
 		w = l.maxWidth
@@ -164,6 +157,18 @@ func (l *boundedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 		o.Resize(fyne.NewSize(w, size.Height))
 		o.Move(fyne.NewPos(x, 0))
 	}
+}
+
+// centerMaxWidth wraps content so its width never exceeds maxWidth,
+// centering it within whatever space its parent actually gives it. Every
+// screen now fills the full (possibly maximized) window width via
+// setContent/growingWidthLayout, so a screen whose content is just a narrow
+// form (entries, selects, labels - nothing designed to make use of extra
+// width) should wrap that content in centerMaxWidth before handing it to
+// setContent, rather than letting its fields stretch edge to edge across a
+// wide window.
+func centerMaxWidth(content fyne.CanvasObject, maxWidth float32) fyne.CanvasObject {
+	return container.New(&boundedWidthLayout{maxWidth: maxWidth}, content)
 }
 
 // currentOrDefaultSize returns w's current content size, or fallback if the
@@ -181,28 +186,17 @@ func currentOrDefaultSize(w fyne.Window, fallback fyne.Size) fyne.Size {
 	return cur
 }
 
-// setContent replaces the window's content and re-asserts the window's
-// pre-swap size immediately after (see currentOrDefaultSize). Screens must
-// call this instead of s.win.SetContent directly - see the comment on
-// windowSize for why. Content is wrapped in a boundedWidthLayout so no
-// screen can stretch the window past windowSize.
-func (s *state) setContent(content fyne.CanvasObject) {
-	s.quitCheck = nil
-	stopAudio()
-	clearAudioRefreshers()
-	size := currentOrDefaultSize(s.win, windowSize)
-	bounded := container.New(&boundedWidthLayout{maxWidth: windowSize.Width}, content)
-	s.win.SetContent(bounded)
-	s.win.Resize(size)
-}
-
-// growingWidthLayout keeps the same MinSize cap as boundedWidthLayout (so it
-// still can't force the window wider than windowSize on its own - the
-// multi-monitor stretch bug windowSize documents), but unlike
-// boundedWidthLayout it does not clamp the width handed to its child at
-// layout time. Use it for screens whose layout should grow to fill however
-// wide the user actually resizes the window instead of staying capped at
-// windowSize.
+// growingWidthLayout caps the reported minimum width of its content to
+// maxWidth - same as boundedWidthLayout, so a wide child (an untruncated
+// long path label, say) still can't force the window itself wider than
+// windowSize, which is what stretches it across displays on multi-monitor
+// setups (see windowSize) - but unlike boundedWidthLayout it always lays its
+// child out at the container's full given size rather than clamping it.
+// This is what lets a screen's content actually grow to fill a
+// maximized/resized window instead of staying capped at windowSize; a
+// screen that wants to stay a fixed comfortable width regardless (a narrow
+// form) should wrap that content in centerMaxWidth (above) before passing it
+// to setContent.
 type growingWidthLayout struct{ maxWidth float32 }
 
 func (l *growingWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
@@ -226,19 +220,20 @@ func (l *growingWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size)
 	}
 }
 
-// setContentResizable is like setContent, but its content grows to fill
-// however wide the user resizes the window rather than staying capped at
-// windowSize. Only use it for screens that were built to make good use of
-// the extra width (e.g. the sync progress screen's Experiments/Folders/Files
-// columns) - anything with fillable widgets not designed for a wide layout
-// should keep using setContent.
-func (s *state) setContentResizable(content fyne.CanvasObject) {
+// setContent replaces the window's content and re-asserts the window's
+// pre-swap size immediately after (see currentOrDefaultSize). Screens must
+// call this instead of s.win.SetContent directly - see the comment on
+// windowSize for why. Content is wrapped in a growingWidthLayout so it fills
+// however wide the window actually is (including maximized) instead of
+// staying capped at windowSize; wrap content in centerMaxWidth first if it
+// shouldn't stretch that wide (see centerMaxWidth).
+func (s *state) setContent(content fyne.CanvasObject) {
 	s.quitCheck = nil
 	stopAudio()
 	clearAudioRefreshers()
 	size := currentOrDefaultSize(s.win, windowSize)
-	bounded := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
-	s.win.SetContent(bounded)
+	growing := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
+	s.win.SetContent(growing)
 	s.win.Resize(size)
 }
 
@@ -419,5 +414,5 @@ func showHome(s *state) {
 	}
 	bottomRight := container.NewPadded(container.NewVBox(bottomRightItems...))
 
-	s.setContent(container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), bottomRight), nil, nil, main))
+	s.setContent(container.NewBorder(nil, container.NewHBox(layout.NewSpacer(), bottomRight), nil, nil, centerMaxWidth(main, windowSize.Width)))
 }

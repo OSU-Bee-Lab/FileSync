@@ -11,6 +11,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -240,7 +241,11 @@ func showPullFiles(s *state) {
 	content := container.NewBorder(
 		container.NewVBox(
 			widget.NewLabelWithStyle("Pull Files", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			widget.NewForm(&widget.FormItem{Text: "Source", Widget: srcSelect}),
+			// Capped and left-aligned (rather than left to fill the whole
+			// window) so the source dropdown doesn't stretch absurdly wide
+			// next to the browser tree below, which does make good use of
+			// the extra width.
+			container.NewHBox(centerMaxWidth(widget.NewForm(&widget.FormItem{Text: "Source", Widget: srcSelect}), 360), layout.NewSpacer()),
 		),
 		container.NewVBox(
 			widget.NewSeparator(),
