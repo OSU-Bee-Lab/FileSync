@@ -72,7 +72,11 @@ type folderUIState struct {
 }
 
 type expUIState struct {
-	label       string
+	label string
+	// role is the Location Role every task behind this experiment shares
+	// (see roleOfLocs) - drives its progress bar's color (see
+	// badgeFillColor): Audio blue, Results gold.
+	role        syncengine.LocationRole
 	status      uiJobStatus
 	err         error
 	totalBytes  int64
@@ -111,9 +115,13 @@ type barRow struct {
 	err      error
 	hasError bool
 	isFolder bool
-	gray     bool    // render with a permanent grey wash (already-synced items)
-	refIdx   int     // index this row maps back to (folder rows only)
-	fade     float64 // 0 fully visible … 1 invisible (trailing rows of a capped list)
+	// role drives this row's progress-fill color (see badgeFillColor):
+	// Audio blue, Results gold. Zero value (RoleAudio) for rows that never
+	// fill anyway (e.g. Manage Files' preview rows).
+	role   syncengine.LocationRole
+	gray   bool    // render with a permanent grey wash (already-synced items)
+	refIdx int     // index this row maps back to (folder rows only)
+	fade   float64 // 0 fully visible … 1 invisible (trailing rows of a capped list)
 	// conflictRelPath, when non-empty, marks this row as a scanned conflict
 	// the user can click to open the N-way resolver at (N-way sessions only,
 	// and only once the owning experiment's scan has completed).
@@ -136,9 +144,10 @@ func (f *folderUIState) isFullySkipped() bool {
 	return len(f.files) > 0
 }
 
-func buildExpUIState(label string, result syncengine.ScanResult) *expUIState {
+func buildExpUIState(label string, role syncengine.LocationRole, result syncengine.ScanResult) *expUIState {
 	exp := &expUIState{
 		label:   label,
+		role:    role,
 		status:  statusWaiting,
 		fileMap: make(map[string]*fileUIState),
 	}

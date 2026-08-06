@@ -276,6 +276,21 @@ func idsFromLocations(locs []syncengine.Location) []string {
 	return ids
 }
 
+// roleOfLocs returns the Role shared by every Location in locs, for a
+// scanTask's progress-bar color (see badgeFillColor). A scanTask's Locs are
+// always same-role - Sync Experiments splits a mixed selection into one
+// task per role (see nwayUnit), One Way and Pull Files each work from a
+// single Role at a time, and a recorder sync's Locations are always Audio -
+// so the first entry's Role speaks for the whole task. Empty locs (a
+// waiting task with none assigned yet) falls back to RoleAudio, the zero
+// value.
+func roleOfLocs(locs []syncengine.Location) syncengine.LocationRole {
+	if len(locs) == 0 {
+		return syncengine.RoleAudio
+	}
+	return locs[0].Role
+}
+
 // rolesFrom returns locs' Roles as a slice index-matched to locs itself,
 // for presenceIndicator.Update - its present []bool is index-matched to
 // destFolderBrowser.locs the same way, so the two line up dot-for-dot.

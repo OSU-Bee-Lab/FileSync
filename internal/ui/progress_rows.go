@@ -39,7 +39,7 @@ func (ps *progressScreen) makeBarList(rows *[]barRow, isSelected func(barRow) bo
 			if isSelected != nil {
 				sel = isSelected(row)
 			}
-			updateBackingBarItem(obj, row.label, row.summary, row.progress, row.err, row.hasError, row.isFolder, sel, ps.s.win, row.conflictReason)
+			updateBackingBarItem(obj, row.label, row.summary, row.progress, row.err, row.hasError, row.isFolder, sel, ps.s.win, row.conflictReason, row.role)
 			setItemFade(obj, row.fade)
 			if row.gray {
 				tintItemBg(obj, color.NRGBA{R: 243, G: 244, B: 246, A: 255})
@@ -243,6 +243,7 @@ func (ps *progressScreen) computeFileRows() (unsynced, synced []barRow) {
 				progress: prog,
 				err:      f.err,
 				hasError: f.hasError,
+				role:     exp.role,
 			})
 		}
 	} else {
@@ -253,7 +254,7 @@ func (ps *progressScreen) computeFileRows() (unsynced, synced []barRow) {
 			case syncengine.ActionConflict:
 				unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: "⚠ conflict", conflictReason: e.ConflictReason})
 			default:
-				unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size)})
+				unsynced = append(unsynced, barRow{label: path.Base(e.RelPath), summary: humanBytes(e.Size), role: exp.role})
 			}
 		}
 	}
@@ -321,6 +322,7 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 				hasError: fold.hasError,
 				isFolder: true,
 				refIdx:   i,
+				role:     exp.role,
 				// Orange wash rolls up from the files: the folder stays flagged
 				// until every conflict inside it has a decision.
 				conflictReason: unresolvedWarnTip(unresolved),
@@ -348,6 +350,7 @@ func (ps *progressScreen) computeFolderRows() (unsynced, synced []barRow) {
 				summary:  fmt.Sprintf("%d / %d files", row.SkipCount, total),
 				isFolder: true,
 				refIdx:   i,
+				role:     exp.role,
 				// Mid-scan nothing can be resolved yet, so every conflict found
 				// so far counts as outstanding.
 				conflictReason: unresolvedWarnTip(row.ConflictCount),

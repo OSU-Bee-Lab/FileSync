@@ -30,6 +30,7 @@ func (ps *progressScreen) runScan() {
 	for i, t := range ps.tasks {
 		ps.expStates[i] = &expUIState{
 			label:  t.Label,
+			role:   roleOfLocs(t.Locs),
 			status: statusWaiting,
 		}
 		ps.scanResults[i] = syncengine.ScanResult{}
@@ -106,7 +107,7 @@ func (ps *progressScreen) runScan() {
 
 			ps.scanResults[i] = result
 			fyne.Do(func() {
-				ps.expStates[i] = buildExpUIState(task.Label, result)
+				ps.expStates[i] = buildExpUIState(task.Label, roleOfLocs(task.Locs), result)
 				ps.expStates[i].status = statusDone
 				if ps.selectedExpIdx == i {
 					ps.selectedFoldIdx = 0
@@ -186,7 +187,7 @@ func (ps *progressScreen) runSync() {
 	// Rebuild expStates from scanResults so progress is reset when
 	// re-running after a cancellation.
 	for i, t := range ps.tasks {
-		ps.expStates[i] = buildExpUIState(t.Label, ps.scanResults[i])
+		ps.expStates[i] = buildExpUIState(t.Label, roleOfLocs(t.Locs), ps.scanResults[i])
 	}
 	ps.selectedFoldIdx = 0
 	ps.phase = phaseSyncing

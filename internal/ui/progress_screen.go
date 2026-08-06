@@ -186,7 +186,7 @@ func showSyncFlowExtras(s *state, tasks []scanTask, onBack func(), extras syncFl
 		scanResults:     make([]syncengine.ScanResult, len(tasks)),
 	}
 	for i, t := range tasks {
-		ps.expStates[i] = &expUIState{label: t.Label, status: statusWaiting}
+		ps.expStates[i] = &expUIState{label: t.Label, role: roleOfLocs(t.Locs), status: statusWaiting}
 		ps.expOrder[i] = i
 	}
 
@@ -303,7 +303,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 			// Orange wash rolls all the way up: an experiment stays flagged
 			// while any conflict anywhere inside it is still undecided.
 			warn := unresolvedWarnTip(ps.unresolvedInExp(exp))
-			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win, warn)
+			updateBackingBarItem(obj, exp.label, summary, prog, exp.err, exp.hasError, false, isSelected, s.win, warn, exp.role)
 		},
 	)
 

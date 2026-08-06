@@ -27,7 +27,7 @@ func TestApplySyncSnapshotStickyCompletion(t *testing.T) {
 			Action:  syncengine.ActionCopy,
 		}
 	}
-	exp := buildExpUIState("Luke - Various Opportunistic Recordings", syncengine.ScanResult{
+	exp := buildExpUIState("Luke - Various Opportunistic Recordings", syncengine.RoleAudio, syncengine.ScanResult{
 		Entries:    entries,
 		CopyCount:  nFiles,
 		TotalBytes: fileSize * nFiles,
@@ -111,7 +111,7 @@ func TestApplySyncSnapshotConcurrentTransfers(t *testing.T) {
 		{RelPath: "exp1/c.wav", Size: fileSize, Action: syncengine.ActionCopy},
 		{RelPath: "exp1/d.wav", Size: fileSize, Action: syncengine.ActionCopy},
 	}
-	exp := buildExpUIState("Concurrent Transfers Exp", syncengine.ScanResult{
+	exp := buildExpUIState("Concurrent Transfers Exp", syncengine.RoleAudio, syncengine.ScanResult{
 		Entries:    entries,
 		CopyCount:  len(entries),
 		TotalBytes: fileSize * int64(len(entries)),
@@ -213,7 +213,7 @@ func TestApplySyncSnapshotSkipIdenticalPlusActiveCopy(t *testing.T) {
 		{RelPath: "exp2/already3.wav", Size: fileSize, Action: syncengine.ActionSkipIdentical},
 		{RelPath: "exp2/active.wav", Size: fileSize, Action: syncengine.ActionCopy},
 	}
-	exp := buildExpUIState("Skip Plus Active Exp", syncengine.ScanResult{
+	exp := buildExpUIState("Skip Plus Active Exp", syncengine.RoleAudio, syncengine.ScanResult{
 		Entries:    entries,
 		CopyCount:  1,
 		TotalBytes: fileSize,
@@ -297,7 +297,7 @@ func TestMarkDoneSkipsConflictAndErroredFiles(t *testing.T) {
 		{RelPath: "exp3/conflict.wav", Size: fileSize, Action: syncengine.ActionConflict},
 		{RelPath: "exp3/already.wav", Size: fileSize, Action: syncengine.ActionSkipIdentical},
 	}
-	exp := buildExpUIState("MarkDone Exp", syncengine.ScanResult{
+	exp := buildExpUIState("MarkDone Exp", syncengine.RoleAudio, syncengine.ScanResult{
 		Entries:    entries,
 		CopyCount:  2,
 		TotalBytes: fileSize * 2,

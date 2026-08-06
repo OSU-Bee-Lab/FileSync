@@ -10,7 +10,31 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
+
+// audioFillDone/Pending and resultsFillDone/Pending are a backing-bar
+// item's normal-case (no error/conflict) progress-fill tones, picked by
+// role.String() blue for Audio, gold for Results - the same role coding as
+// badgeFillColor's badges/dots/name, but as a fill-friendly pastel pair
+// rather than one flat color, matching the existing blue tones' two-shade
+// pattern (a lighter tint mid-transfer, a slightly deeper one once done).
+var (
+	audioFillDone      = color.NRGBA{R: 147, G: 197, B: 253, A: 255}
+	audioFillPending   = color.NRGBA{R: 219, G: 234, B: 254, A: 255}
+	resultsFillDone    = color.NRGBA{R: 212, G: 175, B: 55, A: 255}
+	resultsFillPending = color.NRGBA{R: 242, G: 228, B: 184, A: 255}
+)
+
+// fillColorsForRole picks a backing-bar item's normal-case progress-fill
+// pair by Location Role.
+func fillColorsForRole(role syncengine.LocationRole) (done, pending color.Color) {
+	if role == syncengine.RoleResults {
+		return resultsFillDone, resultsFillPending
+	}
+	return audioFillDone, audioFillPending
+}
 
 // This file holds reusable render primitives shared by the scan/sync screen
 // (progress_screen.go) and, for sectionHeader, screen_recorders.go's local
@@ -104,7 +128,7 @@ func createBackingBarItem(win fyne.Window) fyne.CanvasObject {
 	return item
 }
 
-func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, progress float64, itemErr error, hasError bool, isFolder bool, isSelected bool, win fyne.Window, warnTip string) {
+func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, progress float64, itemErr error, hasError bool, isFolder bool, isSelected bool, win fyne.Window, warnTip string, role syncengine.LocationRole) {
 	containerObj := obj.(*fyne.Container)
 	bg := containerObj.Objects[0].(*canvas.Rectangle)
 	fill := containerObj.Objects[1].(*canvas.Rectangle)
@@ -165,11 +189,12 @@ func updateBackingBarItem(obj fyne.CanvasObject, labelText, summaryText string, 
 		fillColor = color.NRGBA{R: 253, G: 186, B: 116, A: 255}
 	} else {
 		bgColor = color.White
+		done, pending := fillColorsForRole(role)
 		if progress >= 1.0 {
-			fillColor = color.NRGBA{R: 147, G: 197, B: 253, A: 255}
+			fillColor = done
 			bgColor = fillColor
 		} else {
-			fillColor = color.NRGBA{R: 219, G: 234, B: 254, A: 255}
+			fillColor = pending
 		}
 	}
 

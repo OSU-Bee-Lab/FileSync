@@ -42,7 +42,7 @@ func TestBuildExpUIStateCarriesConflictInfo(t *testing.T) {
 			{RelPath: "r/skip.mp3", Size: 20, Action: syncengine.ActionSkipIdentical},
 		},
 	}
-	exp := buildExpUIState("exp-a", result)
+	exp := buildExpUIState("exp-a", syncengine.RoleAudio, result)
 
 	conflict, ok := exp.fileMap["r/conflict.mp3"]
 	if !ok {
