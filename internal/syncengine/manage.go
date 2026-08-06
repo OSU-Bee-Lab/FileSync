@@ -141,11 +141,15 @@ type MovePlan struct {
 	Collisions []string // DstRelPath values that already exist
 	// SrcRoot is the srcRelPath PlanMove was called with. ApplyMove uses it
 	// afterward to clean up any directories left empty by moving every file
-	// out of them - rclone remotes generally have no real "rename a
-	// directory" operation (a directory is just an inferred prefix of its
-	// objects' paths), so a move is always applied file-by-file, and the
+	// out of them - when a move has to be applied file-by-file, the
 	// now-pathless source directories don't disappear on their own.
 	SrcRoot string
+	// DstRoot is where SrcRoot lands as a whole, set only when the move is a
+	// whole-directory move (SrcRoot is a directory, not a single file). With
+	// no collisions to resolve, that is exactly the case ApplyMove can hand
+	// to rclone as one directory rename instead of a move per file - see the
+	// fast path there.
+	DstRoot string
 }
 
 // PlanMove lists everything under srcRelPath and computes each file's new
@@ -210,8 +214,9 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 		effectiveDst = path.Join(dstRelPath, path.Base(srcRelPath))
 	}
 
-	plan := MovePlan{SrcRoot: srcRelPath}
+	plan := MovePlan{SrcRoot: srcRelPath, DstRoot: effectiveDst}
 	if srcIsFile {
+		plan.DstRoot = ""
 		// Cleanup only ever Rmdirs a directory - SrcRoot must be the file's
 		// parent, not the file's own path.
 		plan.SrcRoot = path.Dir(srcRelPath)
@@ -248,12 +253,17 @@ const (
 // ApplyMove executes a MovePlan at loc. resolutions supplies the decision
 // for every path in plan.Collisions (by DstRelPath); any collision without
 // an explicit resolution is treated as CollisionSkip, never as an implicit
-// overwrite. Moves run up to fs.Config.Transfers at a time (the same
-// concurrency the rest of the app uses for copies - see SetTransfers):
-// rclone remotes have no bulk "rename a directory" call, so this is applied
-// one MoveFile per file, and on a remote like SharePoint/OneDrive each of
-// those is its own network round trip - running them one at a time turns a
-// few-hundred-file rename into a few-hundred-round-trip wait even though
+// overwrite.
+//
+// A whole-directory move with nothing colliding is handed to rclone as a
+// single directory rename (see moveWholeDir) - the overwhelmingly common
+// case, and the difference between one API call and one per file. Anything
+// else (a single file, or a merge where the user resolved collisions
+// per path) is applied one MoveFile per file, up to fs.Config.Transfers at
+// a time (the same concurrency the rest of the app uses for copies - see
+// SetTransfers): on a remote like SharePoint/OneDrive each move is its own
+// network round trip, so running them one at a time would turn a
+// few-hundred-file operation into a few-hundred-round-trip wait even though
 // the backend moves each file server-side (no re-upload). Once every file
 // has moved, it also removes any directory under plan.SrcRoot (including
 // SrcRoot itself) left with nothing in it.
@@ -261,6 +271,9 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	f, err := cache.Get(ctx, loc.rcloneSpec())
 	if err != nil {
 		return err
+	}
+	if plan.SrcRoot != "" && plan.DstRoot != "" && len(plan.Collisions) == 0 {
+		return moveWholeDir(ctx, f, loc, plan.SrcRoot, plan.DstRoot)
 	}
 	collides := make(map[string]bool, len(plan.Collisions))
 	for _, c := range plan.Collisions {
@@ -311,6 +324,26 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 		if err := operations.Rmdirs(ctx, f, plan.SrcRoot, false); err != nil {
 			return fmt.Errorf("cleaning up empty directories under %s at %s: %w", plan.SrcRoot, loc.Name, err)
 		}
+	}
+	return nil
+}
+
+// moveWholeDir renames srcRoot to dstRoot at f in one operation.
+// operations.DirMove uses the backend's own directory-rename call where it
+// has one - a single server-side API call for OneDrive/SharePoint, Drive
+// and Dropbox, and a plain os.Rename locally - and transparently falls back
+// to its own parallel per-file move (plus source-directory cleanup, so
+// nothing extra is needed here) on a backend that has none, such as S3.
+// Case-only renames ("reed" -> "Reed") go via the two-step temporary-name
+// form on a case-insensitive backend, which would otherwise see source and
+// destination as the same directory.
+func moveWholeDir(ctx context.Context, f fs.Fs, loc Location, srcRoot, dstRoot string) error {
+	move := operations.DirMove
+	if f.Features().CaseInsensitive && srcRoot != dstRoot && strings.EqualFold(srcRoot, dstRoot) {
+		move = operations.DirMoveCaseInsensitive
+	}
+	if err := move(ctx, f, srcRoot, dstRoot); err != nil {
+		return fmt.Errorf("moving %s to %s at %s: %w", srcRoot, dstRoot, loc.Name, err)
 	}
 	return nil
 }

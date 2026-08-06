@@ -114,6 +114,100 @@ func TestApplyMove_SkipLeavesSourceInPlace(t *testing.T) {
 	}
 }
 
+// A plain directory rename with nothing colliding must go through rclone's
+// one-shot directory move, not a move per file - on a remote like
+// SharePoint that is the difference between one API call and one per file.
+// The observable difference: a file that appeared after the plan was built
+// moves too, because the directory itself is what got renamed.
+func TestApplyMove_DirectoryRenameMovesWholeDirAtOnce(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "Reed - Illinois Soybean/2026-07-17/r1/230802_0751.mp3"), "audio")
+
+	ctx := context.Background()
+	plan, err := PlanMove(ctx, loc, "Reed - Illinois Soybean/2026-07-17", "Reed - Illinois Soybean/2026-07-14")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.DstRoot != "Reed - Illinois Soybean/2026-07-14" {
+		t.Fatalf("DstRoot = %q, want the destination directory", plan.DstRoot)
+	}
+	writeFile(t, filepath.Join(root, "Reed - Illinois Soybean/2026-07-17/r1/unplanned.mp3"), "late arrival")
+
+	if err := ApplyMove(ctx, loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "Reed - Illinois Soybean/2026-07-14/r1/230802_0751.mp3"))
+	if err != nil || string(data) != "audio" {
+		t.Errorf("renamed audio file = %q, err=%v", data, err)
+	}
+	data, err = os.ReadFile(filepath.Join(root, "Reed - Illinois Soybean/2026-07-14/r1/unplanned.mp3"))
+	if err != nil || string(data) != "late arrival" {
+		t.Errorf("whole directory should have been renamed, taking the unplanned file with it: %q, err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Reed - Illinois Soybean/2026-07-17")); !os.IsNotExist(err) {
+		t.Errorf("source directory should be gone after a rename, stat err=%v", err)
+	}
+}
+
+// The fast path is only for whole directories: moving a single file must
+// still go file-by-file, leaving everything else in its source directory.
+func TestPlanMove_SingleFileHasNoDstRoot(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/r1/a.mp3"), "a")
+	writeFile(t, filepath.Join(root, "exp/r1/b.mp3"), "b")
+
+	ctx := context.Background()
+	plan, err := PlanMove(ctx, loc, "exp/r1/a.mp3", "exp/r1/renamed.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.DstRoot != "" {
+		t.Fatalf("DstRoot = %q, want empty for a single-file move", plan.DstRoot)
+	}
+	if err := ApplyMove(ctx, loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "exp/r1/renamed.mp3")); err != nil || string(data) != "a" {
+		t.Errorf("renamed file = %q, err=%v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "exp/r1/b.mp3")); err != nil || string(data) != "b" {
+		t.Errorf("sibling file should be untouched: %q, err=%v", data, err)
+	}
+}
+
+// Merging into a directory that already exists can't be a directory rename;
+// rclone reports the destination exists and falls back to per-file moves,
+// which must still merge both trees correctly.
+func TestApplyMove_MergeIntoExistingDirWithoutCollisions(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "src/r2/b.mp3"), "b")
+	writeFile(t, filepath.Join(root, "dst/r1/a.mp3"), "a")
+
+	ctx := context.Background()
+	plan, err := PlanMove(ctx, loc, "src", "dst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Collisions) != 0 {
+		t.Fatalf("expected no collisions, got %+v", plan.Collisions)
+	}
+	if err := ApplyMove(ctx, loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "dst/r2/b.mp3")); err != nil || string(data) != "b" {
+		t.Errorf("merged file = %q, err=%v", data, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "dst/r1/a.mp3")); err != nil || string(data) != "a" {
+		t.Errorf("existing destination file should be untouched: %q, err=%v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "src")); !os.IsNotExist(err) {
+		t.Errorf("emptied source directory should be cleaned up, stat err=%v", err)
+	}
+}
+
 func TestPlanDelete_ListsAllNestedFiles(t *testing.T) {
 	root := t.TempDir()
 	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}

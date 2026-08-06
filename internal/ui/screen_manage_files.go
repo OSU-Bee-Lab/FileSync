@@ -1098,18 +1098,33 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 			backBtn.Disable()
 			applyBtn.Disable()
 			go func() {
-				var failed []string
+				// Locations are independent of one another, so apply them
+				// concurrently - otherwise a fast local Location waits behind
+				// however long the slow remote one takes.
+				errs := make([]string, len(tasks))
 				ctx := context.Background()
-				for _, t := range tasks {
-					var err error
-					switch req.op {
-					case manageOpMove:
-						err = syncengine.ApplyMove(ctx, t.loc, *t.move, t.resolutions)
-					case manageOpDelete:
-						err = syncengine.ApplyDelete(ctx, t.loc, req.from)
-					}
-					if err != nil {
-						failed = append(failed, t.loc.Name+": "+err.Error())
+				var wg sync.WaitGroup
+				for i, t := range tasks {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						var err error
+						switch req.op {
+						case manageOpMove:
+							err = syncengine.ApplyMove(ctx, t.loc, *t.move, t.resolutions)
+						case manageOpDelete:
+							err = syncengine.ApplyDelete(ctx, t.loc, req.from)
+						}
+						if err != nil {
+							errs[i] = t.loc.Name + ": " + err.Error()
+						}
+					}()
+				}
+				wg.Wait()
+				var failed []string
+				for _, e := range errs {
+					if e != "" {
+						failed = append(failed, e)
 					}
 				}
 				fyne.Do(func() {
