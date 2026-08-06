@@ -266,6 +266,12 @@ func (ps *progressScreen) runSync() {
 				// the slower ones keep running.
 				ps.setTaskSpeed(i, 0)
 
+				// The wind-down this task was reporting is over (however it
+				// ended), so it must stop claiming to be finishing up -
+				// otherwise the last snapshot's flag would keep the caption on
+				// screen for as long as the other tasks keep running.
+				ps.expStates[i].finalizing = false
+
 				statusText := statusDone
 				var jobErr error
 				switch final.Status {

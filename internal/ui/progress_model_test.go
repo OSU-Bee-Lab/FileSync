@@ -344,3 +344,79 @@ func TestMarkDoneSkipsConflictAndErroredFiles(t *testing.T) {
 		t.Errorf("exp copyFilesDone = %d, want 1", exp.copyFilesDone)
 	}
 }
+
+// TestFinishingUp covers the caption shown once every byte has moved but the
+// jobs haven't reported back - it must hold for exactly that state, and never
+// while anything is still queued or still transferring.
+func TestFinishingUp(t *testing.T) {
+	running := func(finalizing bool) *expUIState {
+		return &expUIState{status: statusRunning, finalizing: finalizing}
+	}
+
+	tests := []struct {
+		name  string
+		phase syncPhase
+		exps  []*expUIState
+		want  bool
+	}{
+		{
+			name:  "every in-flight experiment winding down",
+			phase: phaseSyncing,
+			exps:  []*expUIState{{status: statusDone}, running(true)},
+			want:  true,
+		},
+		{
+			name:  "one experiment still transferring",
+			phase: phaseSyncing,
+			exps:  []*expUIState{running(true), running(false)},
+			want:  false,
+		},
+		{
+			name:  "an experiment still queued behind maxConcurrentTasks",
+			phase: phaseSyncing,
+			exps:  []*expUIState{running(true), {status: statusWaiting}},
+			want:  false,
+		},
+		{
+			name:  "nothing in flight at all",
+			phase: phaseSyncing,
+			exps:  []*expUIState{{status: statusDone}, {status: statusError}},
+			want:  false,
+		},
+		{
+			name:  "sync already complete",
+			phase: phaseSyncComplete,
+			exps:  []*expUIState{running(true)},
+			want:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ps := &progressScreen{phase: tt.phase, expStates: tt.exps}
+			if got := ps.finishingUp(); got != tt.want {
+				t.Errorf("finishingUp() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestApplySyncSnapshotTracksFinalizing checks the flag follows the job rather
+// than latching: a retry can restart transfers after the window opens, and the
+// caption has to come back down when it does.
+func TestApplySyncSnapshotTracksFinalizing(t *testing.T) {
+	exp := buildExpUIState("exp", syncengine.RoleAudio, syncengine.ScanResult{
+		Entries: []syncengine.ScanEntry{
+			{RelPath: "exp/a.wav", Size: 100, Action: syncengine.ActionCopy},
+		},
+	})
+
+	exp.applySyncSnapshot(syncengine.ProgressSnapshot{Finalizing: true})
+	if !exp.finalizing {
+		t.Error("finalizing snapshot should set the flag")
+	}
+	exp.applySyncSnapshot(syncengine.ProgressSnapshot{Finalizing: false})
+	if exp.finalizing {
+		t.Error("flag should clear once the job reports transfers again")
+	}
+}

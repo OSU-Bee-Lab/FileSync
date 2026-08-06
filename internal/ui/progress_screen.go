@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -20,6 +21,12 @@ import (
 // Folders/Files row-list construction, and progress_run.go for the scan/sync
 // goroutine drivers that mutate progressScreen's expStates and call back
 // into its refresh methods.
+
+// finishingUpText captions the window between the last byte transferring and
+// the sync reporting itself complete - see progressScreen.finishingUp. Shared
+// by the header title, the overall progress bar, and the per-experiment rows
+// so all three say the same thing about the same state.
+const finishingUpText = "Finishing up..."
 
 // syncFlowExtras adapts showSyncFlow's two extra modes beyond the plain
 // pairwise scan-then-sync flow, both used by N-way sync (see
@@ -158,6 +165,33 @@ func (ps *progressScreen) isSyncing() bool {
 	return ps.phase == phaseSyncing || ps.phase == phaseSyncComplete || ps.phase == phaseSyncCancelled
 }
 
+// finishingUp reports whether the sync has transferred every byte it's going
+// to and is now only waiting on its jobs to wind down (see
+// syncengine.ProgressSnapshot.Finalizing). That tail moves no bytes, so the
+// progress bar can't say anything about it - it just sits at the 99% hold
+// renderMetrics applies - and on a big tree it can last minutes. Every
+// unfinished experiment has to be in that state for it to count: while
+// anything is still queued or still transferring, the sync as a whole isn't
+// finishing up, however far along one of its experiments happens to be.
+func (ps *progressScreen) finishingUp() bool {
+	if ps.phase != phaseSyncing {
+		return false
+	}
+	inFlight := 0
+	for _, e := range ps.expStates {
+		switch e.status {
+		case statusWaiting:
+			return false
+		case statusRunning:
+			if !e.finalizing {
+				return false
+			}
+			inFlight++
+		}
+	}
+	return inFlight > 0
+}
+
 // quitState reports an active transfer for as long as a real copy is
 // running - see state.quitCheck.
 func (ps *progressScreen) quitState() quitState {
@@ -235,6 +269,15 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	ps.retryLabel.Hide()
 
 	ps.overallBar = widget.NewProgressBar()
+	// Say what the bar is waiting on once it's pinned at the 99% hold with no
+	// bytes left to move, rather than leaving a frozen percentage as the only
+	// thing on screen. Matches Fyne's own default formatting otherwise.
+	ps.overallBar.TextFormatter = func() string {
+		if ps.finishingUp() {
+			return finishingUpText
+		}
+		return strconv.FormatFloat(ps.overallBar.Value*100, 'f', 0, 64) + "%"
+	}
 	ps.overallBarInf = widget.NewProgressBarInfinite()
 
 	ps.expValue = widget.NewLabelWithStyle("0 / 0", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -299,6 +342,12 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 				prog = float64(exp.bytesDone) / float64(exp.totalBytes)
 			}
 			summary := fmt.Sprintf("%d%%", int(prog*100))
+			if ps.phase == phaseSyncing && exp.finalizing {
+				// Row-level counterpart of the header/overall-bar caption: with
+				// several experiments in flight this is also what identifies
+				// which of them the run is waiting on.
+				summary = finishingUpText
+			}
 			isSelected := ps.selectedExpIdx == ps.expOrder[id]
 			// Orange wash rolls all the way up: an experiment stays flagged
 			// while any conflict anywhere inside it is still undecided.
@@ -618,6 +667,9 @@ func (ps *progressScreen) applyPhaseChrome() {
 		title := "Syncing"
 		if ps.extras.syncingTitle != "" {
 			title = ps.extras.syncingTitle
+		}
+		if ps.finishingUp() {
+			title += " — " + finishingUpText
 		}
 		ps.titleLabel.SetText(title)
 		ps.overallBarInf.Hide()

@@ -76,9 +76,14 @@ type expUIState struct {
 	// role is the Location Role every task behind this experiment shares
 	// (see roleOfLocs) - drives its progress bar's color (see
 	// badgeFillColor): Audio blue, Results gold.
-	role        syncengine.LocationRole
-	status      uiJobStatus
-	err         error
+	role   syncengine.LocationRole
+	status uiJobStatus
+	err    error
+	// finalizing mirrors syncengine.ProgressSnapshot.Finalizing: this
+	// experiment's files have all transferred but its job hasn't reported
+	// back yet. Drives the "Finishing up" chrome, so a tail that moves no
+	// bytes doesn't read as a stalled sync.
+	finalizing  bool
 	totalBytes  int64
 	bytesDone   int64
 	hasError    bool
@@ -355,6 +360,8 @@ func (e *expUIState) applyScanProgress(p syncengine.ScanProgress) {
 // per-file, per-folder, and experiment-level aggregates. Pure — the caller
 // wraps this in fyne.Do and triggers a re-render.
 func (e *expUIState) applySyncSnapshot(snap syncengine.ProgressSnapshot) {
+	e.finalizing = snap.Finalizing
+
 	// Reset folder/exp aggregates; the loop below over e.fileMap re-derives
 	// them in the same pass as the per-file updates (folders are cheap —
 	// there are far fewer of them than files — so this two-line reset plus

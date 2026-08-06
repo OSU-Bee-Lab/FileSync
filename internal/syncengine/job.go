@@ -154,6 +154,14 @@ type ProgressSnapshot struct {
 	// in-flight files beyond the first aren't individually named here.
 	Files map[string]FileProgress
 
+	// Finalizing is true once every file the scan queued has finished
+	// transferring but rclone's CopyDir hasn't returned yet - the tail where
+	// it winds down its checker/transfer pipeline and reads the last errors
+	// out of the job. No bytes move in that window, so a UI driven by the
+	// byte counter alone can only sit at its last value for however long the
+	// tail lasts, looking hung; see progressScreen's "Finishing up" chrome.
+	Finalizing bool
+
 	// Retrying is true while the job is paused between attempts after a
 	// transient error (see copyDirWithRetry). The job is still JobRunning
 	// at this point - it isn't a failure until every retry is exhausted -
@@ -237,6 +245,13 @@ func filesFromFilter(expected ScanResult) *filter.Filter {
 // error message, rather than a progress bar that never finishes and never
 // explains itself. Dropped connections stay unlimited.
 const unlimitedNonTransientAttempts = 3
+
+// finalizeLogInterval is how often the debug log reports that a job is still
+// winding down after its last file transferred. Rate-limited because the
+// progress loop ticks four times a second and this window can last minutes -
+// the useful signal is that it's still open and for how long, not one line
+// per tick.
+const finalizeLogInterval = 5 * time.Second
 
 // speedWindow is the span the displayed transfer speed averages over. Any
 // change in the real rate (including a drop to 0 once bytes stop moving) is
@@ -414,6 +429,19 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 	ctx = filter.ReplaceConfig(ctx, cachedFilter)
 	ci.NoTraverse = true
 
+	// Don't stamp destination directories with their source's modtime. rclone
+	// does this by default, and it's pure cost here: nothing in this app ever
+	// reads a directory's modtime (the scan compares files - see
+	// FileLocationState - and a Location's identity is its path, not its
+	// timestamps). What it costs is a pass over every directory the copy
+	// touched, which rclone defers to *after* the last byte has transferred
+	// (setDelayedDirModTimes in fs/sync). That's one metadata write per
+	// directory on a local destination and one HTTP request per directory on
+	// SharePoint/OneDrive - on an experiment tree with thousands of recorder
+	// directories, minutes of work with the progress bar already showing every
+	// file transferred.
+	ci.NoUpdateDirModTime = true
+
 	groupName := "filesync-job-" + random.String(8)
 	ctx = accounting.WithStatsGroup(ctx, groupName)
 
@@ -464,6 +492,13 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 
 		var speed speedAverager
 
+		// finalizingSince marks when the last queued file finished
+		// transferring, so the wait for CopyDir to return afterwards can be
+		// both reported to the UI (ProgressSnapshot.Finalizing) and timed in
+		// the debug log - that tail is invisible in the byte counter, which
+		// is already at 100% throughout it.
+		var finalizingSince, lastFinalizeLog time.Time
+
 		emit := func(status JobStatus, err error) {
 			currentBytes := stats.GetBytes()
 			currentSpeed := speed.observe(time.Now(), currentBytes)
@@ -513,6 +548,28 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 			snapRetrying, snapAttempt, snapMax, snapRetryErr := retrying, retryAttempt, retryMax, retryErr
 			retryMu.Unlock()
 
+			// Every queued file has completed (rclone counts a transfer only
+			// once its post-copy verify and .partial rename are done) and the
+			// copy goroutine still hasn't returned: whatever it's doing now
+			// isn't transferring this job's files. Deliberately keyed off the
+			// transfer count rather than bytes, so a job whose files are all
+			// empty can't read as finalizing from its first tick.
+			finalizing := status == JobRunning && !snapRetrying &&
+				expected.CopyCount > 0 && int(stats.GetTransfers()) >= expected.CopyCount
+			switch {
+			case finalizing && finalizingSince.IsZero():
+				finalizingSince = time.Now()
+				lastFinalizeLog = finalizingSince
+				debugf("copy %s -> %s: all %d files transferred, waiting for rclone to wind the job down", fsrc.Root(), fdst.Root(), expected.CopyCount)
+			case finalizing && time.Since(lastFinalizeLog) >= finalizeLogInterval:
+				lastFinalizeLog = time.Now()
+				debugf("copy %s -> %s: still finishing up %s after the last file transferred", fsrc.Root(), fdst.Root(), time.Since(finalizingSince).Round(time.Second))
+			case !finalizing:
+				// A retry can restart transfers after this point, so the
+				// window has to be able to close again as well as open.
+				finalizingSince = time.Time{}
+			}
+
 			// copyDirWithRetry re-runs sync.CopyDir on the same stats group
 			// after a transient error, so a file that partially transferred
 			// before the drop gets fully re-sent on retry; stats.GetBytes()
@@ -535,6 +592,7 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 				Err:          err,
 				Speed:        currentSpeed,
 				Files:        filesMap,
+				Finalizing:   finalizing,
 				Retrying:     snapRetrying,
 				RetryAttempt: snapAttempt,
 				RetryMax:     snapMax,
@@ -553,6 +611,9 @@ func startCopyPreserving(parent context.Context, srcRoot, dstRoot, srcRelPath, d
 					}
 				}
 				debugf("copy %s -> %s: finished, status=%v err=%v", fsrc.Root(), fdst.Root(), status, err)
+				if !finalizingSince.IsZero() {
+					debugf("copy %s -> %s: spent %s finishing up after the last file transferred", fsrc.Root(), fdst.Root(), time.Since(finalizingSince).Round(time.Second))
+				}
 				emit(status, err)
 				return
 			case <-ticker.C:
