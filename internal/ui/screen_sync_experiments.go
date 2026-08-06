@@ -24,9 +24,12 @@ const (
 	syncRoleResults = "Results"
 )
 
-// roleToggle renders the Audio/Results radio shared by both sync modes —
-// Audio and Results locations must never converge in the same N-way run
-// (see filterByRole), so this picks which set the location picker offers.
+// roleToggle renders One Way Sync's Audio/Results radio. It exists only
+// there: that mode pushes a single chosen local folder outward, and such a
+// folder holds either audio or results, never both, so its destinations are
+// filtered to the role that folder is. All-Way Sync has no such constraint —
+// it offers both roles at once, grouped (see newRoleToggleGroup), and
+// converges each role among its own locations (see buildNWayUnits).
 func roleToggle(s *state) *widget.RadioGroup {
 	g := widget.NewRadioGroup([]string{syncRoleAudio, syncRoleResults}, func(choice string) {
 		role := syncengine.RoleAudio
@@ -88,12 +91,39 @@ func syncModeToggle(s *state) *widget.RadioGroup {
 // different-content disagreements always surfaced for an explicit decision
 // (never guessed; see syncengine.compareObjectsN).
 func showSyncExperimentsAllWay(s *state) {
-	allNames := locationNames(filterByRole(s.cfg.Locations, s.syncRole))
-
 	if len(s.syncExperimentsLocationNames) == 0 {
 		s.syncExperimentsLocationNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncExperimentsLocationIDs)
 	}
-	locGroup := newToggleGroup(allNames, append([]string{}, s.syncExperimentsLocationNames...), locationNumbers(s.cfg.Locations))
+	// Audio and Results locations are offered together, grouped by role: a
+	// run converges each role among its own locations, so one pass syncs a
+	// tree of recordings and its mirrored tree of buzzdetect results at
+	// once (see buildNWayUnits).
+	locGroup := newRoleToggleGroup(s.cfg.Locations, append([]string{}, s.syncExperimentsLocationNames...))
+
+	// roleNote calls out a role with exactly one location selected — it has
+	// nothing to converge with, so it is silently dropped from the run
+	// unless the user says so here.
+	roleNote := widget.NewLabel("")
+	roleNote.Wrapping = fyne.TextWrapWord
+	updateRoleNote := func() {
+		locs := locationsFromNamesAny(s.cfg.Locations, locGroup.Selected())
+		var lonely []string
+		for _, role := range []syncengine.LocationRole{syncengine.RoleAudio, syncengine.RoleResults} {
+			if len(filterByRole(locs, role)) == 1 {
+				lonely = append(lonely, labelFromRole(role))
+			}
+		}
+		switch len(lonely) {
+		case 0:
+			roleNote.Hide()
+		case 1:
+			roleNote.SetText(fmt.Sprintf("Only one %s location is selected, so it has nothing to converge with — pick a second %s location or it will be skipped.", lonely[0], lonely[0]))
+			roleNote.Show()
+		default:
+			roleNote.SetText("Only one Audio location and one Results location are selected, so neither has anything to converge with — pick a second of each or both will be skipped.")
+			roleNote.Show()
+		}
+	}
 
 	// setLocationNames caches the selection for the session (as before) and
 	// persists it to cfg so it's restored the next time the app opens,
@@ -120,7 +150,11 @@ func showSyncExperimentsAllWay(s *state) {
 		if quickScanBtn == nil || fullScanBtn == nil {
 			return
 		}
-		if len(locGroup.Selected()) >= 2 && len(expBrowser.SelectedFiles()) > 0 {
+		// A run needs at least one role with two or more locations to
+		// converge; a lone location of the other role is skipped (roleNote
+		// says so), so the buttons key off the units that would actually run.
+		locs := locationsFromNamesAny(s.cfg.Locations, locGroup.Selected())
+		if len(buildNWayUnits(locs, expBrowser.SelectedFiles())) > 0 {
 			quickScanBtn.Enable()
 			fullScanBtn.Enable()
 		} else {
@@ -173,8 +207,10 @@ func showSyncExperimentsAllWay(s *state) {
 
 	locGroup.OnChanged = func(sel []string) {
 		setLocationNames(sel)
+		updateRoleNote()
 		refresh()
 	}
+	updateRoleNote()
 	if len(locGroup.Selected()) >= 1 {
 		refresh()
 	}
@@ -182,15 +218,15 @@ func showSyncExperimentsAllWay(s *state) {
 	startScanMode := func(mode syncengine.NWayScanMode) {
 		names := locGroup.Selected()
 		expNames := expBrowser.SelectedFiles()
-		if len(names) < 2 {
-			dialog.ShowInformation("Pick locations", "Choose at least two locations to converge.", s.win)
+		locs := locationsFromNamesAny(s.cfg.Locations, names)
+		if len(filterByRole(locs, syncengine.RoleAudio)) < 2 && len(filterByRole(locs, syncengine.RoleResults)) < 2 {
+			dialog.ShowInformation("Pick locations", "Choose at least two locations of the same role (Audio or Results) to converge.", s.win)
 			return
 		}
 		if len(expNames) == 0 {
 			dialog.ShowInformation("Pick experiments", "Select at least one experiment to sync.", s.win)
 			return
 		}
-		locs := locationsFromNamesAny(s.cfg.Locations, names)
 
 		startScan := func() {
 			runNWayScan(s, locs, expNames, mode)
@@ -223,10 +259,8 @@ func showSyncExperimentsAllWay(s *state) {
 		container.NewVBox(
 			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewPadded(syncModeToggle(s)),
-			container.NewPadded(roleToggle(s)),
-			widget.NewLabel("Pick two or more locations to sync."),
 			container.NewPadded(locGroup.CanvasObject()),
-			widget.NewLabel("Pick one or more experiments to sync."),
+			roleNote,
 			widget.NewSeparator(),
 		),
 		actionRow(backBtn, fullScanBtn, quickScanBtn),
@@ -269,7 +303,7 @@ func showSyncExperimentsOneWay(s *state) {
 	if len(s.syncOneWayToNames) == 0 {
 		s.syncOneWayToNames = selectedFromIDs(s.cfg.Locations, s.cfg.SyncOneWayLocationIDs)
 	}
-	locGroup := newToggleGroup(names, append([]string{}, s.syncOneWayToNames...), locationNumbers(s.cfg.Locations))
+	locGroup := newToggleGroup(names, append([]string{}, s.syncOneWayToNames...), s.cfg.Locations)
 	browser := newDestFolderBrowser(s.win, true)
 
 	selectedLocs := func() []syncengine.Location {
@@ -399,7 +433,6 @@ func showSyncExperimentsOneWay(s *state) {
 			widget.NewLabelWithStyle("Sync Locations", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			container.NewPadded(syncModeToggle(s)),
 			container.NewPadded(roleToggle(s)),
-			widget.NewLabel("Push a local folder's contents one-way onto the same folder in one or more locations."),
 			container.NewHBox(chooseSrcBtn, srcLabel),
 			widget.NewLabel("To locations:"),
 			container.NewPadded(locGroup.CanvasObject()),
@@ -458,12 +491,15 @@ func oneWayScanLabel(dsts []syncengine.Location, relPath string) string {
 func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location, relPath string, mode syncengine.NWayScanMode) {
 	fset := s.cfg.DefaultFilter
 	locs := append([]syncengine.Location{src}, dsts...)
-	names := []string{oneWayPseudoName}
 	label := oneWayScanLabel(dsts, relPath)
+	// One Way is always exactly one unit: the source folder plus its
+	// destinations, at the pseudo-experiment path (see oneWayPseudoName).
+	// Its own role split happens earlier, at the picker (see roleToggle).
+	units := []nwayUnit{{expName: oneWayPseudoName, label: oneWayPseudoName, locs: locs}}
 
 	var resolver *nwayResolver
 	if mode == syncengine.NWayFullScan {
-		resolver = newNWayResolver(names)
+		resolver = newNWayResolver(units)
 	}
 	results := make([]syncengine.NWayScanResult, 1)
 
@@ -513,7 +549,7 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 		onSync := func() {
 			resolutions := resolver.buildResolutions()
 			proceed := func() {
-				applyNWayResolutions(s, names, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
+				applyNWayResolutions(s, units, resolver.results, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
 					// The user already reviewed the scan and resolved every
 					// conflict before pressing Sync, so the transfer starts
 					// immediately (autoSync=true), same as All-Way's full path.
@@ -579,11 +615,73 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 			pluralWord(len(dsts), "location", "")))
 }
 
+// nwayUnit is one convergence job: one experiment across the selected
+// Locations of a single Role. Audio and Results Locations never converge
+// with one another — a Results tree mirrors an Audio tree's structure but
+// holds entirely different files (see syncengine.LocationRole) — so a
+// selection spanning both roles runs as two units per experiment, side by
+// side in one scan/sync session.
+type nwayUnit struct {
+	expName string
+	role    syncengine.LocationRole
+	// label names the unit everywhere the UI shows it (the Experiments
+	// column, conflict rows, the resolver's keys — see nwayConflictKey).
+	// It's the bare experiment name when only one role is running, and
+	// role-suffixed when both are, so the two units are distinguishable. It
+	// is display only and never part of any path.
+	label string
+	locs  []syncengine.Location
+}
+
+// buildNWayUnits splits locs by Role and pairs every selected experiment
+// with each role group that has two or more Locations. A role group with
+// fewer than two selected Locations has nothing to converge and is dropped
+// (the picker screen's roleNote says so up front).
+//
+// Each group is put back into ranked order (normalizedLocationOrder: locals
+// by Priority, then remotes by Priority) before it goes to the scan, since
+// slice order is exactly what BuildNWayTransferPlan walks to pick a copy
+// source among equally-valid candidates (see PreferLocalSource). The
+// picker already offers each role in that order (newRoleToggleGroup), so
+// this is belt-and-braces for any caller that assembles a location list
+// some other way: a Results tree converges from the highest-ranked Results
+// Location, and an Audio tree from the highest-ranked Audio one.
+func buildNWayUnits(locs []syncengine.Location, expNames []string) []nwayUnit {
+	groups := []struct {
+		role syncengine.LocationRole
+		locs []syncengine.Location
+	}{
+		{syncengine.RoleAudio, normalizedLocationOrder(filterByRole(locs, syncengine.RoleAudio))},
+		{syncengine.RoleResults, normalizedLocationOrder(filterByRole(locs, syncengine.RoleResults))},
+	}
+	running := 0
+	for _, g := range groups {
+		if len(g.locs) >= 2 {
+			running++
+		}
+	}
+	var units []nwayUnit
+	for _, name := range expNames {
+		for _, g := range groups {
+			if len(g.locs) < 2 {
+				continue
+			}
+			label := name
+			if running > 1 {
+				label = fmt.Sprintf("%s (%s)", name, labelFromRole(g.role))
+			}
+			units = append(units, nwayUnit{expName: name, role: g.role, label: label, locs: g.locs})
+		}
+	}
+	return units
+}
+
 // runNWayScan runs the N-way scan live inside the shared scan/sync screen:
-// one task per experiment, each diffing that experiment across every
-// selected location (syncengine.ScanNWayWithProgress) with the same
-// three-column live progress as a pairwise scan — conflicts surface the
-// moment they're found, not in a blocking wait dialog at the end.
+// one task per unit — an experiment across one role's locations, so a mixed
+// Audio+Results selection scans both trees in the same session (see
+// buildNWayUnits) — each diffing via syncengine.ScanNWayWithProgress with
+// the same three-column live progress as a pairwise scan; conflicts surface
+// the moment they're found, not in a blocking wait dialog at the end.
 //
 // Under NWayFullScan, Sync is gated behind an explicit per-file resolution
 // for every conflict (see nwayResolver); pressing it applies the
@@ -596,20 +694,21 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 // runNWayTransfers.
 func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode syncengine.NWayScanMode) {
 	fset := s.cfg.DefaultFilter
+	units := buildNWayUnits(locs, expNames)
 
 	var resolver *nwayResolver
 	if mode == syncengine.NWayFullScan {
-		resolver = newNWayResolver(expNames)
+		resolver = newNWayResolver(units)
 	}
-	results := make([]syncengine.NWayScanResult, len(expNames))
+	results := make([]syncengine.NWayScanResult, len(units))
 
-	tasks := make([]scanTask, len(expNames))
-	for i, name := range expNames {
+	tasks := make([]scanTask, len(units))
+	for i, unit := range units {
 		tasks[i] = scanTask{
-			Label: name,
-			Locs:  locs,
+			Label: unit.label,
+			Locs:  unit.locs,
 			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
-				result, err := syncengine.ScanNWayWithProgress(ctx, locs, name, fset, progress, mode)
+				result, err := syncengine.ScanNWayWithProgress(ctx, unit.locs, unit.expName, fset, progress, mode)
 				if err != nil {
 					return syncengine.ScanResult{}, err
 				}
@@ -636,11 +735,11 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 			// Happy path: once the diff completes cleanly, jump straight
 			// into the per-direction transfer-plan session so the user
 			// reviews the actual source → dest split before committing.
-			onScanDone: func() { runNWayTransfers(s, expNames, results, mode, false) },
-			// Fallback: if some experiment's scan errored, onScanDone is
-			// skipped and this screen renders normally so the user can see
-			// the error — Sync still needs to work if pressed manually.
-			onNWaySync:   func() { runNWayTransfers(s, expNames, results, mode, true) },
+			onScanDone: func() { runNWayTransfers(s, units, results, mode, false) },
+			// Fallback: if some unit's scan errored, onScanDone is skipped and
+			// this screen renders normally so the user can see the error —
+			// Sync still needs to work if pressed manually.
+			onNWaySync:   func() { runNWayTransfers(s, units, results, mode, true) },
 			syncingTitle: syncingTitle,
 			quickScan:    true,
 		}
@@ -648,8 +747,8 @@ func runNWayScan(s *state, locs []syncengine.Location, expNames []string, mode s
 		onSync := func() {
 			resolutions := resolver.buildResolutions()
 			proceed := func() {
-				applyNWayResolutions(s, expNames, resolver.results, locs, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
-					runNWayTransfers(s, expNames, resolved, mode, true)
+				applyNWayResolutions(s, units, resolver.results, fset, resolutions, func(resolved []syncengine.NWayScanResult) {
+					runNWayTransfers(s, units, resolved, mode, true)
 				})
 			}
 			if resolver.hasDeletes() {
@@ -702,25 +801,27 @@ func runSyncTransferTasks(s *state, tasks []scanTask, mode syncengine.NWayScanMo
 		syncFlowExtras{autoSync: autoSync, syncingTitle: syncingTitle, quickScan: quick})
 }
 
-// runNWayTransfers builds the minimal transfer plan for every experiment and
+// runNWayTransfers builds the minimal transfer plan for every scan unit and
 // hands the resulting (source, dest, files) jobs to the existing scan/
-// progress UI, one task per (experiment, direction) pair so its Experiments
-// column shows exactly which files move which way. autoSync is threaded
+// progress UI, one task per (unit, direction) pair so its Experiments
+// column shows exactly which files move which way — and, for a mixed
+// Audio+Results run, which role's tree they belong to. autoSync is threaded
 // through to runSyncTransferTasks (see there).
-func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
+func runNWayTransfers(s *state, units []nwayUnit, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
 	var tasks []scanTask
-	for i, name := range expNames {
+	for i, unit := range units {
 		pairs := syncengine.BuildNWayTransferPlan(results[i], syncengine.PreferLocalSource)
 		for _, pair := range pairs {
 			result := syncengine.ScanResultFromNWayTransfers(results[i], pair)
+			expName := unit.expName
 			tasks = append(tasks, scanTask{
-				Label: fmt.Sprintf("%s: %s → %s", name, pair.Source.Name, pair.Dest.Name),
+				Label: fmt.Sprintf("%s: %s → %s", unit.label, pair.Source.Name, pair.Dest.Name),
 				Locs:  []syncengine.Location{pair.Source, pair.Dest},
 				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
 					return result, nil
 				},
 				Start: func(ctx context.Context, expected syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot) {
-					return syncengine.StartSyncExperiments(ctx, pair.Source, pair.Dest, name, expected)
+					return syncengine.StartSyncExperiments(ctx, pair.Source, pair.Dest, expName, expected)
 				},
 			})
 		}
@@ -737,22 +838,27 @@ func runNWayTransfers(s *state, expNames []string, results []syncengine.NWayScan
 // and hands off to buildAndRun. If no resolution requires a physical
 // operation, this skips straight to applying overwrites — no need to
 // re-scan when nothing changed underneath.
-func applyNWayResolutions(s *state, expNames []string, results []syncengine.NWayScanResult, locs []syncengine.Location, fset syncengine.FilterSettings, resolutions []syncengine.NWayConflictResolution, buildAndRun func([]syncengine.NWayScanResult)) {
-	locByID := make(map[string]syncengine.Location, len(locs))
-	for _, l := range locs {
-		locByID[l.ID] = l
+func applyNWayResolutions(s *state, units []nwayUnit, results []syncengine.NWayScanResult, fset syncengine.FilterSettings, resolutions []syncengine.NWayConflictResolution, buildAndRun func([]syncengine.NWayScanResult)) {
+	// A resolution's ExpName carries the unit label it came from (see
+	// nwayResolver.buildResolutions), so every lookup below - which
+	// locations to act on, which experiment path to act within - goes
+	// through that unit rather than assuming one location set for the whole
+	// session.
+	unitByLabel := make(map[string]nwayUnit, len(units))
+	for _, u := range units {
+		unitByLabel[u.label] = u
 	}
 
 	applyOverwrites := func(results []syncengine.NWayScanResult) []syncengine.NWayScanResult {
 		resolved := make([]syncengine.NWayScanResult, len(results))
-		for i, name := range expNames {
-			var perExp []syncengine.NWayConflictResolution
+		for i, unit := range units {
+			var perUnit []syncengine.NWayConflictResolution
 			for _, r := range resolutions {
-				if r.ExpName == name {
-					perExp = append(perExp, r)
+				if r.ExpName == unit.label {
+					perUnit = append(perUnit, r)
 				}
 			}
-			resolved[i] = syncengine.ApplyOverwriteResolutions(results[i], perExp)
+			resolved[i] = syncengine.ApplyOverwriteResolutions(results[i], perUnit)
 		}
 		return resolved
 	}
@@ -780,7 +886,15 @@ func applyNWayResolutions(s *state, expNames []string, results []syncengine.NWay
 			if len(r.TargetLocationIDs) == 0 {
 				continue
 			}
-			fullPath := path.Join(r.ExpName, r.RelPath)
+			unit, ok := unitByLabel[r.ExpName]
+			if !ok {
+				continue
+			}
+			locByID := make(map[string]syncengine.Location, len(unit.locs))
+			for _, l := range unit.locs {
+				locByID[l.ID] = l
+			}
+			fullPath := path.Join(unit.expName, r.RelPath)
 			switch r.Kind {
 			case syncengine.NWayRename:
 				newName := r.NewName
@@ -820,12 +934,12 @@ func applyNWayResolutions(s *state, expNames []string, results []syncengine.NWay
 			return
 		}
 
-		freshResults := make([]syncengine.NWayScanResult, len(expNames))
+		freshResults := make([]syncengine.NWayScanResult, len(units))
 		var scanErr error
-		for i, name := range expNames {
-			result, err := syncengine.ScanNWay(ctx, locs, name, fset, syncengine.NWayFullScan)
+		for i, unit := range units {
+			result, err := syncengine.ScanNWay(ctx, unit.locs, unit.expName, fset, syncengine.NWayFullScan)
 			if err != nil {
-				scanErr = fmt.Errorf("%s: %w", name, err)
+				scanErr = fmt.Errorf("%s: %w", unit.label, err)
 				break
 			}
 			freshResults[i] = result

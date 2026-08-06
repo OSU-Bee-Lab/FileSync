@@ -147,7 +147,7 @@ func (ps *progressScreen) isUnresolvedConflict(expLabel string, f *fileUIState) 
 	if !ps.haveResolver {
 		return true
 	}
-	return ps.unresolved[nwayConflictKey{expName: expLabel, relPath: f.relPath}]
+	return ps.unresolved[nwayConflictKey{unit: expLabel, relPath: f.relPath}]
 }
 
 // unresolvedInExp counts conflicts still awaiting a decision anywhere in one
@@ -158,7 +158,7 @@ func (ps *progressScreen) unresolvedInExp(exp *expUIState) int {
 	}
 	n := 0
 	for k := range ps.unresolved {
-		if k.expName == exp.label {
+		if k.unit == exp.label {
 			n++
 		}
 	}

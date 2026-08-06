@@ -8,35 +8,106 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+
+	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
+// locationBadgeGoldColor is a Results location's badge fill, distinct from
+// an Audio location's theme-primary blue (see badgeFillColor) so the two
+// roles read apart at a glance in a mixed picker (newRoleToggleGroup).
+var locationBadgeGoldColor = color.NRGBA{R: 0xC9, G: 0x9A, B: 0x1C, A: 0xFF}
+
+// badgeFillColor picks a locationBadge's circle color by the Location Role
+// it represents: theme-primary blue for Audio, a fixed gold for Results.
+// Resolved live (not cached) so the blue half stays correct across a
+// light/dark theme switch.
+func badgeFillColor(role syncengine.LocationRole) color.Color {
+	if role == syncengine.RoleResults {
+		return locationBadgeGoldColor
+	}
+	return theme.Color(theme.ColorNamePrimary)
+}
+
+// roleLabel is a bold canvas.Text colored by badgeFillColor - a widget
+// (rather than a bare canvas.Text dropped in a container) so Fyne's
+// theme-change propagation calls its Refresh and it stays correct if the
+// app switches light/dark while running, same as locationBadge. Used on
+// Manage Locations so a Location's row reads Audio/Results at a glance
+// alongside its badges everywhere else (see badgeFillColor).
+type roleLabel struct {
+	widget.BaseWidget
+	text string
+	role syncengine.LocationRole
+}
+
+func newRoleLabel(text string, role syncengine.LocationRole) *roleLabel {
+	l := &roleLabel{text: text, role: role}
+	l.ExtendBaseWidget(l)
+	return l
+}
+
+func (l *roleLabel) CreateRenderer() fyne.WidgetRenderer {
+	t := canvas.NewText(l.text, badgeFillColor(l.role))
+	t.TextStyle.Bold = true
+	return &roleLabelRenderer{l: l, text: t}
+}
+
+type roleLabelRenderer struct {
+	l    *roleLabel
+	text *canvas.Text
+}
+
+func (r *roleLabelRenderer) Layout(size fyne.Size)        { r.text.Resize(size) }
+func (r *roleLabelRenderer) MinSize() fyne.Size           { return r.text.MinSize() }
+func (r *roleLabelRenderer) Objects() []fyne.CanvasObject { return []fyne.CanvasObject{r.text} }
+func (r *roleLabelRenderer) Destroy()                     {}
+
+func (r *roleLabelRenderer) Refresh() {
+	r.text.Text = r.l.text
+	r.text.Color = badgeFillColor(r.l.role)
+	r.text.Refresh()
+}
+
 // locationBadge is a small filled circle with a centered number - the
-// visual index a Location keeps everywhere it's shown (see
-// locationNumbers), so a researcher only has to learn "3 = SharePoint"
-// once. Follows the same fixed-size custom-widget pattern as dragHandle in
-// location_drag_row.go.
+// visual index a Location keeps in a picker while selected (see
+// toggleGroup.renumber), assigned dynamically by selection order rather
+// than a fixed position, so a researcher only has to learn "3 = SharePoint"
+// for as long as that selection lasts. Follows the same fixed-size
+// custom-widget pattern as dragHandle in location_drag_row.go.
 type locationBadge struct {
 	widget.BaseWidget
 	number int
+	role   syncengine.LocationRole
 }
 
-func newLocationBadge(number int) *locationBadge {
-	b := &locationBadge{number: number}
+func newLocationBadge(number int, role syncengine.LocationRole) *locationBadge {
+	b := &locationBadge{number: number, role: role}
 	b.ExtendBaseWidget(b)
 	return b
 }
 
 const locationBadgeSize = float32(16)
 
+// SetNumber updates the badge's displayed number (0 = about to be hidden by
+// the caller) and refreshes it.
+func (b *locationBadge) SetNumber(number int) {
+	if b.number == number {
+		return
+	}
+	b.number = number
+	b.Refresh()
+}
+
 func (b *locationBadge) CreateRenderer() fyne.WidgetRenderer {
-	circle := canvas.NewCircle(theme.Color(theme.ColorNamePrimary))
-	text := canvas.NewText(strconv.Itoa(b.number), theme.Color(theme.ColorNameForegroundOnPrimary))
+	circle := canvas.NewCircle(badgeFillColor(b.role))
+	text := canvas.NewText(strconv.Itoa(b.number), color.White)
 	text.Alignment = fyne.TextAlignCenter
 	text.TextSize = 10
-	return &locationBadgeRenderer{circle: circle, text: text}
+	return &locationBadgeRenderer{b: b, circle: circle, text: text}
 }
 
 type locationBadgeRenderer struct {
+	b      *locationBadge
 	circle *canvas.Circle
 	text   *canvas.Text
 }
@@ -56,8 +127,8 @@ func (r *locationBadgeRenderer) MinSize() fyne.Size {
 }
 
 func (r *locationBadgeRenderer) Refresh() {
-	r.circle.FillColor = theme.Color(theme.ColorNamePrimary)
-	r.text.Color = theme.Color(theme.ColorNameForegroundOnPrimary)
+	r.circle.FillColor = badgeFillColor(r.b.role)
+	r.text.Text = strconv.Itoa(r.b.number)
 	r.circle.Refresh()
 	r.text.Refresh()
 }
@@ -85,11 +156,13 @@ const (
 
 // presenceIndicator shows, for one file/folder browser row, which of the
 // browser's currently-selected Locations (in the same order as their
-// badges) contain that entry: one small circle per Location - filled if
-// present there, outlined if not.
+// badges) contain that entry: one small circle per Location, colored by
+// that Location's Role like its badge (see badgeFillColor) - filled if
+// present there, just an outline in that color if not.
 type presenceIndicator struct {
 	widget.BaseWidget
 	present []bool
+	roles   []syncengine.LocationRole
 }
 
 func newPresenceIndicator() *presenceIndicator {
@@ -106,10 +179,12 @@ func newPresenceIndicator() *presenceIndicator {
 func (p *presenceIndicator) Tapped(*fyne.PointEvent) {}
 
 // Update replaces the presence set this indicator shows and refreshes it.
-// A nil/empty present (nothing to compare against, or this row predates a
-// scan finishing) renders nothing.
-func (p *presenceIndicator) Update(present []bool) {
+// present and roles are index-matched to the browser's current Locations
+// (see destFolderBrowser.locs). A nil/empty present (nothing to compare
+// against, or this row predates a scan finishing) renders nothing.
+func (p *presenceIndicator) Update(present []bool, roles []syncengine.LocationRole) {
 	p.present = present
+	p.roles = roles
 	p.Refresh()
 }
 
@@ -154,15 +229,17 @@ func (r *presenceIndicatorRenderer) Refresh() {
 	if len(r.dots) != len(r.p.present) {
 		r.rebuildDots()
 	}
-	primary := theme.Color(theme.ColorNamePrimary)
-	outline := theme.Color(theme.ColorNameForeground)
 	for i, dot := range r.dots {
+		var role syncengine.LocationRole
+		if i < len(r.p.roles) {
+			role = r.p.roles[i]
+		}
+		roleColor := badgeFillColor(role)
+		dot.StrokeColor = roleColor
 		if r.p.present[i] {
-			dot.FillColor = primary
-			dot.StrokeColor = primary
+			dot.FillColor = roleColor
 		} else {
 			dot.FillColor = color.Transparent
-			dot.StrokeColor = outline
 		}
 		dot.Refresh()
 	}

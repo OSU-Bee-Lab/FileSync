@@ -117,9 +117,12 @@ func showConflictsPrompt(s *state, conflicts []conflictRow, onProceed func()) {
 }
 
 // nwayConflictKey identifies one conflicting file across a whole N-way scan
-// session (relPath alone can repeat across experiments).
+// session (relPath alone can repeat across scan units). unit is the unit's
+// display label (see nwayUnit.label), which is also the label the sync-flow
+// screen's Experiments column carries, so rows there can look a conflict up
+// by the label they already hold.
 type nwayConflictKey struct {
-	expName string
+	unit    string
 	relPath string
 }
 
@@ -194,22 +197,34 @@ func (c nwayChoice) decided() bool {
 // (unresolvedCount must reach zero) and to caption conflict rows; the
 // resolver dialog (showNWayResolveDialog) edits it.
 type nwayResolver struct {
-	expNames []string
-	results  []syncengine.NWayScanResult // index-aligned with expNames; each filled in when that experiment's scan completes
+	units    []nwayUnit
+	results  []syncengine.NWayScanResult // index-aligned with units; each filled in when that unit's scan completes
 	choices  map[nwayConflictKey]nwayChoice
 	onChange func() // set by the sync-flow screen: refreshes rows and the Sync/Resolve buttons after any choice changes
 }
 
-func newNWayResolver(expNames []string) *nwayResolver {
+func newNWayResolver(units []nwayUnit) *nwayResolver {
 	return &nwayResolver{
-		expNames: expNames,
-		results:  make([]syncengine.NWayScanResult, len(expNames)),
-		choices:  map[nwayConflictKey]nwayChoice{},
+		units:   units,
+		results: make([]syncengine.NWayScanResult, len(units)),
+		choices: map[nwayConflictKey]nwayChoice{},
 	}
 }
 
-// conflicts returns every conflict across every scanned experiment, in
-// experiment order then file order — the resolver's stepping order.
+// expNameFor maps a unit label back to the experiment it scanned, for text
+// that names a real path (a unit's label may carry a role suffix — see
+// nwayUnit.label — which is display-only and never part of a path).
+func (r *nwayResolver) expNameFor(unitLabel string) string {
+	for _, u := range r.units {
+		if u.label == unitLabel {
+			return u.expName
+		}
+	}
+	return unitLabel
+}
+
+// conflicts returns every conflict across every scanned unit, in unit order
+// then file order — the resolver's stepping order.
 func (r *nwayResolver) conflicts() []nwayConflict {
 	var out []nwayConflict
 	for i, result := range r.results {
@@ -218,7 +233,7 @@ func (r *nwayResolver) conflicts() []nwayConflict {
 				continue
 			}
 			c := nwayConflict{
-				key:    nwayConflictKey{expName: r.expNames[i], relPath: f.RelPath},
+				key:    nwayConflictKey{unit: r.units[i].label, relPath: f.RelPath},
 				reason: f.ConflictReason,
 			}
 			for _, st := range f.States {
@@ -244,8 +259,8 @@ func (r *nwayResolver) conflictCount() int {
 func (r *nwayResolver) existingNamesIn(key nwayConflictKey) map[string]bool {
 	out := map[string]bool{}
 	dir := path.Dir(key.relPath)
-	for i, name := range r.expNames {
-		if name != key.expName || i >= len(r.results) {
+	for i, u := range r.units {
+		if u.label != key.unit || i >= len(r.results) {
 			continue
 		}
 		for _, f := range r.results[i].Files {
@@ -342,8 +357,8 @@ func (r *nwayResolver) setChoice(key nwayConflictKey, choice nwayChoice) {
 // rowSummary captions one conflict's file row in the sync-flow screen:
 // the warning plus reason while undecided, the decision once made — so the
 // main screen doubles as the review surface before Sync.
-func (r *nwayResolver) rowSummary(expName, relPath, reason string) string {
-	choice := r.choices[nwayConflictKey{expName: expName, relPath: relPath}]
+func (r *nwayResolver) rowSummary(unitLabel, relPath, reason string) string {
+	choice := r.choices[nwayConflictKey{unit: unitLabel, relPath: relPath}]
 	if !choice.decided() {
 		// Nothing inline: the row already carries a warning icon (hover it for
 		// the reason) and an orange wash, so any text here would just be a
@@ -393,8 +408,8 @@ func (r *nwayResolver) pendingDeletes() []string {
 			names[i] = loc.Name
 		}
 		full := c.key.relPath
-		if c.key.expName != "" {
-			full = path.Join(c.key.expName, c.key.relPath)
+		if exp := r.expNameFor(c.key.unit); exp != "" {
+			full = path.Join(exp, c.key.relPath)
 		}
 		out = append(out, fmt.Sprintf("%s — from %s", full, strings.Join(names, ", ")))
 	}
@@ -418,6 +433,12 @@ func (r *nwayResolver) hasActionable() bool {
 // defaulted here. A keep-all choice emits one rename per present copy, each
 // with its own location-tagged name (see SuggestConflictRenameNameAt) so
 // differing copies can never collide under one new name.
+//
+// Each resolution's ExpName carries the scan unit's label, not necessarily
+// the bare experiment name — the field exists purely so the caller can
+// round-trip a resolution back to what produced it, and applyNWayResolutions
+// resolves the label to that unit's experiment and locations before touching
+// any path.
 func (r *nwayResolver) buildResolutions() []syncengine.NWayConflictResolution {
 	var out []syncengine.NWayConflictResolution
 	for _, c := range r.conflicts() {
@@ -425,7 +446,7 @@ func (r *nwayResolver) buildResolutions() []syncengine.NWayConflictResolution {
 		switch choice.kind {
 		case nwayChoiceKeepOne:
 			out = append(out, syncengine.NWayConflictResolution{
-				ExpName:          c.key.expName,
+				ExpName:          c.key.unit,
 				RelPath:          c.key.relPath,
 				Kind:             syncengine.NWayOverwrite,
 				WinnerLocationID: choice.winner.ID,
@@ -438,7 +459,7 @@ func (r *nwayResolver) buildResolutions() []syncengine.NWayConflictResolution {
 					newName = fallback[v.loc.ID]
 				}
 				out = append(out, syncengine.NWayConflictResolution{
-					ExpName:           c.key.expName,
+					ExpName:           c.key.unit,
 					RelPath:           c.key.relPath,
 					Kind:              syncengine.NWayRename,
 					TargetLocationIDs: []string{v.loc.ID},
@@ -447,7 +468,7 @@ func (r *nwayResolver) buildResolutions() []syncengine.NWayConflictResolution {
 			}
 		case nwayChoiceSkip:
 			out = append(out, syncengine.NWayConflictResolution{
-				ExpName: c.key.expName,
+				ExpName: c.key.unit,
 				RelPath: c.key.relPath,
 				Kind:    syncengine.NWayIgnore,
 			})
@@ -457,7 +478,7 @@ func (r *nwayResolver) buildResolutions() []syncengine.NWayConflictResolution {
 				ids[i] = loc.ID
 			}
 			out = append(out, syncengine.NWayConflictResolution{
-				ExpName:           c.key.expName,
+				ExpName:           c.key.unit,
 				RelPath:           c.key.relPath,
 				Kind:              syncengine.NWayDelete,
 				TargetLocationIDs: ids,
@@ -705,7 +726,7 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 		} else {
 			dir = "  in " + dir
 		}
-		pathLabel.SetText(fmt.Sprintf("%s%s  (%s)", title, dir, c.key.expName))
+		pathLabel.SetText(fmt.Sprintf("%s%s  (%s)", title, dir, c.key.unit))
 		reasonLabel.SetText(c.reason)
 
 		options := make([]string, 0, len(c.versions)+3)

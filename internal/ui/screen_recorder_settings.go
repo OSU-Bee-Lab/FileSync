@@ -135,9 +135,9 @@ func showSyncRecorders(s *state) {
 	// after the local copy completes. Both are filtered to RoleAudio - a
 	// recorder never produces or receives buzzdetect results directly.
 	destGroup := newToggleGroup(locationNamesByKindAndRole(s.cfg.Locations, syncengine.LocationLocal, syncengine.RoleAudio),
-		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs), locationNumbers(s.cfg.Locations))
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.DestinationLocationIDs), s.cfg.Locations)
 	uploadGroup := newToggleGroup(locationNamesByKindAndRole(s.cfg.Locations, syncengine.LocationRemote, syncengine.RoleAudio),
-		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs), locationNumbers(s.cfg.Locations))
+		selectedFromIDs(s.cfg.Locations, s.cfg.RecorderSettings.UploadLocationIDs), s.cfg.Locations)
 
 	// browser replaces free-typed experiment name + subpath entry: its
 	// root level *is* the experiment picker (each top-level folder is an

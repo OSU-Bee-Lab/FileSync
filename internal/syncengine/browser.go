@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/rclone/rclone/fs"
@@ -98,6 +99,87 @@ func ListChildren(ctx context.Context, loc Location, relPath string) ([]Entry, e
 // listing they already have to build.
 type presence = map[string][]bool
 
+// unionEntries merges one folder's per-Location listings (perLoc, index-
+// aligned with locs) into a single deduped, sorted union plus each entry's
+// per-Location presence. It is the one place that merge happens, shared by
+// ListChildrenUnion and UnionChildEntriesStream.
+//
+// A Results Location's "<stem>_buzzdetect.csv" is folded onto the recording
+// it mirrors whenever some non-Results Location in the same listing holds
+// that recording, so a mixed Audio+Results selection shows one row per
+// recording whose presence dots cover both trees - rather than the
+// recording and its result as two unrelated rows. That also matches what
+// an operation on that row actually does: Manage Files resolves an audio
+// path to its counterpart at each Results Location (see resolveResultsLeaf).
+// A result with no counterpart in this listing (a Results-only selection,
+// or an orphaned result) keeps its own row, so nothing is ever hidden.
+func unionEntries(locs []Location, perLoc [][]Entry) ([]Entry, presence) {
+	seen := make(map[string]Entry)
+	pres := make(presence)
+	// byStem indexes the audio side by filename stem, so a result can find
+	// the recording it belongs to (its own name can't say which extension
+	// that recording had). First one wins, so the merge is deterministic
+	// even in the odd case of "rec.mp3" and "rec.wma" side by side.
+	byStem := make(map[string]string)
+
+	add := func(name string, e Entry, i int) {
+		if existing, ok := seen[name]; !ok || (!existing.IsDir && e.IsDir) {
+			seen[name] = e
+		}
+		if pres[name] == nil {
+			pres[name] = make([]bool, len(locs))
+		}
+		pres[name][i] = true
+	}
+
+	// Pass 1: every non-Results Location, keyed by the real entry name.
+	for i, entries := range perLoc {
+		if i >= len(locs) || locs[i].Role == RoleResults {
+			continue
+		}
+		for _, e := range entries {
+			add(e.Name, e, i)
+			if !e.IsDir {
+				if stem := strings.TrimSuffix(e.Name, path.Ext(e.Name)); byStem[stem] == "" {
+					byStem[stem] = e.Name
+				}
+			}
+		}
+	}
+
+	// Pass 2: Results Locations, folded onto pass 1's recordings where they
+	// have a counterpart there. Directories mirror one-to-one and so are
+	// never folded.
+	for i, entries := range perLoc {
+		if i >= len(locs) || locs[i].Role != RoleResults {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name
+			if !e.IsDir {
+				if stem, ok := strings.CutSuffix(name, resultsFileSuffix); ok {
+					if audio := byStem[stem]; audio != "" {
+						name = audio
+					}
+				}
+			}
+			add(name, e, i)
+		}
+	}
+
+	out := make([]Entry, 0, len(seen))
+	for _, e := range seen {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].IsDir != out[j].IsDir {
+			return out[i].IsDir
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, pres
+}
+
 func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (entries []Entry, notFound bool, isFile bool, pres presence, err error) {
 	type result struct {
 		entries []Entry
@@ -115,8 +197,7 @@ func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (en
 	}
 	wg.Wait()
 
-	seen := make(map[string]Entry)
-	pres = make(presence)
+	perLoc := make([][]Entry, len(locs))
 	anyOK := false
 	anyIsFile := false
 	var firstHardErr error
@@ -135,30 +216,13 @@ func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (en
 			continue
 		}
 		anyOK = true
-		for _, e := range r.entries {
-			if existing, ok := seen[e.Name]; !ok || (!existing.IsDir && e.IsDir) {
-				seen[e.Name] = e
-			}
-			if pres[e.Name] == nil {
-				pres[e.Name] = make([]bool, len(locs))
-			}
-			pres[e.Name][i] = true
-		}
+		perLoc[i] = r.entries
 	}
 	if !anyOK && firstHardErr != nil {
 		return nil, false, false, nil, firstHardErr
 	}
 
-	out := make([]Entry, 0, len(seen))
-	for _, e := range seen {
-		out = append(out, e)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].IsDir != out[j].IsDir {
-			return out[i].IsDir
-		}
-		return out[i].Name < out[j].Name
-	})
+	out, pres := unionEntries(locs, perLoc)
 	return out, !anyOK && !anyIsFile, anyIsFile, pres, nil
 }
 
@@ -306,8 +370,13 @@ func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath strin
 		return
 	}
 	var mu sync.Mutex
-	seen := make(map[string]Entry)
-	pres := make(presence)
+	// Each location's own listing is kept as it lands and the union is
+	// rebuilt from all of them on every update (unionEntries), rather than
+	// accumulated in place: folding a result onto its recording depends on
+	// which Locations have reported so far, so a Results Location that
+	// happens to answer first must still fold once the Audio Location it
+	// mirrors arrives.
+	perLoc := make([][]Entry, len(locs))
 	var wg sync.WaitGroup
 	for li, loc := range locs {
 		wg.Add(1)
@@ -320,35 +389,19 @@ func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath strin
 			mu.Lock()
 			defer mu.Unlock()
 			for _, e := range entries {
-				var name string
 				switch v := e.(type) {
 				case fs.Directory:
-					name = dirName(e)
-					seen[name] = Entry{Name: name, IsDir: true}
+					perLoc[li] = append(perLoc[li], Entry{Name: dirName(e), IsDir: true})
 				case fs.Object:
-					name = dirName(e)
-					if _, exists := seen[name]; !exists {
-						seen[name] = Entry{Name: name, IsDir: false, Size: v.Size()}
-					}
-				default:
-					continue
+					perLoc[li] = append(perLoc[li], Entry{Name: dirName(e), IsDir: false, Size: v.Size()})
 				}
-				if pres[name] == nil {
-					pres[name] = make([]bool, len(locs))
-				}
-				pres[name][li] = true
 			}
-			out := make([]Entry, 0, len(seen))
-			for _, entry := range seen {
-				out = append(out, entry)
-			}
-			sort.Slice(out, func(i, j int) bool {
-				if out[i].IsDir != out[j].IsDir {
-					return out[i].IsDir
-				}
-				return out[i].Name < out[j].Name
-			})
-			onUpdate(out, clonePresence(pres))
+			// No clonePresence here (unlike UnionChildDirNamesStream, which
+			// hands out a long-lived accumulator): unionEntries builds a
+			// fresh map per update, so nothing else can still be writing to
+			// the one the caller receives.
+			out, pres := unionEntries(locs, perLoc)
+			onUpdate(out, pres)
 		}(li, loc)
 	}
 	wg.Wait()

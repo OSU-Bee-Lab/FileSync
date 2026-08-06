@@ -172,9 +172,13 @@ func labelFromRole(role syncengine.LocationRole) string {
 	return roleLabels[0]
 }
 
-// filterByRole returns every Location whose Role matches role, for pickers
-// that must never mix Audio and Results locations in one N-way run (e.g.
-// Sync Experiments).
+// filterByRole returns every Location whose Role matches role - for the
+// pickers that offer a single role (One Way Sync, whose one source folder is
+// either audio or results; Sync Recorders, which is always audio), and for
+// splitting a mixed selection into the groups that converge among themselves
+// (see buildNWayUnits, newRoleToggleGroup). Audio and Results Locations are
+// never converged with one another: a Results tree mirrors an Audio tree's
+// structure but holds entirely different files.
 func filterByRole(locs []syncengine.Location, role syncengine.LocationRole) []syncengine.Location {
 	var out []syncengine.Location
 	for _, l := range locs {
@@ -272,16 +276,23 @@ func idsFromLocations(locs []syncengine.Location) []string {
 	return ids
 }
 
-// locationNumbers maps every Location's Name to its 1-based position within
-// all - always the full, canonical s.cfg.Locations, never a filtered
-// subset, so a Location's badge number is identical everywhere it's shown
-// even though different pickers offer different subsets (e.g. local-only vs
-// remote-only). Purely a live display index, not persisted: reordering
-// Locations on the Locations screen renumbers them.
-func locationNumbers(all []syncengine.Location) map[string]int {
-	out := make(map[string]int, len(all))
-	for i, l := range all {
-		out[l.Name] = i + 1
+// rolesFrom returns locs' Roles as a slice index-matched to locs itself,
+// for presenceIndicator.Update - its present []bool is index-matched to
+// destFolderBrowser.locs the same way, so the two line up dot-for-dot.
+func rolesFrom(locs []syncengine.Location) []syncengine.LocationRole {
+	out := make([]syncengine.LocationRole, len(locs))
+	for i, l := range locs {
+		out[i] = l.Role
+	}
+	return out
+}
+
+// locationRoles maps every Location's Name to its Role, for a toggleGroup's
+// badge color (see badgeFillColor) - Audio blue vs Results gold.
+func locationRoles(all []syncengine.Location) map[string]syncengine.LocationRole {
+	out := make(map[string]syncengine.LocationRole, len(all))
+	for _, l := range all {
+		out[l.Name] = l.Role
 	}
 	return out
 }
@@ -311,7 +322,8 @@ var (
 type toggleChip struct {
 	widget.BaseWidget
 	label    string
-	number   int // 0 = no badge
+	number   int // 0 = no badge (chip not currently selected)
+	role     syncengine.LocationRole
 	selected bool
 	onTapped func()
 
@@ -319,10 +331,22 @@ type toggleChip struct {
 	text *canvas.Text
 }
 
-func newToggleChip(label string, number int, onTapped func()) *toggleChip {
-	c := &toggleChip{label: label, number: number, onTapped: onTapped}
+func newToggleChip(label string, role syncengine.LocationRole, onTapped func()) *toggleChip {
+	c := &toggleChip{label: label, role: role, onTapped: onTapped}
 	c.ExtendBaseWidget(c)
 	return c
+}
+
+// SetNumber updates this chip's badge number - its 1-based position among
+// the group's currently-selected chips, in display order (see
+// toggleGroup.renumber), or 0 while unselected, which hides the badge
+// entirely.
+func (c *toggleChip) SetNumber(number int) {
+	if c.number == number {
+		return
+	}
+	c.number = number
+	c.Refresh()
 }
 
 // chipBadgeOverhang is how far a toggleChip's numbered badge pokes outside
@@ -337,11 +361,11 @@ func (c *toggleChip) CreateRenderer() fyne.WidgetRenderer {
 	c.text = canvas.NewText(c.label, theme.Color(theme.ColorNameForeground))
 	c.text.Alignment = fyne.TextAlignCenter
 	c.refresh()
-	r := &toggleChipRenderer{c: c}
-	if c.number != 0 {
-		r.badge = newLocationBadge(c.number)
+	badge := newLocationBadge(c.number, c.role)
+	if c.number == 0 {
+		badge.Hide()
 	}
-	return r
+	return &toggleChipRenderer{c: c, badge: badge}
 }
 
 // toggleChipRenderer lays the chip's background+label out inset from the
@@ -357,14 +381,14 @@ type toggleChipRenderer struct {
 }
 
 func (r *toggleChipRenderer) marginTop() float32 {
-	if r.badge == nil {
+	if r.c.number == 0 {
 		return 0
 	}
 	return chipBadgeOverhang
 }
 
 func (r *toggleChipRenderer) marginRight() float32 {
-	if r.badge == nil {
+	if r.c.number == 0 {
 		return 0
 	}
 	return chipBadgeOverhang
@@ -380,10 +404,8 @@ func (r *toggleChipRenderer) Layout(size fyne.Size) {
 	r.c.text.Resize(textMin)
 	r.c.text.Move(fyne.NewPos((bgSize.Width-textMin.Width)/2, mt+(bgSize.Height-textMin.Height)/2))
 
-	if r.badge != nil {
-		r.badge.Resize(fyne.NewSize(locationBadgeSize, locationBadgeSize))
-		r.badge.Move(fyne.NewPos(bgSize.Width-locationBadgeSize/2, mt-locationBadgeSize/2))
-	}
+	r.badge.Resize(fyne.NewSize(locationBadgeSize, locationBadgeSize))
+	r.badge.Move(fyne.NewPos(bgSize.Width-locationBadgeSize/2, mt-locationBadgeSize/2))
 }
 
 func (r *toggleChipRenderer) MinSize() fyne.Size {
@@ -398,18 +420,17 @@ func (r *toggleChipRenderer) Refresh() {
 	r.c.text.Text = r.c.label
 	r.c.text.Color = theme.Color(theme.ColorNameForeground)
 	r.c.text.Refresh()
-	if r.badge != nil {
-		r.badge.Refresh()
+	r.badge.SetNumber(r.c.number)
+	if r.c.number == 0 {
+		r.badge.Hide()
+	} else {
+		r.badge.Show()
 	}
 	r.Layout(r.c.Size())
 }
 
 func (r *toggleChipRenderer) Objects() []fyne.CanvasObject {
-	objs := []fyne.CanvasObject{r.c.bg, r.c.text}
-	if r.badge != nil {
-		objs = append(objs, r.badge)
-	}
-	return objs
+	return []fyne.CanvasObject{r.c.bg, r.c.text, r.badge}
 }
 
 func (r *toggleChipRenderer) Destroy() {}
@@ -446,58 +467,138 @@ func (c *toggleChip) MinSize() fyne.Size {
 // toggleGroup is a multi-select group of toggleChips, a button-styled
 // stand-in for widget.CheckGroup.
 type toggleGroup struct {
-	box       *fyne.Container
+	// root is what CanvasObject hands back: a single flat row of chips
+	// (newToggleGroup) or a labeled row per Role (newRoleToggleGroup). Every
+	// chip lives in exactly one of them.
+	root fyne.CanvasObject
+	// options is every offered name in display order - which is also
+	// selection and numbering order (see renumber, Selected). For a
+	// Location picker that's ranked order: grouped by Role, by Priority
+	// within each. Click order is deliberately not tracked; which
+	// Locations are selected decides their numbers, not the sequence they
+	// were tapped in, so the same set of chips always reads the same way.
 	options   []string
 	chips     map[string]*toggleChip
 	selected  map[string]bool
 	OnChanged func([]string)
 }
 
-// newToggleGroup builds a toggleGroup offering one chip per name in
-// options, initially selected per selected. numbers gives each chip its
-// badge number by name (see locationNumbers) - a name missing from numbers,
-// or mapped to 0, gets no badge.
-func newToggleGroup(options []string, selected []string, numbers map[string]int) *toggleGroup {
+// newToggleGroupChips builds the chips for options without laying them out;
+// the two constructors below arrange them (flat, or grouped by Role).
+// roles gives each chip's Location Role, by name, for its badge color (see
+// badgeFillColor) - a name missing from roles gets RoleAudio's blue, the
+// zero value.
+func newToggleGroupChips(options []string, selected []string, roles map[string]syncengine.LocationRole) *toggleGroup {
 	g := &toggleGroup{
-		box:      container.NewHBox(),
 		options:  options,
 		chips:    map[string]*toggleChip{},
 		selected: map[string]bool{},
 	}
-	for _, name := range selected {
-		g.selected[name] = true
-	}
 	for _, name := range options {
 		name := name
-		chip := newToggleChip(name, numbers[name], func() { g.toggle(name) })
-		chip.SetSelected(g.selected[name])
+		chip := newToggleChip(name, roles[name], func() { g.toggle(name) })
 		g.chips[name] = chip
-		g.box.Add(chip)
 	}
+	g.SetSelected(selected)
+	return g
+}
+
+// newToggleGroup builds a toggleGroup offering one chip per name in
+// options, initially selected per selected. locs is the canonical Location
+// list (e.g. s.cfg.Locations) used to look up each option's Role for its
+// badge color - it need not be limited to options.
+func newToggleGroup(options []string, selected []string, locs []syncengine.Location) *toggleGroup {
+	g := newToggleGroupChips(options, selected, locationRoles(locs))
+	box := container.NewHBox()
+	for _, name := range options {
+		box.Add(g.chips[name])
+	}
+	g.root = box
+	return g
+}
+
+// newRoleToggleGroup is newToggleGroup laid out as one labeled row per
+// Location Role rather than a single flat row - for the pickers that offer
+// Audio and Results Locations together and so need them visually separated
+// (Sync Locations' All-Way mode, Manage Files). Selection semantics are
+// identical: one flat list of names.
+//
+// Each role's row is shown in ranked order (normalizedLocationOrder: locals
+// by Priority, then remotes), and that display order is the group's option
+// order - so it's also what Selected() returns and what the badges number.
+// A Location's rank is therefore visible in the picker and carried intact
+// into the scan, where slice order picks the copy source (see
+// buildNWayUnits).
+func newRoleToggleGroup(locs []syncengine.Location, selected []string) *toggleGroup {
+	sections := container.NewVBox()
+	var ranked []syncengine.Location
+	rows := map[syncengine.LocationRole]*fyne.Container{}
+	for _, role := range []syncengine.LocationRole{syncengine.RoleAudio, syncengine.RoleResults} {
+		roleLocs := normalizedLocationOrder(filterByRole(locs, role))
+		if len(roleLocs) == 0 {
+			continue
+		}
+		ranked = append(ranked, roleLocs...)
+		row := container.NewHBox()
+		rows[role] = row
+		label := widget.NewLabelWithStyle(labelFromRole(role), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+		sections.Add(container.NewBorder(nil, nil, label, nil, row))
+	}
+
+	g := newToggleGroupChips(locationNames(ranked), selected, locationRoles(ranked))
+	for _, l := range ranked {
+		rows[l.Role].Add(g.chips[l.Name])
+	}
+	g.root = sections
 	return g
 }
 
 // SetSelected replaces the current selection wholesale, e.g. after the
-// caller drops names that turned out to be inaccessible.
+// caller drops names that turned out to be inaccessible. The order of the
+// names given doesn't matter - only which ones are in it.
 func (g *toggleGroup) SetSelected(selected []string) {
 	g.selected = map[string]bool{}
 	for _, name := range selected {
 		g.selected[name] = true
 	}
-	for name, chip := range g.chips {
-		chip.SetSelected(g.selected[name])
-	}
+	g.renumber()
 }
 
 func (g *toggleGroup) toggle(name string) {
 	g.selected[name] = !g.selected[name]
-	g.chips[name].SetSelected(g.selected[name])
+	g.renumber()
 	if g.OnChanged != nil {
 		g.OnChanged(g.Selected())
 	}
 }
 
-// Selected returns the currently-selected chip names, in options order.
+// renumber walks the chips in display order and numbers the selected ones
+// 1..N (0, hiding the badge, for anything unselected), then syncs each
+// chip's selected styling. Numbering the selected subset rather than every
+// option keeps badges contiguous - deselecting the 2nd of 3 renumbers the
+// 3rd to 2 rather than leaving a gap - while a chip's number still depends
+// only on which chips are selected, never on the order they were tapped.
+func (g *toggleGroup) renumber() {
+	numbers := make(map[string]int, len(g.options))
+	n := 0
+	for _, name := range g.options {
+		if g.selected[name] {
+			n++
+			numbers[name] = n
+		}
+	}
+	for name, chip := range g.chips {
+		chip.SetSelected(g.selected[name])
+		chip.SetNumber(numbers[name])
+	}
+}
+
+// Selected returns the currently-selected chip names in display order - the
+// same order their badges number 1..N, so a caller showing a per-Location
+// list alongside the badges (e.g. presenceIndicator's dots) stays aligned
+// with what the badges say, and so the copy-source ranking a Location list
+// carries in its order survives the trip through the picker (see
+// buildNWayUnits).
 func (g *toggleGroup) Selected() []string {
 	var out []string
 	for _, name := range g.options {
@@ -508,4 +609,4 @@ func (g *toggleGroup) Selected() []string {
 	return out
 }
 
-func (g *toggleGroup) CanvasObject() fyne.CanvasObject { return g.box }
+func (g *toggleGroup) CanvasObject() fyne.CanvasObject { return g.root }

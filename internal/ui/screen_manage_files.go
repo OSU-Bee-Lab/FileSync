@@ -108,8 +108,11 @@ func (e *focusEntry) FocusLost() {
 // always lands on showManageFilesPreview before anything can be applied, no matter which
 // operation or how simple it looks.
 func showManageFiles(s *state) {
-	names := locationNames(s.cfg.Locations)
-	locGroup := newToggleGroup(names, selectedFromIDs(s.cfg.Locations, s.cfg.ManageFilesLocationIDs), locationNumbers(s.cfg.Locations))
+	// Audio and Results Locations are offered together, grouped by role: an
+	// operation typed in audio terms applies to both trees at once, with
+	// each Results Location's counterpart file resolved from the audio name
+	// (see syncengine.resolveResultsLeaf).
+	locGroup := newRoleToggleGroup(s.cfg.Locations, selectedFromIDs(s.cfg.Locations, s.cfg.ManageFilesLocationIDs))
 	mirrorWarning := widget.NewLabel("")
 	mirrorWarning.Wrapping = fyne.TextWrapWord
 
@@ -466,7 +469,19 @@ func showManageFiles(s *state) {
 // Recorders.
 func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	ctx := context.Background()
-	entries, err := syncengine.ListRecursive(ctx, locs[0], from)
+	// The listing has to come from an Audio Location: every recorder's
+	// timestamp parser reads and rebuilds that recorder's own audio
+	// filenames (see recorder.TimestampParser), which a Results Location's
+	// "<stem>_buzzdetect.csv" names aren't. The corrections still land on
+	// every selected Location - syncengine.ApplyRenames maps each rename to
+	// the counterpart file at a Results Location.
+	audio := filterByRole(locs, syncengine.RoleAudio)
+	if len(audio) == 0 {
+		dialog.ShowInformation("Select an Audio location",
+			"Retime reads recorder timestamps from audio filenames, so at least one Audio location must be selected. Any Results locations selected alongside it have their matching result files renamed too.", s.win)
+		return
+	}
+	entries, err := syncengine.ListRecursive(ctx, audio[0], from)
 	if err != nil {
 		dialog.ShowError(err, s.win)
 		return

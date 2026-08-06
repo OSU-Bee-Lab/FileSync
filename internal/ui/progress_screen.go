@@ -325,7 +325,7 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 			if row.conflictRelPath == "" || ps.selectedExpIdx < 0 || ps.selectedExpIdx >= len(ps.expStates) {
 				return
 			}
-			key := nwayConflictKey{expName: ps.expStates[ps.selectedExpIdx].label, relPath: row.conflictRelPath}
+			key := nwayConflictKey{unit: ps.expStates[ps.selectedExpIdx].label, relPath: row.conflictRelPath}
 			showNWayResolveDialog(s, ps.extras.nway, &key)
 		}
 	}

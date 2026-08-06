@@ -52,11 +52,17 @@ func singleFileSize(ctx context.Context, loc Location, relPath string) (int64, b
 // Only ever applied to a single file's own leaf - a Results Location's
 // directory tree already mirrors an Audio Location's exactly, so nothing
 // about a directory path ever needs mapping.
+// resultsFileSuffix is what buzzdetect appends to a recording's stem to
+// name its result file. Shared by resultsLeaf (audio name -> result name)
+// and unionEntries (result name -> the recording it belongs to, when
+// browsing Audio and Results Locations together).
+const resultsFileSuffix = "_buzzdetect.csv"
+
 func resultsLeaf(relPath string) string {
 	dir := path.Dir(relPath)
 	base := path.Base(relPath)
 	stem := strings.TrimSuffix(base, path.Ext(base))
-	newBase := stem + "_buzzdetect.csv"
+	newBase := stem + resultsFileSuffix
 	if dir == "." {
 		return newBase
 	}

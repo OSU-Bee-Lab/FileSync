@@ -413,9 +413,9 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 		// With one Location selected, presence is trivially "everywhere it
 		// exists" for every row - not worth a checkmark on every line.
 		if len(b.locs) > 1 {
-			presence.Update(b.presence[e.Name])
+			presence.Update(b.presence[e.Name], rolesFrom(b.locs))
 		} else {
-			presence.Update(nil)
+			presence.Update(nil, nil)
 		}
 		// Every file row offers playback if its format is one a driver
 		// recognizes, whether or not the row is selectable - hearing the
@@ -470,7 +470,7 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 
 	// Trailing "+ Add Folder" row.
 	audioControls.hide()
-	presence.Update(nil)
+	presence.Update(nil, nil)
 	if b.addingFolder {
 		btn.Hide()
 		entry.Show()

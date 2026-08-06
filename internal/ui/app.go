@@ -60,9 +60,10 @@ type state struct {
 	syncOneWayFromFolder string
 	syncOneWayToNames    []string
 	syncOneWayToRelPath  string
-	// syncRole is the Sync Locations screen's Audio/Results toggle (see
-	// roleToggle) - session-only, like syncOneWay. Zero value RoleAudio
-	// matches the toggle's default selection.
+	// syncRole is One Way Sync's Audio/Results toggle (see roleToggle) -
+	// session-only, like syncOneWay. Zero value RoleAudio matches the
+	// toggle's default selection. All-Way Sync has no such toggle: it
+	// offers both roles at once and converges each within itself.
 	syncRole syncengine.LocationRole
 
 	// pullFilesSourceName, pullFilesDestFolder, pullFilesRelPath, and

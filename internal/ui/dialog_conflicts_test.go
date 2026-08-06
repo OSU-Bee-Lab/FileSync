@@ -78,7 +78,7 @@ func resolverFixture() (*nwayResolver, []syncengine.Location) {
 	locB := syncengine.Location{ID: "b", Name: "SharePoint"}
 	locC := syncengine.Location{ID: "c", Name: "Laptop"}
 
-	r := newNWayResolver([]string{"exp-a", "exp-b"})
+	r := newNWayResolver([]nwayUnit{{expName: "exp-a", label: "exp-a"}, {expName: "exp-b", label: "exp-b"}})
 	r.results[0] = syncengine.NWayScanResult{
 		Locations: []syncengine.Location{locA, locB, locC},
 		Files: []syncengine.FileConvergencePlan{
@@ -118,7 +118,7 @@ func TestNWayResolver_ConflictsAndGate(t *testing.T) {
 	if len(conflicts) != 3 {
 		t.Fatalf("conflicts() returned %d, want 3: %+v", len(conflicts), conflicts)
 	}
-	if conflicts[2].key != (nwayConflictKey{expName: "exp-b", relPath: "r/other.mp3"}) {
+	if conflicts[2].key != (nwayConflictKey{unit: "exp-b", relPath: "r/other.mp3"}) {
 		t.Errorf("unexpected third conflict key: %+v", conflicts[2].key)
 	}
 	if len(conflicts[1].versions) != 2 {
@@ -291,7 +291,7 @@ func TestNWayResolver_KeepAllRenameNames(t *testing.T) {
 
 func TestNWayResolver_RowSummary(t *testing.T) {
 	r, locs := resolverFixture()
-	key := nwayConflictKey{expName: "exp-a", relPath: "r/three-way.mp3"}
+	key := nwayConflictKey{unit: "exp-a", relPath: "r/three-way.mp3"}
 
 	// Undecided contributes no inline text at all: the row's warning icon
 	// (hover for the reason) and orange wash already mark it, so any summary
