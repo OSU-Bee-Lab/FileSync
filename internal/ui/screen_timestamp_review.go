@@ -313,8 +313,16 @@ type timestampReviewHost struct {
 	// Without Applying") - both buttons go to the same next screen, so a label
 	// pair that hides that (the old "End Sync"/"Exit Sync") reads as two
 	// different outcomes.
-	continueLabel string
-	onContinue    func()
+	// continueLabel names the continue button when at least one recorder is
+	// checked for a correction ("Apply & End Sync", "Apply Corrections") -
+	// it's misleading once nothing is checked, since nothing will actually
+	// be applied, so continueBaseLabel names the same destination without
+	// that promise ("End Sync", "Continue") for the button to fall back to
+	// when every entry is unchecked. The button swaps between the two live
+	// as adjust checkboxes are toggled.
+	continueLabel     string
+	continueBaseLabel string
+	onContinue        func()
 
 	// applyOnlyLabel/onApplyOnly optionally add a third button between exit
 	// and continue: apply the corrections, same as continue, but hand off to
@@ -341,6 +349,11 @@ type timestampReviewScreen struct {
 	host     timestampReviewHost
 	entries  []*timestampReviewEntry
 	selected int
+
+	// continueBtn's label toggles between host.continueLabel and
+	// host.continueBaseLabel as adjust checkboxes are checked/unchecked -
+	// see refreshContinueLabel.
+	continueBtn *widget.Button
 	// tolerance is the live match tolerance the tolerance slider drives; it
 	// starts at the caller-supplied value and every recheck runs against it.
 	tolerance time.Duration
@@ -424,9 +437,10 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	registerAudioRefreshFunc(tr.refreshAudio)
 
 	tr.detailBox = container.NewStack()
-	continueBtn := widget.NewButton(host.continueLabel, nil)
+	continueBtn := widget.NewButton(host.continueBaseLabel, nil)
 	continueBtn.Importance = widget.HighImportance
 	continueBtn.OnTapped = tr.applyAndContinue
+	tr.continueBtn = continueBtn
 
 	// applyOnlyBtn, when the host supplies it, sits between exit and
 	// continue: same correction-applying behavior as continue, but hands
@@ -608,6 +622,24 @@ func (tr *timestampReviewScreen) refreshSummary() {
 	tr.summaryLbl.SetText(fmt.Sprintf("%d of %d %s %s off (highlighted) — review each and set a new start time where needed.", flagged, total, pluralWord(total, "recorder", ""), verb))
 }
 
+// refreshContinueLabel switches the continue button between
+// host.continueBaseLabel (nothing checked, so tapping it applies nothing)
+// and host.continueLabel (at least one recorder checked for a correction) -
+// called every time an adjust checkbox is toggled.
+func (tr *timestampReviewScreen) refreshContinueLabel() {
+	if tr.continueBtn == nil {
+		return
+	}
+	label := tr.host.continueBaseLabel
+	for _, e := range tr.entries {
+		if e.adjust {
+			label = tr.host.continueLabel
+			break
+		}
+	}
+	tr.continueBtn.SetText(label)
+}
+
 // selectRow switches the detail pane to entries[i] and refreshes every left
 // card's highlight so the selected one reads clearly against the rest.
 func (tr *timestampReviewScreen) selectRow(i int) {
@@ -733,6 +765,7 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 		refreshFiles()
 		refreshHeader()
 		tr.refreshCard(tr.selected)
+		tr.refreshContinueLabel()
 	}
 
 	refreshPreview()

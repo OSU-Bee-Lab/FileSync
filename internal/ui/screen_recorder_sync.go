@@ -717,12 +717,12 @@ func (sc *recorderSyncScreen) checkTimestampsThen(forBatchUpload bool, next func
 	// but end without uploading - fills the gap those two leave: otherwise
 	// applying a correction in batch mode would force an upload right now,
 	// with no way to just fix the filenames and upload later.
-	continueLabel, exitLabel := "Apply & End Sync", "End Without Applying"
+	continueLabel, continueBaseLabel, exitLabel := "Apply & End Sync", "End Sync", "End Without Applying"
 	exitWarning := "Ending now will not apply any timestamp corrections - every recorder's files keep their original names."
 	var applyOnlyLabel string
 	var onApplyOnly func()
 	if forBatchUpload {
-		continueLabel, exitLabel = "Apply & Upload", "Exit Without Uploading"
+		continueLabel, continueBaseLabel, exitLabel = "Apply & Upload", "Upload", "Exit Without Uploading"
 		exitWarning = "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names. Nothing will be uploaded to the remote destination either."
 		applyOnlyLabel = "Apply & End Sync"
 		onApplyOnly = sc.doConfirmEndSync
@@ -734,16 +734,17 @@ func (sc *recorderSyncScreen) checkTimestampsThen(forBatchUpload bool, next func
 	// running to pop its dialog on top of it.
 	sc.cancelWatch()
 	showTimestampReview(timestampReviewHost{
-		s:              sc.s,
-		win:            sc.s.win,
-		parentPath:     parentPath,
-		continueLabel:  continueLabel,
-		onContinue:     next,
-		applyOnlyLabel: applyOnlyLabel,
-		onApplyOnly:    onApplyOnly,
-		exitLabel:      exitLabel,
-		exitWarning:    exitWarning,
-		onExit:         sc.doConfirmEndSync,
+		s:                 sc.s,
+		win:               sc.s.win,
+		parentPath:        parentPath,
+		continueLabel:     continueLabel,
+		continueBaseLabel: continueBaseLabel,
+		onContinue:        next,
+		applyOnlyLabel:    applyOnlyLabel,
+		onApplyOnly:       onApplyOnly,
+		exitLabel:         exitLabel,
+		exitWarning:       exitWarning,
+		onExit:            sc.doConfirmEndSync,
 		afterFix: func(row timestampReviewRow, delta time.Duration) {
 			if !sc.params.batchUpload && len(sc.params.uploads) > 0 {
 				reuploadCorrectedFiles(sc, row, destDirsByID[row.recorderID], delta)

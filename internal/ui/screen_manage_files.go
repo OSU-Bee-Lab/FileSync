@@ -559,14 +559,15 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	reviewRows := buildTimestampReviewRows(inputs, tolerance)
 
 	showTimestampReview(timestampReviewHost{
-		s:             s,
-		win:           s.win,
-		parentPath:    locs[0].Name + ": " + from,
-		continueLabel: "Apply Corrections",
-		onContinue:    func() { showManageFiles(s) },
-		exitLabel:     "Back Without Applying",
-		exitWarning:   "Going back now will not apply any timestamp corrections - every recorder's files keep their original names.",
-		onExit:        func() { showManageFiles(s) },
+		s:                 s,
+		win:               s.win,
+		parentPath:        locs[0].Name + ": " + from,
+		continueLabel:     "Apply Corrections",
+		continueBaseLabel: "Continue",
+		onContinue:        func() { showManageFiles(s) },
+		exitLabel:         "Back Without Applying",
+		exitWarning:       "Going back now will not apply any timestamp corrections - every recorder's files keep their original names.",
+		onExit:            func() { showManageFiles(s) },
 	}, reviewRows, tolerance)
 }
 
