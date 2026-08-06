@@ -20,6 +20,8 @@ func (f fakeParser) RenameForTimestamp(destRelPath string, t time.Time) string {
 	return t.Format("060102_1504") + ".mp3"
 }
 
+func (f fakeParser) RecorderDirDepth() int { return 0 }
+
 func mustTime(s string) time.Time {
 	t, err := time.ParseInLocation("2006-01-02 15:04", s, time.Local)
 	if err != nil {

@@ -24,6 +24,20 @@ type TimestampParser interface {
 	// naming quirks (e.g. Sony's occasional "tmp_" prefix) - only the
 	// timestamp portion of the name changes.
 	RenameForTimestamp(destRelPath string, t time.Time) string
+
+	// RecorderDirDepth reports how many directory levels above a matched
+	// file's own containing directory the recorder-ID directory sits, per
+	// SCHEMA.md's recorder directories - needed by GroupTimestampFiles,
+	// which only has a flat file listing to work from (Manage Files'
+	// Retime), not a driver-reported RecorderID read off the device itself
+	// (Sync Recorders). Sony's recorder directory holds its files directly
+	// (depth 0); Olympus's holds them one level down, in a device category
+	// subdirectory - MUSIC, TALK, etc. (depth 1, see stripRecorderPrefix in
+	// drivers/Olympus_VN_541PC.go). Getting this wrong groups by the
+	// category subdirectory instead of the recorder directory, misreading
+	// every Olympus recorder's ID as its category name and merging
+	// different physical recorders that happen to share one.
+	RecorderDirDepth() int
 }
 
 // TimestampIssueKind labels why a recorder's timestamp was (or wasn't)

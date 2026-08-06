@@ -147,6 +147,12 @@ func (OlympusVN541PC) RenameForTimestamp(destRelPath string, t time.Time) string
 	return filepath.Join(dir, newBase)
 }
 
+// RecorderDirDepth implements recorder.TimestampParser: SourceFiles keeps
+// each recording under its device category subdirectory (MUSIC, TALK, etc. -
+// see stripRecorderPrefix), one level below the recorder directory, so the
+// recorder directory is one level above the file's own containing directory.
+func (OlympusVN541PC) RecorderDirDepth() int { return 1 }
+
 // uniqueDestRel avoids collisions within a single offload batch (two
 // recordings on the same device timestamped to the same second), matching
 // offload.py's unique_path in spirit. Unlike the Python version this

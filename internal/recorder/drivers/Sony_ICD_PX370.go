@@ -154,6 +154,11 @@ func (SonyICDPX370) RenameForTimestamp(destRelPath string, t time.Time) string {
 	return filepath.Join(dir, newBase)
 }
 
+// RecorderDirDepth implements recorder.TimestampParser: Sony's recordings
+// dir (see recordingsDir) holds its files directly, so the recorder
+// directory is the file's own containing directory.
+func (SonyICDPX370) RecorderDirDepth() int { return 0 }
+
 // walkRelative lists every regular file under dir, recursively, with
 // DestRelPath set to its path relative to dir — preserving the recorder's
 // own layout, matching filesync's list_files_relative.
