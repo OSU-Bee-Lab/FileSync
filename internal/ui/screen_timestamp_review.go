@@ -364,6 +364,18 @@ type timestampReviewScreen struct {
 	// host.continueBaseLabel as adjust checkboxes are checked/unchecked -
 	// see refreshContinueLabel.
 	continueBtn *widget.Button
+	// applyOnlyBtn and exitBtn are nil-able siblings of continueBtn -
+	// applyOnlyBtn only exists when host.applyOnlyLabel is set (see
+	// showTimestampReview). Both are disabled alongside continueBtn while a
+	// correction is being applied (see setButtonsEnabled), so a slow rename
+	// can't be triggered twice or interrupted by leaving mid-apply.
+	applyOnlyBtn *widget.Button
+	exitBtn      *widget.Button
+	// applyLoading shows while applyFixesAsync's background goroutine is
+	// renaming files (recorder.ApplyTimestampFix) or moving them via rclone
+	// (syncengine.ApplyRenames) - both real I/O, too slow to run on the UI
+	// goroutine without freezing the window.
+	applyLoading *loadingBar
 	// tolerance is the live match tolerance the tolerance slider drives; it
 	// starts at the caller-supplied value and every recheck runs against it.
 	tolerance time.Duration
@@ -461,6 +473,7 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	if host.applyOnlyLabel != "" {
 		applyOnlyBtn = widget.NewButton(host.applyOnlyLabel, tr.applyAndFinish)
 		applyOnlyBtn.Importance = widget.MediumImportance
+		tr.applyOnlyBtn = applyOnlyBtn
 	}
 
 	// exitBtn leaves without applying any of the corrections being reviewed
@@ -487,6 +500,9 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 			}, host.win)
 	})
 	exitBtn.Importance = widget.WarningImportance
+	tr.exitBtn = exitBtn
+
+	tr.applyLoading = newLoadingBar()
 
 	header := widget.NewLabelWithStyle("Review Recorder Timestamps", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	pathLbl := widget.NewLabel(host.parentPath)
@@ -513,7 +529,7 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 
 	content := container.NewBorder(
 		container.NewVBox(header, pathLbl, sub, tr.summaryLbl, toleranceRow, widget.NewSeparator()),
-		actionRow(exitBtn, rightBtns...),
+		container.NewVBox(tr.applyLoading.CanvasObject(), actionRow(exitBtn, rightBtns...)),
 		nil, nil,
 		split,
 	)
@@ -807,17 +823,20 @@ func (tr *timestampReviewScreen) refreshAudio() {
 	}
 }
 
-// applyFixes validates every checked entry's correction text and applies
-// them all (renaming every file for that recorder - see
-// recorder.ApplyTimestampFix - and re-uploading outside batch mode). It
-// reports false, having selected the offending recorder instead of applying
-// anything, if any checked entry's text fails to parse.
-func (tr *timestampReviewScreen) applyFixes() bool {
-	type parsedFix struct {
-		entry *timestampReviewEntry
-		delta time.Duration
-	}
-	var fixes []parsedFix
+// timestampParsedFix is one checked entry's validated, non-zero correction,
+// ready to apply.
+type timestampParsedFix struct {
+	entry *timestampReviewEntry
+	delta time.Duration
+}
+
+// parseFixes validates every checked entry's correction text. It reports
+// false, having selected the offending recorder instead of returning
+// anything, if any checked entry's text fails to parse - this is the fast,
+// synchronous half of applying (see applyFixesAsync), so it stays on the UI
+// goroutine.
+func (tr *timestampReviewScreen) parseFixes() ([]timestampParsedFix, bool) {
+	var fixes []timestampParsedFix
 	for _, e := range tr.entries {
 		if !e.adjust {
 			continue
@@ -825,39 +844,78 @@ func (tr *timestampReviewScreen) applyFixes() bool {
 		edited, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location())
 		if err != nil {
 			tr.selectForEntry(e)
-			return false
+			return nil, false
 		}
 		delta := edited.Sub(e.row.check.Recorded)
 		if delta == 0 {
 			continue
 		}
-		fixes = append(fixes, parsedFix{e, delta})
+		fixes = append(fixes, timestampParsedFix{e, delta})
 	}
-
-	for _, f := range fixes {
-		_ = f.entry.row.apply(func(t time.Time) time.Time { return t.Add(f.delta) })
-		if tr.host.afterFix != nil {
-			tr.host.afterFix(f.entry.row, f.delta)
-		}
-	}
-	return true
+	return fixes, true
 }
 
-// applyAndContinue applies every checked correction (see applyFixes), then
-// hands off to onContinue (Batch Upload or End Sync).
-func (tr *timestampReviewScreen) applyAndContinue() {
-	if tr.applyFixes() {
-		tr.host.onContinue()
+// setButtonsEnabled enables or disables every action button on this screen
+// (continue, the optional apply-only, and exit) together, so a correction in
+// flight can't be re-triggered by a second tap and the user can't leave
+// mid-apply.
+func (tr *timestampReviewScreen) setButtonsEnabled(enabled bool) {
+	for _, b := range []*widget.Button{tr.continueBtn, tr.applyOnlyBtn, tr.exitBtn} {
+		if b == nil {
+			continue
+		}
+		if enabled {
+			b.Enable()
+		} else {
+			b.Disable()
+		}
 	}
+}
+
+// applyFixesAsync validates every checked entry's correction text (see
+// parseFixes) and, if all of it parses, disables this screen's buttons,
+// shows applyLoading, and applies every fix in a background goroutine -
+// renaming every file for that recorder (recorder.ApplyTimestampFix) or
+// moving it via rclone (syncengine.ApplyRenames), both real I/O too slow for
+// the UI goroutine. Once every fix has landed, it hops back via fyne.Do to
+// re-enable the buttons, hide the loading bar, run afterFix for each fix,
+// and finally call onDone (host.onContinue or host.onApplyOnly).
+func (tr *timestampReviewScreen) applyFixesAsync(onDone func()) {
+	fixes, ok := tr.parseFixes()
+	if !ok {
+		return
+	}
+
+	tr.setButtonsEnabled(false)
+	tr.applyLoading.Show()
+	go func() {
+		for _, f := range fixes {
+			_ = f.entry.row.apply(func(t time.Time) time.Time { return t.Add(f.delta) })
+		}
+		fyne.Do(func() {
+			tr.applyLoading.Hide()
+			tr.setButtonsEnabled(true)
+			for _, f := range fixes {
+				if tr.host.afterFix != nil {
+					tr.host.afterFix(f.entry.row, f.delta)
+				}
+			}
+			onDone()
+		})
+	}()
+}
+
+// applyAndContinue applies every checked correction (see applyFixesAsync),
+// then hands off to onContinue (Batch Upload or End Sync).
+func (tr *timestampReviewScreen) applyAndContinue() {
+	tr.applyFixesAsync(tr.host.onContinue)
 }
 
 // applyAndFinish is applyAndContinue's counterpart for the optional
 // applyOnlyBtn: applies every checked correction, then hands off to
 // onApplyOnly instead of onContinue.
 func (tr *timestampReviewScreen) applyAndFinish() {
-	if tr.applyFixes() {
-		tr.host.onApplyOnly()
-	}
+	tr.applyFixesAsync(tr.host.onApplyOnly)
 }
 
 // selectForEntry switches the detail pane to e (used to surface a parse
