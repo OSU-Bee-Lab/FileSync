@@ -181,43 +181,56 @@ func unionEntries(locs []Location, perLoc [][]Entry) ([]Entry, presence) {
 }
 
 func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (entries []Entry, notFound bool, isFile bool, pres presence, err error) {
-	type result struct {
-		entries []Entry
-		err     error
-	}
-	results := make([]result, len(locs))
+	return ListChildrenUnionStream(ctx, locs, relPath, nil)
+}
+
+// ListChildrenUnionStream is ListChildrenUnion, but invokes onUpdate with the
+// union built so far each time a Location's listing lands, instead of only
+// handing back one result once the slowest Location has answered. This lets
+// Manage Files paint a fast Location's children (local disk) immediately
+// rather than blocking the whole browser on a slow remote. onUpdate is only
+// ever called from one goroutine at a time, and never with a union that a
+// still-running listing could mutate (unionEntries builds fresh values). The
+// return values are exactly ListChildrenUnion's, after every Location has
+// finished. onUpdate may be nil.
+func ListChildrenUnionStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry, pres presence)) (entries []Entry, notFound bool, isFile bool, pres presence, err error) {
+	perLoc := make([][]Entry, len(locs))
+	var mu sync.Mutex
+	anyOK := false
+	anyIsFile := false
+	var firstHardErr error
+
 	var wg sync.WaitGroup
 	for i, loc := range locs {
 		wg.Add(1)
 		go func(i int, loc Location) {
 			defer wg.Done()
-			e, err := ListChildren(ctx, loc, relPath)
-			results[i] = result{e, err}
+			e, lerr := ListChildren(ctx, loc, relPath)
+			mu.Lock()
+			defer mu.Unlock()
+			if lerr != nil {
+				switch {
+				case errors.Is(lerr, fs.ErrorIsFile):
+					anyIsFile = true
+				case errors.Is(lerr, fs.ErrorDirNotFound):
+					// Not present at this Location - fine, others may have it.
+				default:
+					if firstHardErr == nil {
+						firstHardErr = lerr
+					}
+				}
+				return
+			}
+			anyOK = true
+			perLoc[i] = e
+			if onUpdate != nil {
+				out, p := unionEntries(locs, perLoc)
+				onUpdate(out, p)
+			}
 		}(i, loc)
 	}
 	wg.Wait()
 
-	perLoc := make([][]Entry, len(locs))
-	anyOK := false
-	anyIsFile := false
-	var firstHardErr error
-	for i, r := range results {
-		if r.err != nil {
-			switch {
-			case errors.Is(r.err, fs.ErrorIsFile):
-				anyIsFile = true
-			case errors.Is(r.err, fs.ErrorDirNotFound):
-				// Not present at this Location - fine, others may have it.
-			default:
-				if firstHardErr == nil {
-					firstHardErr = r.err
-				}
-			}
-			continue
-		}
-		anyOK = true
-		perLoc[i] = r.entries
-	}
 	if !anyOK && firstHardErr != nil {
 		return nil, false, false, nil, firstHardErr
 	}

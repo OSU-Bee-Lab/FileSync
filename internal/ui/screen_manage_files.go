@@ -188,7 +188,14 @@ func showManageFiles(s *state) {
 				return
 			}
 			go func() {
-				result, notFound, isFile, pres, err := syncengine.ListChildrenUnion(context.Background(), locs, relPath)
+				// Streamed: each Location's children appear as that Location
+				// answers, so a slow remote can't hold up showing what a fast
+				// one (local disk) already listed.
+				result, notFound, isFile, pres, err := syncengine.ListChildrenUnionStream(
+					context.Background(), locs, relPath,
+					func(entries []syncengine.Entry, pres map[string][]bool) {
+						fyne.Do(func() { b.listingUpdate(gen, entries, pres) })
+					})
 				fyne.Do(func() {
 					if err != nil {
 						// Every selected Location failed with something other

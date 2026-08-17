@@ -562,6 +562,19 @@ func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pre
 	return true
 }
 
+// listingUpdate is listingDone for a partial result: it paints what a custom
+// lister has so far but leaves the loading bar up, since more Locations are
+// still reporting. Returns false if the listing is stale.
+func (b *destFolderBrowser) listingUpdate(gen int, entries []syncengine.Entry, pres map[string][]bool) bool {
+	if gen != b.scanGen {
+		return false
+	}
+	b.entries = entries
+	b.presence = pres
+	b.list.Refresh()
+	return true
+}
+
 // listingFailed marks a custom lister's scan as finished-with-error for
 // generation gen (hides the loading bar), returning false if it's stale so
 // the caller can skip surfacing an error for a superseded listing.
