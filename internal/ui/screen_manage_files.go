@@ -26,7 +26,7 @@ import (
 // recorder.CheckRecorderTimestamp/ApplyTimestampFix
 // pathway and review screen Sync Recorders uses (see runManageFilesRetime),
 // just scanning an arbitrary directory recursively instead of a live volume.
-const manageOpRetime = "Retime (check recorder timestamps)"
+const manageOpRetime = "Retime"
 
 var (
 	manageColorDeleteBg = color.NRGBA{R: 0xFE, G: 0xCA, B: 0xCA, A: 0xFF} // red wash - permanently removed
@@ -335,7 +335,7 @@ func showManageFiles(s *state) {
 		activeBrowser().reload()
 	}
 
-	locGroup.OnChanged = func(sel []string) {
+	persistLocSelection := func(sel []string) {
 		s.cfg.ManageFilesLocationIDs = idsFromLocations(locationsFromNamesAny(s.cfg.Locations, sel))
 		s.saveConfig()
 		updateMirrorWarning()
@@ -343,6 +343,21 @@ func showManageFiles(s *state) {
 		// the already-typed/browsed From/To paths - just re-list the (possibly
 		// new) reference Location at the current path.
 		setLocs()
+	}
+
+	locGroup.OnChanged = func(sel []string) {
+		persistLocSelection(sel)
+		// Catch an unplugged local drive right away, at selection time,
+		// rather than letting it surface later as an opaque "directory not
+		// found" error - same entrypoint (checkLocationsReady) Sync
+		// Experiments and Sync Recorders use.
+		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {})
+	}
+	// Catch a Location that's already missing when the screen opens (e.g.
+	// persisted from a previous session but its drive is unplugged now),
+	// not just once the user touches locGroup.
+	if len(locGroup.Selected()) > 0 {
+		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {})
 	}
 
 	// "From" is always shown; only the operation-specific second field
@@ -374,8 +389,7 @@ func showManageFiles(s *state) {
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
 	previewBtn := widget.NewButton("Preview", func() {
-		selectedNames := locGroup.Selected()
-		if len(selectedNames) == 0 {
+		if len(locGroup.Selected()) == 0 {
 			dialog.ShowInformation("Select a Location", "Choose at least one Location to apply this operation to.", s.win)
 			return
 		}
@@ -385,28 +399,29 @@ func showManageFiles(s *state) {
 			return
 		}
 		op := opGroup.Selected
-		locs := locationsFromNamesAny(s.cfg.Locations, selectedNames)
-
-		if op == manageOpRetime {
-			runManageFilesRetime(s, locs, from)
+		if op == "Delete" && deleteConfirmEntry.Text != from {
+			dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
 			return
 		}
-
-		if op == "Delete" {
-			if deleteConfirmEntry.Text != from {
-				dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
-				return
-			}
-			showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from})
-			return
-		}
-
 		to := strings.Trim(strings.TrimSpace(toEntry.Text), "/")
-		if to == "" || to == "." {
+		if op != "Delete" && op != manageOpRetime && (to == "" || to == ".") {
 			dialog.ShowInformation("Missing destination", "Pick or type a \"To\" path first.", s.win)
 			return
 		}
-		showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to})
+
+		// checkLocationsReady is also run on every locGroup change and at
+		// screen load, so this is a safety net for a drive that goes missing
+		// in between rather than the primary catch.
+		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {
+			switch op {
+			case manageOpRetime:
+				runManageFilesRetime(s, locs, from)
+			case "Delete":
+				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from})
+			default:
+				showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to})
+			}
+		})
 	})
 	previewBtn.Importance = widget.HighImportance
 
@@ -420,7 +435,6 @@ func showManageFiles(s *state) {
 		fromPathError,
 		toForm,
 		deleteForm,
-		actionRow(backBtn, previewBtn),
 	)
 
 	// browserSlot stacks both browsers; only the active target's is shown
@@ -436,7 +450,8 @@ func showManageFiles(s *state) {
 			widget.NewLabelWithStyle("Manage Files", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 			widget.NewSeparator(),
 		),
-		nil, nil, nil,
+		actionRow(backBtn, previewBtn),
+		nil, nil,
 		columns,
 	)
 	s.setContent(container.NewPadded(content))
@@ -481,9 +496,31 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 			"Retime reads recorder timestamps from audio filenames, so at least one Audio location must be selected. Any Results locations selected alongside it have their matching result files renamed too.", s.win)
 		return
 	}
-	entries, err := syncengine.ListRecursive(ctx, audio[0], from)
-	if err != nil {
-		dialog.ShowError(err, s.win)
+	// from need not exist at every selected Audio location - mirroring
+	// Rename/Move/Merge's per-Location tolerance, this tries each in order
+	// (validateFromPath's same "first that has it wins" approach) rather
+	// than hard-failing on whichever Location happens to be first just
+	// because that one doesn't have it (or, unplugged local drive aside,
+	// isn't currently reachable).
+	var entries []syncengine.ManageEntry
+	var lastErr error
+	found := false
+	for _, loc := range audio {
+		e, err := syncengine.ListRecursive(ctx, loc, from)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		entries = e
+		found = true
+		break
+	}
+	if !found {
+		if lastErr != nil {
+			dialog.ShowError(lastErr, s.win)
+		} else {
+			dialog.ShowInformation("Path not found", "\""+from+"\" was not found on any selected Audio location.", s.win)
+		}
 		return
 	}
 	relPaths := make([]string, len(entries))

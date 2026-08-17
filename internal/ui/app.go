@@ -235,6 +235,13 @@ func (s *state) setContent(content fyne.CanvasObject) {
 	growing := container.New(&growingWidthLayout{maxWidth: windowSize.Width}, content)
 	s.win.SetContent(growing)
 	s.win.Resize(size)
+	// A second pass: some content (e.g. a wrapRowLayout chip row) can't
+	// report its real height until it's been laid out once with a real
+	// width, so the Resize above may have positioned later siblings using
+	// an under-reported MinSize. Refresh re-runs every container's Layout
+	// with each child's now-accurate MinSize, without changing anything's
+	// size - see wrapRowLayout's docs.
+	growing.Refresh()
 }
 
 func (s *state) saveConfig() {

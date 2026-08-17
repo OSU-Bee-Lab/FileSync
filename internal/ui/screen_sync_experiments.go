@@ -179,30 +179,19 @@ func showSyncExperimentsAllWay(s *state) {
 			updateScanBtn()
 			return
 		}
-		locs := locationsFromNamesAny(s.cfg.Locations, names)
 
 		// Catch an unplugged local drive right away, at selection time,
 		// rather than letting it surface as an opaque listing error below or
 		// waiting until Quick/Full Scan is pressed (startScanMode's own
-		// missingLocalLocations check further down stays as a safety net for
+		// checkLocationsReady call further down stays as a safety net for
 		// a drive that goes missing between here and then).
-		if missing := missingLocalLocations(locs...); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
-				keep := make([]string, 0, len(names))
-				for _, name := range names {
-					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
-						keep = append(keep, name)
-					}
-				}
-				locGroup.SetSelected(keep)
-				setLocationNames(keep)
-				refresh()
-			}, refresh)
-			return
-		}
-
-		expBrowser.SetLocationsKeepSelection(locs)
-		updateScanBtn()
+		checkLocationsReady(s, locGroup, func(sel []string) {
+			setLocationNames(sel)
+			refresh()
+		}, func(locs []syncengine.Location) {
+			expBrowser.SetLocationsKeepSelection(locs)
+			updateScanBtn()
+		})
 	}
 
 	locGroup.OnChanged = func(sel []string) {
@@ -228,25 +217,12 @@ func showSyncExperimentsAllWay(s *state) {
 			return
 		}
 
-		startScan := func() {
+		checkLocationsReady(s, locGroup, func(sel []string) {
+			setLocationNames(sel)
+			updateScanBtn()
+		}, func(locs []syncengine.Location) {
 			runNWayScan(s, locs, expNames, mode)
-		}
-
-		if missing := missingLocalLocations(locs...); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
-				keep := make([]string, 0, len(names))
-				for _, name := range names {
-					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
-						keep = append(keep, name)
-					}
-				}
-				locGroup.SetSelected(keep)
-				setLocationNames(keep)
-				updateScanBtn()
-			}, startScan)
-			return
-		}
-		startScan()
+		})
 	}
 
 	quickScanBtn = widget.NewButton("Quick Scan", func() { startScanMode(syncengine.NWayQuickScan) })
@@ -353,24 +329,14 @@ func showSyncExperimentsOneWay(s *state) {
 	// for the destination side. Missing ones are deselected and the caller's
 	// onOK runs only for what remains.
 	checkDstMissing := func(onOK func()) {
-		locs := selectedLocs()
-		if missing := missingLocalLocations(locs...); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
-				keep := make([]string, 0, len(locGroup.Selected()))
-				for _, name := range locGroup.Selected() {
-					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
-						keep = append(keep, name)
-					}
-				}
-				locGroup.SetSelected(keep)
-				setToNames(keep)
-				browser.SetLocations(selectedLocs())
-				updateSyncEnabled()
-				updateDestLabel()
-			}, onOK)
-			return
-		}
-		onOK()
+		checkLocationsReady(s, locGroup, func(sel []string) {
+			setToNames(sel)
+			browser.SetLocations(selectedLocs())
+			updateSyncEnabled()
+			updateDestLabel()
+		}, func(locs []syncengine.Location) {
+			onOK()
+		})
 	}
 
 	locGroup.OnChanged = func(sel []string) {

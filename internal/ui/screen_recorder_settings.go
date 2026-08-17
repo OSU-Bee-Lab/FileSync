@@ -105,6 +105,44 @@ func showLocationsNotFoundPrompt(s *state, missing []syncengine.Location, onDese
 	d.Show()
 }
 
+// checkLocationsReady is the single entrypoint every Location-picking
+// screen (Sync Experiments, Sync Recorders, Manage Files) uses to resolve
+// locGroup's current selection before acting on it: it checks the
+// currently selected names for a locally-mounted Location that isn't
+// present on disk (missingLocalLocations) and, if any is missing, routes to
+// showLocationsNotFoundPrompt rather than letting the operation surface an
+// opaque "directory not found" error later. If the user deselects any
+// missing Location, locGroup is updated in place and onSelectionChanged
+// runs with the surviving selection so the caller can persist it and
+// refresh anything derived from it (a browser's listing, a button's
+// enabled state) - onReady does not run in that case, mirroring
+// showLocationsNotFoundPrompt's own deselect-then-let-the-user-retry
+// contract. Once nothing is missing (nothing was, or every missing one got
+// reconnected), onReady runs with the resolved Locations.
+func checkLocationsReady(s *state, locGroup *toggleGroup, onSelectionChanged func(sel []string), onReady func(locs []syncengine.Location)) {
+	names := locGroup.Selected()
+	locs := locationsFromNamesAny(s.cfg.Locations, names)
+	missing := missingLocalLocations(locs...)
+	if len(missing) == 0 {
+		onReady(locs)
+		return
+	}
+	showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
+		keep := make([]string, 0, len(names))
+		for _, name := range names {
+			if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
+				keep = append(keep, name)
+			}
+		}
+		locGroup.SetSelected(keep)
+		if onSelectionChanged != nil {
+			onSelectionChanged(keep)
+		}
+	}, func() {
+		onReady(locs)
+	})
+}
+
 // recorderSyncParams is the locked-in configuration chosen on the
 // recorder-settings screen (Screen 1) and handed to the active-sync
 // screen (Screen 2). Nothing on Screen 2 can change these; to change
@@ -231,22 +269,12 @@ func showSyncRecorders(s *state) {
 	// were deselected instead, this drops them from destGroup itself and
 	// does not call onOK, matching showLocationsNotFoundPrompt's contract.
 	checkMissingDestinations := func(onOK func()) {
-		destinations := locationsFromNames(s.cfg.Locations, destGroup.Selected(), syncengine.LocationLocal)
-		if missing := missingLocalLocations(destinations...); len(missing) > 0 {
-			showLocationsNotFoundPrompt(s, missing, func(deselected []syncengine.Location) {
-				keep := make([]string, 0, len(destGroup.Selected()))
-				for _, name := range destGroup.Selected() {
-					if loc := findLocation(s.cfg.Locations, name); loc == nil || !containsLocation(deselected, *loc) {
-						keep = append(keep, name)
-					}
-				}
-				destGroup.SetSelected(keep)
-				updateStartEnabled()
-				refreshBrowserLocations()
-			}, onOK)
-			return
-		}
-		onOK()
+		checkLocationsReady(s, destGroup, func(sel []string) {
+			updateStartEnabled()
+			refreshBrowserLocations()
+		}, func(locs []syncengine.Location) {
+			onOK()
+		})
 	}
 
 	destGroup.OnChanged = func(sel []string) {

@@ -538,13 +538,75 @@ func newToggleGroupChips(options []string, selected []string, roles map[string]s
 	return g
 }
 
+// wrapRowLayout flows children left to right, wrapping to a new row once a
+// child would overflow the available width, rather than the unbounded
+// single row container.NewHBox lays out. Used for chip rows (toggleGroup)
+// so that a Location list long enough to overflow (e.g. six-plus Locations
+// in Manage Files) drops to a second row instead of being cut off at the
+// window edge - boundedWidthLayout/setContent cap the window's width, so an
+// HBox row has nowhere to grow but off-screen.
+//
+// MinSize can't know how many rows the content will wrap to without
+// knowing the width it'll be given, and Fyne queries MinSize before that
+// width is known (the same bootstrapping gap layout.gridWrapLayout works
+// around by caching its last computed row count) - so lastHeight caches the
+// height Layout actually used last time, and MinSize reports that instead
+// of a single row's height. On the very first layout pass, before Layout
+// has run even once, lastHeight is still 0 and MinSize under-reports - see
+// setContent's extra Refresh pass, which exists to correct exactly this.
+type wrapRowLayout struct {
+	lastHeight float32
+}
+
+func (l *wrapRowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var min fyne.Size
+	for _, o := range objects {
+		if !o.Visible() {
+			continue
+		}
+		min = min.Max(o.MinSize())
+	}
+	if l.lastHeight > min.Height {
+		min.Height = l.lastHeight
+	}
+	return min
+}
+
+func (l *wrapRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	pad := theme.Padding()
+	var x, y, rowHeight float32
+	for _, o := range objects {
+		if !o.Visible() {
+			continue
+		}
+		childSize := o.MinSize()
+		if x > 0 && x+childSize.Width > size.Width {
+			x = 0
+			y += rowHeight + pad
+			rowHeight = 0
+		}
+		o.Move(fyne.NewPos(x, y))
+		o.Resize(childSize)
+		x += childSize.Width + pad
+		if childSize.Height > rowHeight {
+			rowHeight = childSize.Height
+		}
+	}
+	l.lastHeight = y + rowHeight
+}
+
+// newWrapRow lays out objects in a wrapRowLayout - see its docs.
+func newWrapRow(objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&wrapRowLayout{}, objects...)
+}
+
 // newToggleGroup builds a toggleGroup offering one chip per name in
 // options, initially selected per selected. locs is the canonical Location
 // list (e.g. s.cfg.Locations) used to look up each option's Role for its
 // badge color - it need not be limited to options.
 func newToggleGroup(options []string, selected []string, locs []syncengine.Location) *toggleGroup {
 	g := newToggleGroupChips(options, selected, locationRoles(locs))
-	box := container.NewHBox()
+	box := newWrapRow()
 	for _, name := range options {
 		box.Add(g.chips[name])
 	}
@@ -574,7 +636,7 @@ func newRoleToggleGroup(locs []syncengine.Location, selected []string) *toggleGr
 			continue
 		}
 		ranked = append(ranked, roleLocs...)
-		row := container.NewHBox()
+		row := newWrapRow()
 		rows[role] = row
 		label := widget.NewLabelWithStyle(labelFromRole(role), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 		sections.Add(container.NewBorder(nil, nil, label, nil, row))
