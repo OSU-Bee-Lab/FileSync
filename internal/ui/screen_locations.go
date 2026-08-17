@@ -596,6 +596,11 @@ func browseLocation(s *state, id int, loc syncengine.Location) {
 	body := container.NewBorder(nil, container.NewCenter(actionRow(closeBtn, setBtn)), nil, nil, browser.CanvasObject())
 	d = dialog.NewCustomWithoutButtons("Browse "+loc.Name, body, s.win)
 	d.Resize(fyne.NewSize(480, 500))
+	// This browser lives in a dialog, not a screen, so setContent's
+	// stopAudio (run on every screen change) never fires for it - without
+	// this, closing the dialog (Close, the window's own X, or Escape) would
+	// leave a preview playing with no visible control left to stop it.
+	d.SetOnClosed(stopAudio)
 	d.Show()
 }
 
