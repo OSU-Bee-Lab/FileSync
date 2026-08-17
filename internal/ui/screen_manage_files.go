@@ -568,9 +568,10 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 			// Manage Files renames across whichever Locations the user picked,
 			// via rclone (local or remote), rather than Sync Recorders' local
 			// os.Rename - the one part of the retime that isn't shared.
-			apply: func(correct func(time.Time) time.Time) error {
-				renames := make(map[string]string, len(group.Files))
-				for _, f := range group.Files {
+			apply: func(correct func(time.Time) time.Time, exclude map[string]bool) error {
+				files := excludeSourceFiles(group.Files, exclude)
+				renames := make(map[string]string, len(files))
+				for _, f := range files {
 					t, ok := group.Parser.ParseTimestamp(f.DestRelPath)
 					if !ok {
 						continue

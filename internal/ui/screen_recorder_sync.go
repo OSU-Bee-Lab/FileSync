@@ -697,11 +697,12 @@ func (sc *recorderSyncScreen) checkTimestampsThen(forBatchUpload bool, next func
 			// Sync Recorders renames the local destination dirs directly - the
 			// files are always local here - rather than Manage Files' rclone
 			// rename across arbitrary Locations.
-			apply: func(correct func(time.Time) time.Time) error {
+			apply: func(correct func(time.Time) time.Time, exclude map[string]bool) error {
+				files := excludeSourceFiles(sourceFiles, exclude)
 				if sc.params.batchUpload {
-					sc.renameBatchUploadPaths(e.row.id, parser, sourceFiles, correct)
+					sc.renameBatchUploadPaths(e.row.id, parser, files, correct)
 				}
-				return recorder.ApplyTimestampFix(destDirs, parser, sourceFiles, correct)
+				return recorder.ApplyTimestampFix(destDirs, parser, files, correct)
 			},
 		})
 	}

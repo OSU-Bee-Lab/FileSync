@@ -31,12 +31,19 @@ type timestampReviewRow struct {
 	parser      recorder.TimestampParser
 	sourceFiles []recorder.SourceFile
 	check       recorder.TimestampIssue
-	apply       func(correct func(time.Time) time.Time) error
+	// apply performs the correction, skipping any file whose DestRelPath is
+	// in exclude (the entry's "Don't change" files - see timestampReviewEntry
+	// .dontChange) so a genuinely-timestamped file isn't renamed just because
+	// the rest of its recorder's clock was wrong.
+	apply func(correct func(time.Time) time.Time, exclude map[string]bool) error
 	// recheck re-runs this recorder's timestamp check at a new tolerance,
-	// leaving the (tolerance-independent) consensus date and this recorder's
-	// files untouched. It lets the review screen's tolerance slider re-judge
-	// every recorder live without either caller having to rebuild the screen.
-	recheck func(tolerance time.Duration) recorder.TimestampIssue
+	// ignoring any file whose DestRelPath is in excluded (the entry's "Don't
+	// warn" files - see timestampReviewEntry.dontWarn), leaving the
+	// (tolerance-independent) consensus date and this recorder's files
+	// otherwise untouched. It lets the review screen's tolerance slider
+	// re-judge every recorder live without either caller having to rebuild
+	// the screen.
+	recheck func(tolerance time.Duration, excluded map[string]bool) recorder.TimestampIssue
 	// recheckAt is recheck's counterpart for a not-yet-confirmed edited start
 	// time: it judges recorded (typed into "New start time") against the
 	// same other-recorder times and consensus date recheck uses, so the
@@ -67,7 +74,7 @@ type timestampReviewInput struct {
 	parser      recorder.TimestampParser
 	sourceFiles []recorder.SourceFile
 	start       time.Time
-	apply       func(correct func(time.Time) time.Time) error
+	apply       func(correct func(time.Time) time.Time, exclude map[string]bool) error
 
 	// locs and relDir carry through to the same-named timestampReviewRow
 	// fields - see there.
@@ -104,8 +111,14 @@ func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Dura
 			}
 		}
 		in := in
-		recheck := func(tol time.Duration) recorder.TimestampIssue {
-			return *recorder.CheckRecorderTimestamp(in.sourceFiles, in.parser, cy, cm, cd, others, tol)
+		recheck := func(tol time.Duration, excluded map[string]bool) recorder.TimestampIssue {
+			files := excludeSourceFiles(in.sourceFiles, excluded)
+			if result := recorder.CheckRecorderTimestamp(files, in.parser, cy, cm, cd, others, tol); result != nil {
+				return *result
+			}
+			// Every file was excluded (or none parse) - nothing left to judge,
+			// so there is nothing to warn about either.
+			return recorder.TimestampIssue{Suspicious: false}
 		}
 		recheckAt := func(recorded time.Time, tol time.Duration) recorder.TimestampIssue {
 			return *recorder.EvaluateTimestamp(recorded, cy, cm, cd, others, tol)
@@ -114,7 +127,7 @@ func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Dura
 			recorderID:  in.recorderID,
 			parser:      in.parser,
 			sourceFiles: in.sourceFiles,
-			check:       recheck(tolerance),
+			check:       recheck(tolerance, nil),
 			recheck:     recheck,
 			recheckAt:   recheckAt,
 			apply:       in.apply,
@@ -123,6 +136,22 @@ func buildTimestampReviewRows(inputs []timestampReviewInput, tolerance time.Dura
 		})
 	}
 	return rows
+}
+
+// excludeSourceFiles returns files with every entry whose DestRelPath is in
+// exclude dropped, without modifying files itself. A nil/empty exclude is
+// the common case (nothing checked) and returns files unchanged.
+func excludeSourceFiles(files []recorder.SourceFile, exclude map[string]bool) []recorder.SourceFile {
+	if len(exclude) == 0 {
+		return files
+	}
+	kept := make([]recorder.SourceFile, 0, len(files))
+	for _, f := range files {
+		if !exclude[f.DestRelPath] {
+			kept = append(kept, f)
+		}
+	}
+	return kept
 }
 
 // timestampIssueDetail describes a check in plain language, stating the
@@ -296,6 +325,17 @@ type timestampReviewEntry struct {
 	row    timestampReviewRow
 	adjust bool
 	text   string
+
+	// dontWarn holds the DestRelPath of every file the user has marked "Don't
+	// warn" - excluded from this recorder's suspicious-clock detection (see
+	// timestampReviewRow.recheck) because it genuinely carries an early/late
+	// timestamp rather than reflecting the recorder's clock being wrong.
+	dontWarn map[string]bool
+	// dontChange holds the DestRelPath of every file the user has marked
+	// "Don't change" - excluded from the rename this recorder's correction
+	// otherwise applies to every one of its files (see
+	// timestampReviewRow.apply and the file list's live rename preview).
+	dontChange map[string]bool
 }
 
 // timestampReviewHost supplies the pieces of a caller's screen that
@@ -583,7 +623,7 @@ func (tr *timestampReviewScreen) applyTolerance(minutes int) {
 
 	for i, e := range tr.entries {
 		if e.row.recheck != nil {
-			e.row.check = e.row.recheck(tr.tolerance)
+			e.row.check = e.row.recheck(tr.tolerance, e.dontWarn)
 		}
 		if !e.adjust {
 			e.text = e.row.check.Suggested.Format("2006-01-02 15:04")
@@ -701,55 +741,122 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 
 	errLbl := widget.NewLabel("")
 	errLbl.Wrapping = fyne.TextWrapWord
+	errLbl.Hide()
 
 	tr.audioStatusLbl = widget.NewLabel("")
 	tr.audioStatusLbl.Wrapping = fyne.TextWrapWord
 
+	// previewLbl/adjustLbl are hidden rather than just emptied when there's
+	// nothing to show them for (no "New start time" override, or one that
+	// doesn't yet parse) - an empty widget.Label still reserves a line's
+	// height in the VBox below, which otherwise left a blank gap above
+	// "Files" whenever no override was set.
 	previewLbl := widget.NewLabel("")
+	previewLbl.Hide()
 	adjustLbl := widget.NewLabel("")
+	adjustLbl.Hide()
 	refreshPreview := func() {
 		if !e.adjust {
-			previewLbl.SetText("")
-			adjustLbl.SetText("")
+			previewLbl.Hide()
+			adjustLbl.Hide()
 			return
 		}
 		edited, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location())
 		if err != nil {
-			previewLbl.SetText("")
-			adjustLbl.SetText("")
+			previewLbl.Hide()
+			adjustLbl.Hide()
 			return
 		}
 		previewLbl.SetText("New start time: " + plainDateTime(edited))
 		adjustLbl.SetText("Adjustment: " + formatAdjustment(e.row.check.Recorded, edited))
+		previewLbl.Show()
+		adjustLbl.Show()
 	}
 
 	filesBox := container.NewVBox()
+	// refreshFiles is declared ahead of addFileRow so the "Don't change"
+	// checkbox built inside addFileRow can call back into it (its rename
+	// preview needs to disappear the moment the box is checked) - both are
+	// only ever invoked after both are assigned, so the forward reference is
+	// safe.
+	var refreshFiles func()
 	// addFileRow wraps content in a playable row - a transport (play/
 	// restart/spinner) streaming this file from the highest-priority
 	// Location that has it (see audioOpener), the same controls
-	// destFolderBrowser's rows use. registration with the player's change
+	// destFolderBrowser's rows use, plus - for a file whose timestamp is
+	// actually checkable - a "Don't warn"/"Don't change" pair next to that
+	// transport. Don't warn excludes this file from the recorder's own
+	// suspicious-clock detection (recorder.CheckRecorderTimestamp), for a
+	// file that genuinely carries an early/late timestamp rather than a bad
+	// clock. Don't change excludes it from the rename this recorder's
+	// correction otherwise applies to every one of its files
+	// (recorder.ApplyTimestampFix). registration with the player's change
 	// notifications happens once for the whole screen (see
 	// showTimestampReview), so update is called with register=nil here.
-	addFileRow := func(sf recorder.SourceFile, content fyne.CanvasObject) {
+	addFileRow := func(sf recorder.SourceFile, content fyne.CanvasObject, checkable bool) {
+		if checkable {
+			dontWarn := widget.NewCheck("Don't warn", nil)
+			dontWarn.SetChecked(e.dontWarn[sf.DestRelPath])
+			dontWarn.OnChanged = func(checked bool) {
+				if checked {
+					if e.dontWarn == nil {
+						e.dontWarn = map[string]bool{}
+					}
+					e.dontWarn[sf.DestRelPath] = true
+				} else {
+					delete(e.dontWarn, sf.DestRelPath)
+				}
+				if e.row.recheck != nil {
+					e.row.check = e.row.recheck(tr.tolerance, e.dontWarn)
+				}
+				refreshHeader()
+				tr.refreshCard(tr.selected)
+				tr.refreshSummary()
+			}
+
+			dontChange := widget.NewCheck("Don't change", nil)
+			dontChange.SetChecked(e.dontChange[sf.DestRelPath])
+			dontChange.OnChanged = func(checked bool) {
+				if checked {
+					if e.dontChange == nil {
+						e.dontChange = map[string]bool{}
+					}
+					e.dontChange[sf.DestRelPath] = true
+				} else {
+					delete(e.dontChange, sf.DestRelPath)
+				}
+				refreshFiles()
+			}
+
+			content = container.NewBorder(nil, nil, nil, container.NewHBox(dontWarn, dontChange), content)
+		}
 		row := audioRow(content, newPresenceIndicator())
 		controls := audioControlsFrom(row)
 		relPath := joinRel(e.row.relDir, sf.DestRelPath)
 		controls.update(nil, e.row.locs, relPath, sf.DestRelPath)
 		tr.fileAudio = append(tr.fileAudio, timestampFileAudio{controls, e.row.locs, relPath, sf.DestRelPath})
+		if len(filesBox.Objects) > 0 {
+			filesBox.Add(widget.NewSeparator())
+		}
 		filesBox.Add(row)
 	}
-	refreshFiles := func() {
+	refreshFiles = func() {
 		filesBox.Objects = nil
 		tr.fileAudio = tr.fileAudio[:0]
 		for _, sf := range e.row.sourceFiles {
 			oldT, ok := e.row.parser.ParseTimestamp(sf.DestRelPath)
-			if !ok || !e.adjust {
-				addFileRow(sf, widget.NewLabel(sf.DestRelPath))
+			if !ok {
+				addFileRow(sf, widget.NewLabel(sf.DestRelPath), false)
+				continue
+			}
+			oldCol := container.NewVBox(widget.NewLabel(sf.DestRelPath), widget.NewLabel(plainDateTime(oldT)))
+			if !e.adjust || e.dontChange[sf.DestRelPath] {
+				addFileRow(sf, oldCol, true)
 				continue
 			}
 			edited, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location())
 			if err != nil {
-				addFileRow(sf, widget.NewLabel(sf.DestRelPath))
+				addFileRow(sf, oldCol, true)
 				continue
 			}
 			delta := edited.Sub(e.row.check.Recorded)
@@ -757,9 +864,9 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 			newRel := e.row.parser.RenameForTimestamp(sf.DestRelPath, newT)
 			oldLbl := widget.NewLabel(strikethrough(sf.DestRelPath))
 			newLbl := widget.NewLabelWithStyle(newRel, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-			oldCol := container.NewVBox(oldLbl, widget.NewLabel(plainDateTime(oldT)))
+			oldCol = container.NewVBox(oldLbl, widget.NewLabel(plainDateTime(oldT)))
 			newCol := container.NewVBox(newLbl, widget.NewLabel(plainDateTime(newT)))
-			addFileRow(sf, container.NewHBox(oldCol, widget.NewLabel("→"), newCol))
+			addFileRow(sf, container.NewHBox(oldCol, widget.NewLabel("→"), newCol), true)
 		}
 		filesBox.Refresh()
 	}
@@ -767,6 +874,7 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	entry.OnChanged = func(text string) {
 		e.text = text
 		errLbl.SetText("")
+		errLbl.Hide()
 		refreshPreview()
 		refreshFiles()
 		refreshHeader()
@@ -796,10 +904,13 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	refreshPreview()
 	refreshFiles()
 
+	filesHeader := canvas.NewText(fmt.Sprintf("Files (%d)", len(e.row.sourceFiles)), theme.Color(theme.ColorNameForeground))
+	filesHeader.TextStyle = fyne.TextStyle{Bold: true}
+	filesHeader.TextSize = theme.TextSize() + 6
+
 	detail := container.NewBorder(
-		container.NewVBox(header, container.NewBorder(nil, nil, adjust, nil, entry), previewLbl, adjustLbl, errLbl, widget.NewSeparator(),
-			widget.NewLabelWithStyle(fmt.Sprintf("Files (%d)", len(e.row.sourceFiles)), fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			tr.audioStatusLbl),
+		container.NewVBox(header, container.NewBorder(nil, nil, adjust, nil, entry), previewLbl, adjustLbl, errLbl,
+			filesHeader, tr.audioStatusLbl),
 		nil, nil, nil,
 		container.NewVScroll(filesBox),
 	)
@@ -890,7 +1001,7 @@ func (tr *timestampReviewScreen) applyFixesAsync(onDone func()) {
 	tr.applyLoading.Show()
 	go func() {
 		for _, f := range fixes {
-			_ = f.entry.row.apply(func(t time.Time) time.Time { return t.Add(f.delta) })
+			_ = f.entry.row.apply(func(t time.Time) time.Time { return t.Add(f.delta) }, f.entry.dontChange)
 		}
 		fyne.Do(func() {
 			tr.applyLoading.Hide()
