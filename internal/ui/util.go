@@ -415,17 +415,15 @@ type toggleChipRenderer struct {
 	badge *locationBadge
 }
 
+// marginTop and marginRight always reserve room for the badge overhang,
+// selected or not - a chip's box must sit at the same position and size
+// whether or not it's currently wearing a number, or every other chip in
+// the row would shift as this one's selection state changes.
 func (r *toggleChipRenderer) marginTop() float32 {
-	if r.c.number == 0 {
-		return 0
-	}
 	return chipBadgeOverhang
 }
 
 func (r *toggleChipRenderer) marginRight() float32 {
-	if r.c.number == 0 {
-		return 0
-	}
 	return chipBadgeOverhang
 }
 
