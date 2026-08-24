@@ -232,6 +232,18 @@ func (c *audioRowControls) hide() {
 // already registered once for the whole screen (e.g. the timestamp review
 // screen, see registerAudioRefreshFunc) pass nil.
 func (c *audioRowControls) update(register func(), locs []syncengine.Location, relPath, filename string) {
+	c.updateKeyed(register, locs, relPath, relPath, filename)
+}
+
+// updateKeyed is update, but with the player-state identity (key) kept
+// separate from the path actually streamed (relPath). Plain update uses
+// relPath for both, which is right whenever one row corresponds to one path.
+// It stops being right when two rows share a relPath but come from different
+// Locations - the N-way conflict resolver's per-version previews, where every
+// version of a conflicting file sits at the same relPath - so those callers
+// need a synthetic key that stays unique per version while relPath still
+// names the real file to stream.
+func (c *audioRowControls) updateKeyed(register func(), locs []syncengine.Location, key, relPath, filename string) {
 	if !audio.CanPlay(filename) || len(locs) == 0 {
 		c.hide()
 		return
@@ -246,7 +258,7 @@ func (c *audioRowControls) update(register func(), locs []syncengine.Location, r
 	// playback stops or the file ends - which is exactly when back-to-start
 	// applies, since anything loaded is either past its first sample or on its
 	// way there. A failed preview isn't active: there's nothing to restart.
-	active := st.Key == relPath && st.Err == nil
+	active := st.Key == key && st.Err == nil
 
 	// Nothing to go back to when the file is parked at its own start, which is
 	// where back-to-start leaves a paused preview.
@@ -267,7 +279,7 @@ func (c *audioRowControls) update(register func(), locs []syncengine.Location, r
 	}
 
 	c.play.OnTapped = func() {
-		p.Toggle(relPath, filename, audioOpener(locs, relPath))
+		p.Toggle(key, filename, audioOpener(locs, relPath))
 	}
 	c.restart.OnTapped = func() { p.Restart() }
 }

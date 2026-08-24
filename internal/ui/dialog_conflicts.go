@@ -133,6 +133,27 @@ type nwayVersion struct {
 	modTime time.Time
 }
 
+// conflictPreviewAudio is one version's playback controls in the resolver
+// dialog, plus what updateKeyed needs to keep repainting them as the player's
+// state changes (see registerAudioRefreshFunc's callback in
+// showNWayResolveDialog).
+type conflictPreviewAudio struct {
+	controls *audioRowControls
+	locs     []syncengine.Location
+	key      string
+	relPath  string
+	filename string
+}
+
+// conflictPreviewKey identifies one version's preview to the audio player.
+// Every version of a conflicting file sits at the same relPath, so relPath
+// alone (what a plain file row keys on) can't tell them apart - the location
+// ID makes the key unique per version while relPath still names the real
+// file streamed from that location.
+func conflictPreviewKey(relPath string, locID string) string {
+	return relPath + "\x00" + locID
+}
+
 // nwayConflict is one file the N-way scan couldn't confidently converge
 // (see syncengine.compareObjectsN / FileConflict), with every location's
 // copy of it — the unit the resolver steps through.
@@ -564,6 +585,26 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 	reasonLabel := widget.NewLabel("")
 	reasonLabel.Wrapping = fyne.TextWrapWord
 
+	// previewBox lets the user listen to each version before deciding which
+	// to keep - one audioRow per version, always shown regardless of the
+	// current choice, since listening is how the choice usually gets made.
+	// Every version shares the conflict's relPath (that's what makes it a
+	// conflict), so playback identity can't be relPath alone the way a plain
+	// file row uses it - see conflictPreviewKey and audioRowControls.updateKeyed.
+	previewBox := container.NewVBox()
+	audioStatusLbl := widget.NewLabel("")
+	audioStatusLbl.Wrapping = fyne.TextWrapWord
+	var previewAudio []conflictPreviewAudio
+
+	registerAudioRefreshFunc(func() {
+		if st := audioPlayer().State(); st.Err != nil {
+			audioStatusLbl.SetText("Couldn't play that file. " + classifyError(st.Err).String())
+		}
+		for _, pa := range previewAudio {
+			pa.controls.updateKeyed(nil, pa.locs, pa.key, pa.relPath, pa.filename)
+		}
+	})
+
 	radio := widget.NewRadioGroup(nil, nil)
 	subArea := container.NewVBox()
 	applyAllCheck := widget.NewCheck("Apply this choice to every unresolved conflict", nil)
@@ -754,6 +795,20 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 		radio.Selected = selected
 		radio.Refresh()
 
+		previewBox.Objects = nil
+		previewAudio = previewAudio[:0]
+		filename := path.Base(c.key.relPath)
+		for _, v := range c.versions {
+			row := audioRow(widget.NewLabel(versionLabel(v)), newPresenceIndicator())
+			ctrl := audioControlsFrom(row)
+			key := conflictPreviewKey(c.key.relPath, v.loc.ID)
+			locs := []syncengine.Location{v.loc}
+			ctrl.updateKeyed(nil, locs, key, c.key.relPath, filename)
+			previewAudio = append(previewAudio, conflictPreviewAudio{ctrl, locs, key, c.key.relPath, filename})
+			previewBox.Add(row)
+		}
+		previewBox.Refresh()
+
 		renderSubArea(choice)
 
 		resolved := len(conflicts) - r.unresolvedCount()
@@ -821,7 +876,9 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 		}
 	}
 
-	header := container.NewVBox(posLabel, pathLabel, reasonLabel, widget.NewSeparator())
+	header := container.NewVBox(posLabel, pathLabel, reasonLabel, widget.NewSeparator(),
+		widget.NewLabelWithStyle("Preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		previewBox, audioStatusLbl, widget.NewSeparator())
 	body = container.NewVScroll(container.NewVBox(radio, subArea))
 	body.SetMinSize(fyne.NewSize(600, 260))
 	footer := container.NewVBox(
@@ -833,6 +890,11 @@ func showNWayResolveDialog(s *state, r *nwayResolver, startAt *nwayConflictKey) 
 
 	d := dialog.NewCustom("Resolve conflicts", "Done", container.NewBorder(header, footer, nil, nil, body), s.win)
 	d.Resize(fyne.NewSize(660, 500))
+	// This resolver lives in a dialog, not a screen, so setContent's stopAudio
+	// (run on every screen change) never fires for it - without this, closing
+	// the dialog would leave a preview playing with no visible control left
+	// to stop it. See 956bdbc for the same fix on the Locations browse dialog.
+	d.SetOnClosed(stopAudio)
 	d.Show()
 }
 
