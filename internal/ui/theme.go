@@ -48,8 +48,25 @@ func (t lightenedTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVarian
 	switch name {
 	case theme.ColorNamePrimary, theme.ColorNameError:
 		return lighten(c, 0.18)
+	case theme.ColorNameInputBorder:
+		// Stock InputBorder (e.g. an unchecked checkbox's outline) is nearly
+		// invisible against its own background on a poor-contrast monitor -
+		// mix it toward the foreground color for a border that actually reads
+		// as a border in both themes.
+		fg := t.Theme.Color(theme.ColorNameForeground, variant)
+		return mix(c, fg, 0.6)
 	}
 	return c
+}
+
+// mix blends c1 toward c2 by amount (0 = c1, 1 = c2), keeping c1's alpha.
+func mix(c1, c2 color.Color, amount float32) color.Color {
+	r1, g1, b1, a1 := c1.RGBA()
+	r2, g2, b2, _ := c2.RGBA()
+	blend := func(v1, v2 uint32) uint8 {
+		return uint8((float32(v1>>8))*(1-amount) + (float32(v2>>8))*amount)
+	}
+	return color.NRGBA{R: blend(r1, r2), G: blend(g1, g2), B: blend(b1, b2), A: uint8(a1 >> 8)}
 }
 
 // lighten blends c toward white by amount (0-1).

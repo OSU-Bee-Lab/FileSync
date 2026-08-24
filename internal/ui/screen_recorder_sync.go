@@ -723,7 +723,7 @@ func (sc *recorderSyncScreen) checkTimestampsThen(forBatchUpload bool, next func
 	var applyOnlyLabel string
 	var onApplyOnly func()
 	if forBatchUpload {
-		continueLabel, continueBaseLabel, exitLabel = "Apply & Upload", "Upload", "Exit Without Uploading"
+		continueLabel, continueBaseLabel, exitLabel = "Apply & Scan", "Scan", "Exit Without Uploading"
 		exitWarning = "Exiting now will not apply any timestamp corrections - every recorder's files keep their original names. Nothing will be uploaded to the remote destination either."
 		applyOnlyLabel = "Apply & End Sync"
 		onApplyOnly = sc.doConfirmEndSync

@@ -490,14 +490,6 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 		tr.cardLabels = append(tr.cardLabels, statusLabel)
 	}
 
-	// One refresh callback for the whole screen (rather than one per row, the
-	// way destFolderBrowser's pooled list rows need): the detail pane shows
-	// only one recorder's files at a time, and tr.fileAudio is repointed at
-	// whichever one that is every time rebuildDetail runs, so a single
-	// registration here stays correct across selection changes for the life
-	// of this screen.
-	registerAudioRefreshFunc(tr.refreshAudio)
-
 	tr.detailBox = container.NewStack()
 	continueBtn := widget.NewButton(host.continueBaseLabel, nil)
 	continueBtn.Importance = widget.HighImportance
@@ -574,6 +566,18 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 		split,
 	)
 	host.s.setContent(container.NewPadded(content))
+
+	// One refresh callback for the whole screen (rather than one per row, the
+	// way destFolderBrowser's pooled list rows need): the detail pane shows
+	// only one recorder's files at a time, and tr.fileAudio is repointed at
+	// whichever one that is every time rebuildDetail runs, so a single
+	// registration here stays correct across selection changes for the life
+	// of this screen. Registered after setContent, which clears every prior
+	// screen's subscribers (clearAudioRefreshers) - registering before it ran
+	// meant this callback was wiped out the instant it was added, so playback
+	// state changes (play -> pause, back-to-start appearing) never repainted
+	// a row already on screen.
+	registerAudioRefreshFunc(tr.refreshAudio)
 
 	tr.selectRow(0)
 }
@@ -755,6 +759,25 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	previewLbl.Hide()
 	adjustLbl := widget.NewLabel("")
 	adjustLbl.Hide()
+	// refreshError surfaces a not-parseable "New start time" as a visible
+	// error rather than just silently withholding the preview (see
+	// refreshPreview) - parseFixes already refuses to apply/continue past an
+	// unparseable entry, but without this the user had no indication why the
+	// button did nothing.
+	refreshError := func() {
+		if !e.adjust {
+			errLbl.SetText("")
+			errLbl.Hide()
+			return
+		}
+		if _, err := time.ParseInLocation("2006-01-02 15:04", e.text, e.row.check.Recorded.Location()); err != nil {
+			errLbl.SetText("Not a valid date/time - use YYYY-MM-DD HH:MM, e.g. " + plainDateTime(e.row.check.Recorded) + ".")
+			errLbl.Show()
+			return
+		}
+		errLbl.SetText("")
+		errLbl.Hide()
+	}
 	refreshPreview := func() {
 		if !e.adjust {
 			previewLbl.Hide()
@@ -873,8 +896,7 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 
 	entry.OnChanged = func(text string) {
 		e.text = text
-		errLbl.SetText("")
-		errLbl.Hide()
+		refreshError()
 		refreshPreview()
 		refreshFiles()
 		refreshHeader()
@@ -894,6 +916,7 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 	adjust.OnChanged = func(checked bool) {
 		e.adjust = checked
 		setEnabled(checked)
+		refreshError()
 		refreshPreview()
 		refreshFiles()
 		refreshHeader()
@@ -901,6 +924,7 @@ func (tr *timestampReviewScreen) rebuildDetail() {
 		tr.refreshContinueLabel()
 	}
 
+	refreshError()
 	refreshPreview()
 	refreshFiles()
 
