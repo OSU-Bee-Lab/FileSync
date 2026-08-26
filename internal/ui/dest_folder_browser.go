@@ -149,6 +149,15 @@ type destFolderBrowser struct {
 	// updateRow to drive each row's presenceIndicator dots.
 	presence map[string][]bool
 
+	// loaded is index-aligned with b.locs: true once that Location's
+	// listing has landed (successfully or not) for the current scan
+	// generation. nil under a custom lister (Manage Files lists a single
+	// reference Location already gated by the loading bar, so there's
+	// nothing per-Location to distinguish). Read by updateRow so a
+	// presenceIndicator can show a still-loading Location's dot as pending
+	// rather than indistinguishable from "reported, not present".
+	loaded []bool
+
 	// addingFolder is whether the trailing list row is in text-entry
 	// mode. addFolderText mirrors that entry's content - kept on the
 	// browser rather than read back off the (pooled, possibly
@@ -413,9 +422,9 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 		// With one Location selected, presence is trivially "everywhere it
 		// exists" for every row - not worth a checkmark on every line.
 		if len(b.locs) > 1 {
-			presence.Update(b.presence[e.Name], rolesFrom(b.locs))
+			presence.Update(b.presence[e.Name], rolesFrom(b.locs), b.loaded)
 		} else {
-			presence.Update(nil, nil)
+			presence.Update(nil, nil, nil)
 		}
 		// Every file row offers playback if its format is one a driver
 		// recognizes, whether or not the row is selectable - hearing the
@@ -470,7 +479,7 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 
 	// Trailing "+ Add Folder" row.
 	audioControls.hide()
-	presence.Update(nil, nil)
+	presence.Update(nil, nil, nil)
 	if b.addingFolder {
 		btn.Hide()
 		entry.Show()
@@ -549,14 +558,17 @@ func (b *destFolderBrowser) updateBackBtn() {
 
 // listingDone publishes a custom lister's result for scan generation gen,
 // dropping it (and returning false) if a newer reload has superseded it. A
-// nil entries slice is a valid empty listing. Hides the loading bar. Must be
-// called on the UI goroutine.
-func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pres map[string][]bool) bool {
+// nil entries slice is a valid empty listing. loaded is index-aligned with
+// b.locs (nil if the lister doesn't track per-Location progress, e.g. the
+// not-found/is-a-file early-outs below, which settle every Location at
+// once). Hides the loading bar. Must be called on the UI goroutine.
+func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pres map[string][]bool, loaded []bool) bool {
 	if gen != b.scanGen {
 		return false
 	}
 	b.entries = entries
 	b.presence = pres
+	b.loaded = loaded
 	b.list.Refresh()
 	b.loading.Hide()
 	return true
@@ -565,12 +577,13 @@ func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pre
 // listingUpdate is listingDone for a partial result: it paints what a custom
 // lister has so far but leaves the loading bar up, since more Locations are
 // still reporting. Returns false if the listing is stale.
-func (b *destFolderBrowser) listingUpdate(gen int, entries []syncengine.Entry, pres map[string][]bool) bool {
+func (b *destFolderBrowser) listingUpdate(gen int, entries []syncengine.Entry, pres map[string][]bool, loaded []bool) bool {
 	if gen != b.scanGen {
 		return false
 	}
 	b.entries = entries
 	b.presence = pres
+	b.loaded = loaded
 	b.list.Refresh()
 	return true
 }
@@ -602,6 +615,7 @@ func (b *destFolderBrowser) reload() {
 	if b.lister != nil {
 		b.entries = nil
 		b.presence = nil
+		b.loaded = nil
 		b.list.Refresh()
 		b.statusLbl.SetText("")
 		b.loading.Show()
@@ -615,6 +629,7 @@ func (b *destFolderBrowser) reload() {
 	if len(locs) == 0 {
 		b.entries = nil
 		b.presence = nil
+		b.loaded = nil
 		b.list.Refresh()
 		b.statusLbl.SetText("")
 		b.loading.Hide()
@@ -623,30 +638,32 @@ func (b *destFolderBrowser) reload() {
 
 	b.entries = nil
 	b.presence = nil
+	b.loaded = make([]bool, len(locs))
 	b.list.Refresh()
 	b.statusLbl.SetText("")
 	b.loading.Show()
 	go func() {
 		ctx := context.Background()
-		onUpdate := func(entries []syncengine.Entry, pres map[string][]bool) {
+		onUpdate := func(entries []syncengine.Entry, pres map[string][]bool, loaded []bool) {
 			fyne.Do(func() {
 				if gen != b.scanGen {
 					return
 				}
 				b.entries = entries
 				b.presence = pres
+				b.loaded = loaded
 				b.list.Refresh()
 			})
 		}
 		if b.showFiles {
 			syncengine.UnionChildEntriesStream(ctx, locs, relPath, onUpdate)
 		} else {
-			syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string, pres map[string][]bool) {
+			syncengine.UnionChildDirNamesStream(ctx, locs, relPath, func(names []string, pres map[string][]bool, loaded []bool) {
 				entries := make([]syncengine.Entry, len(names))
 				for i, n := range names {
 					entries[i] = syncengine.Entry{Name: n, IsDir: true}
 				}
-				onUpdate(entries, pres)
+				onUpdate(entries, pres, loaded)
 			})
 		}
 		fyne.Do(func() {

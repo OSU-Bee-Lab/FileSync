@@ -158,11 +158,14 @@ const (
 // browser's currently-selected Locations (in the same order as their
 // badges) contain that entry: one small circle per Location, colored by
 // that Location's Role like its badge (see badgeFillColor) - filled if
-// present there, just an outline in that color if not.
+// present there, just an outline in that color if not. While a Location's
+// listing hasn't landed yet (see loaded), its dot is replaced with a small
+// spinner instead of reading as a false "not present" outline.
 type presenceIndicator struct {
 	widget.BaseWidget
 	present []bool
 	roles   []syncengine.LocationRole
+	loaded  []bool
 }
 
 func newPresenceIndicator() *presenceIndicator {
@@ -181,10 +184,14 @@ func (p *presenceIndicator) Tapped(*fyne.PointEvent) {}
 // Update replaces the presence set this indicator shows and refreshes it.
 // present and roles are index-matched to the browser's current Locations
 // (see destFolderBrowser.locs). A nil/empty present (nothing to compare
-// against, or this row predates a scan finishing) renders nothing.
-func (p *presenceIndicator) Update(present []bool, roles []syncengine.LocationRole) {
+// against, or this row predates a scan finishing) renders nothing. loaded
+// is likewise index-matched, true once that Location's listing has landed;
+// a nil loaded (single-Location browsers, or a custom lister that doesn't
+// track per-Location progress) treats every dot as already loaded.
+func (p *presenceIndicator) Update(present []bool, roles []syncengine.LocationRole, loaded []bool) {
 	p.present = present
 	p.roles = roles
+	p.loaded = loaded
 	p.Refresh()
 }
 
@@ -195,24 +202,30 @@ func (p *presenceIndicator) CreateRenderer() fyne.WidgetRenderer {
 }
 
 type presenceIndicatorRenderer struct {
-	p    *presenceIndicator
-	dots []*canvas.Circle
+	p        *presenceIndicator
+	dots     []*canvas.Circle
+	spinners []*audioSpinner
 }
 
 func (r *presenceIndicatorRenderer) rebuildDots() {
 	r.dots = make([]*canvas.Circle, len(r.p.present))
+	r.spinners = make([]*audioSpinner, len(r.p.present))
 	for i := range r.dots {
 		r.dots[i] = canvas.NewCircle(color.Transparent)
 		r.dots[i].StrokeWidth = 1
+		r.spinners[i] = newAudioSpinner()
+		r.spinners[i].Hide()
 	}
 }
 
 func (r *presenceIndicatorRenderer) Layout(size fyne.Size) {
 	x := float32(0)
 	y := (size.Height - presenceDotSize) / 2
-	for _, dot := range r.dots {
+	for i, dot := range r.dots {
 		dot.Resize(fyne.NewSize(presenceDotSize, presenceDotSize))
 		dot.Move(fyne.NewPos(x, y))
+		r.spinners[i].Resize(fyne.NewSize(presenceDotSize, presenceDotSize))
+		r.spinners[i].Move(fyne.NewPos(x, y))
 		x += presenceDotSize + presenceDotGap
 	}
 }
@@ -225,11 +238,28 @@ func (r *presenceIndicatorRenderer) MinSize() fyne.Size {
 	return fyne.NewSize(width+presenceScrollbarMargin, presenceDotSize)
 }
 
+// pending reports whether Location i's listing hasn't landed yet - a nil
+// loaded (see presenceIndicator.Update) means every dot counts as loaded.
+func (p *presenceIndicator) pending(i int) bool {
+	return i < len(p.loaded) && !p.loaded[i]
+}
+
 func (r *presenceIndicatorRenderer) Refresh() {
 	if len(r.dots) != len(r.p.present) {
 		r.rebuildDots()
 	}
 	for i, dot := range r.dots {
+		spinner := r.spinners[i]
+		if r.p.pending(i) {
+			dot.Hide()
+			spinner.Show()
+			spinner.Start()
+			continue
+		}
+		spinner.Stop()
+		spinner.Hide()
+		dot.Show()
+
 		var role syncengine.LocationRole
 		if i < len(r.p.roles) {
 			role = r.p.roles[i]
@@ -243,13 +273,17 @@ func (r *presenceIndicatorRenderer) Refresh() {
 		}
 		dot.Refresh()
 	}
-	r.Layout(r.MinSize())
+	size := r.p.Size()
+	if size.IsZero() {
+		size = r.MinSize()
+	}
+	r.Layout(size)
 }
 
 func (r *presenceIndicatorRenderer) Objects() []fyne.CanvasObject {
-	out := make([]fyne.CanvasObject, len(r.dots))
-	for i, d := range r.dots {
-		out[i] = d
+	out := make([]fyne.CanvasObject, 0, len(r.dots)+len(r.spinners))
+	for i := range r.dots {
+		out = append(out, r.dots[i], r.spinners[i])
 	}
 	return out
 }

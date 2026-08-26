@@ -184,30 +184,61 @@ func ListChildrenUnion(ctx context.Context, locs []Location, relPath string) (en
 	return ListChildrenUnionStream(ctx, locs, relPath, nil)
 }
 
+// streamLocations is the one place that fans a listing out across locs
+// concurrently: it calls list(i, loc) for every Location in its own
+// goroutine, then - holding a shared lock, so callers never see two calls
+// overlap - marks that Location loaded and invokes fold with its result (or
+// error) plus a fresh snapshot of which Locations have reported so far.
+// loaded is index-aligned with locs and safe for fold to hand onward (it's
+// cloned per call, never the live backing array). Shared by every
+// Union*Stream/ListChildrenUnionStream lister below, all of which differ
+// only in what they list and how they fold a result into the running union
+// - not in the fan-out/loaded-tracking mechanics, which used to be
+// copy-pasted three times.
+func streamLocations(locs []Location, list func(i int, loc Location) ([]Entry, error), fold func(i int, entries []Entry, err error, loaded []bool)) {
+	loaded := make([]bool, len(locs))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i, loc := range locs {
+		wg.Add(1)
+		go func(i int, loc Location) {
+			defer wg.Done()
+			entries, err := list(i, loc)
+			mu.Lock()
+			defer mu.Unlock()
+			loaded[i] = true
+			fold(i, entries, err, cloneLoaded(loaded))
+		}(i, loc)
+	}
+	wg.Wait()
+}
+
+func cloneLoaded(loaded []bool) []bool {
+	out := make([]bool, len(loaded))
+	copy(out, loaded)
+	return out
+}
+
 // ListChildrenUnionStream is ListChildrenUnion, but invokes onUpdate with the
 // union built so far each time a Location's listing lands, instead of only
 // handing back one result once the slowest Location has answered. This lets
 // Manage Files paint a fast Location's children (local disk) immediately
 // rather than blocking the whole browser on a slow remote. onUpdate is only
 // ever called from one goroutine at a time, and never with a union that a
-// still-running listing could mutate (unionEntries builds fresh values). The
-// return values are exactly ListChildrenUnion's, after every Location has
-// finished. onUpdate may be nil.
-func ListChildrenUnionStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry, pres presence)) (entries []Entry, notFound bool, isFile bool, pres presence, err error) {
+// still-running listing could mutate (unionEntries builds fresh values).
+// loaded is index-aligned with locs, true once that Location has reported
+// (successfully or not) - see streamLocations. The return values are exactly
+// ListChildrenUnion's, after every Location has finished. onUpdate may be
+// nil.
+func ListChildrenUnionStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry, pres presence, loaded []bool)) (entries []Entry, notFound bool, isFile bool, pres presence, err error) {
 	perLoc := make([][]Entry, len(locs))
-	var mu sync.Mutex
 	anyOK := false
 	anyIsFile := false
 	var firstHardErr error
 
-	var wg sync.WaitGroup
-	for i, loc := range locs {
-		wg.Add(1)
-		go func(i int, loc Location) {
-			defer wg.Done()
-			e, lerr := ListChildren(ctx, loc, relPath)
-			mu.Lock()
-			defer mu.Unlock()
+	streamLocations(locs,
+		func(i int, loc Location) ([]Entry, error) { return ListChildren(ctx, loc, relPath) },
+		func(i int, e []Entry, lerr error, loaded []bool) {
 			if lerr != nil {
 				switch {
 				case errors.Is(lerr, fs.ErrorIsFile):
@@ -219,17 +250,15 @@ func ListChildrenUnionStream(ctx context.Context, locs []Location, relPath strin
 						firstHardErr = lerr
 					}
 				}
-				return
+			} else {
+				anyOK = true
+				perLoc[i] = e
 			}
-			anyOK = true
-			perLoc[i] = e
 			if onUpdate != nil {
 				out, p := unionEntries(locs, perLoc)
-				onUpdate(out, p)
+				onUpdate(out, p, loaded)
 			}
-		}(i, loc)
-	}
-	wg.Wait()
+		})
 
 	if !anyOK && firstHardErr != nil {
 		return nil, false, false, nil, firstHardErr
@@ -313,76 +342,22 @@ func UnionChildDirNames(ctx context.Context, locs []Location, relPath string) []
 	return names
 }
 
-// UnionChildDirNamesStream is UnionChildDirNames, but scans every location
-// concurrently and invokes onUpdate with the current deduped/sorted union
-// each time a location's listing lands, instead of waiting for all of them.
-// This lets a caller show a fast location's folders (e.g. local disk)
-// immediately rather than blocking on a slow one (e.g. a remote). onUpdate
-// is only ever called from one goroutine at a time. Locations that fail to
-// list are silently skipped, same as UnionChildDirNames.
-func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(names []string, pres presence)) {
+// UnionChildEntriesStream scans every one of locs concurrently for relPath's
+// immediate children (files and directories, each tagged via Entry.IsDir),
+// invoking onUpdate with the current deduped/sorted union - and each entry's
+// per-Location presence - every time a Location's listing lands, instead of
+// waiting for all of them. This lets a caller show a fast Location's
+// contents (e.g. local disk) immediately rather than blocking on a slow one
+// (e.g. a remote). It backs the "Edit Sync Locations" browse dialog, where
+// seeing the files already at a candidate path helps confirm it's the right
+// one before adopting it as the Location's root. Locations that fail to
+// list (e.g. an unreachable remote) are silently skipped, same as
+// ListChildrenUnion's tolerance, but still marked loaded via streamLocations
+// - a failure is still an answer, not a still-pending Location.
+func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry, pres presence, loaded []bool)) {
 	if len(locs) == 0 {
 		return
 	}
-	var mu sync.Mutex
-	seen := make(map[string]bool)
-	pres := make(presence)
-	var wg sync.WaitGroup
-	for li, loc := range locs {
-		wg.Add(1)
-		go func(li int, loc Location) {
-			defer wg.Done()
-			entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
-			if err != nil {
-				return
-			}
-			mu.Lock()
-			defer mu.Unlock()
-			for _, e := range entries {
-				if _, isDir := e.(fs.Directory); isDir {
-					name := dirName(e)
-					seen[name] = true
-					if pres[name] == nil {
-						pres[name] = make([]bool, len(locs))
-					}
-					pres[name][li] = true
-				}
-			}
-			names := make([]string, 0, len(seen))
-			for n := range seen {
-				names = append(names, n)
-			}
-			sort.Strings(names)
-			onUpdate(names, clonePresence(pres))
-		}(li, loc)
-	}
-	wg.Wait()
-}
-
-// clonePresence deep-copies pres so a caller reading it on another
-// goroutine (e.g. the UI thread via fyne.Do) never races the still-running
-// listing goroutines that keep mutating the original after handing a
-// snapshot to onUpdate.
-func clonePresence(pres presence) presence {
-	out := make(presence, len(pres))
-	for name, p := range pres {
-		cp := make([]bool, len(p))
-		copy(cp, p)
-		out[name] = cp
-	}
-	return out
-}
-
-// UnionChildEntriesStream is UnionChildDirNamesStream, but includes files
-// alongside directories (each tagged via Entry.IsDir) instead of directories
-// only. It backs the "Edit Sync Locations" browse dialog, where seeing the
-// files already at a candidate path helps confirm it's the right one before
-// adopting it as the Location's root.
-func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(entries []Entry, pres presence)) {
-	if len(locs) == 0 {
-		return
-	}
-	var mu sync.Mutex
 	// Each location's own listing is kept as it lands and the union is
 	// rebuilt from all of them on every update (unionEntries), rather than
 	// accumulated in place: folding a result onto its recording depends on
@@ -390,34 +365,32 @@ func UnionChildEntriesStream(ctx context.Context, locs []Location, relPath strin
 	// happens to answer first must still fold once the Audio Location it
 	// mirrors arrives.
 	perLoc := make([][]Entry, len(locs))
-	var wg sync.WaitGroup
-	for li, loc := range locs {
-		wg.Add(1)
-		go func(li int, loc Location) {
-			defer wg.Done()
-			entries, err := listDir(ctx, joinSpec(loc.rcloneSpec(), relPath))
-			if err != nil {
-				return
+	streamLocations(locs,
+		func(i int, loc Location) ([]Entry, error) { return ListChildren(ctx, loc, relPath) },
+		func(i int, e []Entry, err error, loaded []bool) {
+			if err == nil {
+				perLoc[i] = e
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			for _, e := range entries {
-				switch v := e.(type) {
-				case fs.Directory:
-					perLoc[li] = append(perLoc[li], Entry{Name: dirName(e), IsDir: true})
-				case fs.Object:
-					perLoc[li] = append(perLoc[li], Entry{Name: dirName(e), IsDir: false, Size: v.Size()})
-				}
-			}
-			// No clonePresence here (unlike UnionChildDirNamesStream, which
-			// hands out a long-lived accumulator): unionEntries builds a
-			// fresh map per update, so nothing else can still be writing to
-			// the one the caller receives.
 			out, pres := unionEntries(locs, perLoc)
-			onUpdate(out, pres)
-		}(li, loc)
-	}
-	wg.Wait()
+			onUpdate(out, pres, loaded)
+		})
+}
+
+// UnionChildDirNamesStream is UnionChildEntriesStream, but returns just the
+// deduped/sorted directory names, filtering out files. It backs the
+// recorder-sync folder browser, whose destination is a set of locations at
+// once rather than a single source - a folder only has to exist on one of
+// them to show up as navigable.
+func UnionChildDirNamesStream(ctx context.Context, locs []Location, relPath string, onUpdate func(names []string, pres presence, loaded []bool)) {
+	UnionChildEntriesStream(ctx, locs, relPath, func(entries []Entry, pres presence, loaded []bool) {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir {
+				names = append(names, e.Name)
+			}
+		}
+		onUpdate(names, pres, loaded)
+	})
 }
 
 func dirName(e fs.DirEntry) string {

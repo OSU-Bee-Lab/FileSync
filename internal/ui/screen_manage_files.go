@@ -183,7 +183,7 @@ func showManageFiles(s *state) {
 		b.lister = func(gen int, relPath string) {
 			locs := selectedLocs()
 			if len(locs) == 0 {
-				b.listingDone(gen, nil, nil)
+				b.listingDone(gen, nil, nil, nil)
 				b.setBreadcrumbOverride("Select a Location above first.")
 				return
 			}
@@ -193,8 +193,8 @@ func showManageFiles(s *state) {
 				// one (local disk) already listed.
 				result, notFound, isFile, pres, err := syncengine.ListChildrenUnionStream(
 					context.Background(), locs, relPath,
-					func(entries []syncengine.Entry, pres map[string][]bool) {
-						fyne.Do(func() { b.listingUpdate(gen, entries, pres) })
+					func(entries []syncengine.Entry, pres map[string][]bool, loaded []bool) {
+						fyne.Do(func() { b.listingUpdate(gen, entries, pres, loaded) })
 					})
 				fyne.Do(func() {
 					if err != nil {
@@ -211,12 +211,12 @@ func showManageFiles(s *state) {
 						// yet (naming a new "To" destination) or that names a
 						// bare file (which has no children) is expected, not
 						// an error - show it empty.
-						if b.listingDone(gen, nil, nil) && b.allowCreate && notFound {
+						if b.listingDone(gen, nil, nil, nil) && b.allowCreate && notFound {
 							b.setBreadcrumbNote(" (new folder)")
 						}
 						return
 					}
-					b.listingDone(gen, result, pres)
+					b.listingDone(gen, result, pres, nil)
 				})
 			}()
 		}
