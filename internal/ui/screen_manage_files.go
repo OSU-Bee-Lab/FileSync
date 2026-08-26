@@ -1200,9 +1200,12 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					// Stay on this screen with the final counts/columns still
 					// visible rather than force-closing into a modal - just
 					// swap the title and the footer's Back/Apply for a
-					// single Done that returns to the setup screen.
+					// single Done. The operation is now fully finished, so
+					// Done returns to the main menu rather than back to
+					// Manage Files' own setup screen (see progress_screen.go's
+					// backBtn for the same pattern in the sync flows).
 					titleLabel.SetText("Operation complete!")
-					doneBtn := widget.NewButton("Done", func() { showManageFiles(s) })
+					doneBtn := widget.NewButton("Done", func() { showHome(s) })
 					doneBtn.Importance = widget.HighImportance
 					buttonRow.Objects = []fyne.CanvasObject{doneBtn}
 					buttonRow.Refresh()

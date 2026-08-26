@@ -467,7 +467,18 @@ func (ps *progressScreen) buildLayout() fyne.CanvasObject {
 	if ps.extras.syncingTitle == "Batch Upload" {
 		backLabel = "Exit Without Uploading"
 	}
-	ps.backBtn = widget.NewButton(backLabel, ps.onBack)
+	// The same button doubles as mid-flow Back/Exit (returns to whichever
+	// screen started this flow, so the user can reconsider) and, once the
+	// flow is fully finished, "Done" — which always goes to the main menu
+	// rather than back to this (or any) operation's start screen. See
+	// applyPhaseChrome's phaseSyncComplete case for the label swap.
+	ps.backBtn = widget.NewButton(backLabel, func() {
+		if ps.phase == phaseSyncComplete {
+			showHome(s)
+			return
+		}
+		ps.onBack()
+	})
 	if backLabel == "Back" {
 		ps.backBtn.Importance = widget.MediumImportance
 	} else {
