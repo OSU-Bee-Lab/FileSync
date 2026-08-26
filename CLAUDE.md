@@ -16,6 +16,8 @@ remotes (SharePoint/OneDrive, Google Drive, Dropbox, S3) via rclone.
   clock-timestamp handling, with one driver per recorder model under
   `internal/recorder/drivers`.
 - `internal/appversion` — app version string.
+- `internal/applog` — redirects stderr (panics included) into a size-capped
+  log file beside the config.
 
 ## Data schema
 

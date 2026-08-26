@@ -20,11 +20,10 @@ type InstanceLock struct {
 // false if another instance already holds it; callers should refuse to
 // start rather than proceed unlocked.
 func AcquireInstanceLock() (lock *InstanceLock, ok bool, err error) {
-	dir, err := os.UserConfigDir()
+	dir, err := Dir()
 	if err != nil {
 		return nil, false, err
 	}
-	dir = filepath.Join(dir, "FileSync")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, false, err
 	}

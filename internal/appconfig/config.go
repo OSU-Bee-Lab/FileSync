@@ -118,16 +118,27 @@ func Default() Config {
 	}
 }
 
-// Path returns the OS-appropriate location for FileSync's config file
-// (e.g. ~/.config/FileSync/config.json on Linux, ~/Library/Application
-// Support/FileSync/config.json on macOS, %AppData%\FileSync\config.json on
-// Windows), via os.UserConfigDir so no path is ever hardcoded.
-func Path() (string, error) {
+// Dir returns the OS-appropriate directory FileSync keeps its per-machine
+// state in (e.g. ~/.config/FileSync on Linux, ~/Library/Application
+// Support/FileSync on macOS, %AppData%\FileSync on Windows), via
+// os.UserConfigDir so no path is ever hardcoded. Everything that lives
+// beside the config - the single-instance lock, the crash log - resolves
+// its own path from here rather than rebuilding it.
+func Dir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "FileSync", "config.json"), nil
+	return filepath.Join(dir, "FileSync"), nil
+}
+
+// Path returns the OS-appropriate location for FileSync's config file.
+func Path() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.json"), nil
 }
 
 // Load reads the config file, returning Default() if it doesn't exist yet

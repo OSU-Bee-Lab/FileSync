@@ -2,14 +2,18 @@ package ui
 
 import (
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"github.com/OSU-Bee-Lab/filesync/internal/applog"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
 )
 
@@ -25,8 +29,37 @@ func showSettings(s *state) {
 	}
 
 	debugHint := widget.NewLabel("When enabled, FileSync prints what it's scanning/copying to the console " +
-		"(stdout/stderr) - useful for diagnosing a sync or scan that seems stuck.")
+		"(stdout/stderr) - useful for diagnosing a sync or scan that seems stuck. It all goes to the log file " +
+		"below too, so it's still there afterwards.")
 	debugHint.Wrapping = fyne.TextWrapWord
+
+	logPath, logErr := applog.Path()
+	logPathLabel := widget.NewLabel(logPath)
+	logPathLabel.Truncation = fyne.TextTruncateEllipsis
+	logHint := widget.NewLabel("FileSync writes what it would have printed to the console - including the " +
+		"details of a crash - to this file, so a problem that happened while nobody was watching can still be " +
+		"diagnosed afterwards. Send it along when reporting a bug. It's capped in size and the previous file is " +
+		"kept alongside it, so it can't fill the disk.")
+	logHint.Wrapping = fyne.TextWrapWord
+	showLogBtn := widget.NewButtonWithIcon("Show Log Folder", theme.FolderOpenIcon(), func() {
+		dir := filepath.Dir(logPath)
+		// storage.NewFileURI builds the file:// form correctly per
+		// platform (Windows drive letters and all); App.OpenURL then hands
+		// it to whatever the OS opens folders with.
+		uri, err := url.Parse(storage.NewFileURI(dir).String())
+		if err == nil {
+			err = fyne.CurrentApp().OpenURL(uri)
+		}
+		if err != nil {
+			showErrorModal(s.win, fmt.Sprintf("Couldn't open %s: %v", dir, err))
+		}
+	})
+	if logErr != nil {
+		// No path to show or open - say so rather than offering a button
+		// that can't work.
+		logPathLabel.SetText("Unavailable: " + errString(logErr))
+		showLogBtn.Disable()
+	}
 
 	inactivityEntry := widget.NewEntry()
 	inactivityEntry.SetText(strconv.Itoa(s.cfg.RecorderInactivityTimeoutMinutes))
@@ -172,6 +205,8 @@ func showSettings(s *state) {
 
 	scroll := container.NewVScroll(container.NewVBox(
 		debugCheck, debugHint,
+		widget.NewSeparator(),
+		widget.NewLabel("Log file"), logPathLabel, container.NewBorder(nil, nil, showLogBtn, nil), logHint,
 		widget.NewSeparator(),
 		widget.NewLabel("Recorder Sync inactivity timeout (minutes)"), inactivityEntry, inactivityHint,
 		widget.NewSeparator(),
