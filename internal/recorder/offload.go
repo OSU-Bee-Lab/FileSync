@@ -38,9 +38,21 @@ func splitSubpath(subpath string) []string {
 	return parts
 }
 
-// maxConcurrentUploads bounds simultaneous cloud uploads within one
-// StartOffload run (see uploadSem below).
+// maxConcurrentUploads bounds simultaneous cloud uploads across the whole
+// process (see uploadSem below).
 const maxConcurrentUploads = 3
+
+// uploadSem bounds how many cloud uploads run at once across every offload
+// running in this process, not just within one StartOffload call. Files
+// land locally in bursts (e.g. ~100 in 15 minutes during an active recorder
+// sync), and firing an unbounded number of uploads at the remote
+// (SharePoint/OneDrive) causes throttling/errors under load; this caps it
+// the same way a normal rclone copy batch would be bounded. It is
+// deliberately package-level rather than per-run: a sync session offloads a
+// whole batch of recorders, often several at once, and a per-run limit
+// would multiply by the number of attached recorders - exactly the burst it
+// exists to prevent.
+var uploadSem = make(chan struct{}, maxConcurrentUploads)
 
 // maxUploadAttempts is how many times uploadWithRetry tries a single file
 // upload (including the first attempt) before reporting it failed.
@@ -104,9 +116,17 @@ func (j *OffloadJob) Cancel() {
 // from StartOffload's per-file upload goroutines, one per (destination,
 // file) pair, so a UI can build "currently uploading"/"uploaded" lists
 // without polling.
+//
+// DestID/DestName name the upload Location this update is about: with more
+// than one upload destination configured, the same recorder+file is
+// uploaded once per destination, so (RecorderID, RelPath) alone does not
+// identify an upload - a listener keying on it would collapse the two into
+// one entry and let the first UploadDone clear the other's.
 type UploadUpdate struct {
 	RecorderID string
 	RelPath    string
+	DestID     string
+	DestName   string
 	Event      syncengine.UploadEvent
 	BytesDone  int64
 	BytesTotal int64
@@ -140,8 +160,19 @@ type UploadUpdate struct {
 // for reuse, not a synced destination, and it only happens after a
 // verified copy — see CLAUDE.md for the scoping of the project's
 // never-delete rule to the rclone/cloud destination.
+//
+// ctx and uploadCtx are deliberately separate. ctx governs the local
+// copy/verify/delete pass and is what OffloadJob.Cancel cancels — i.e. what
+// the caller cancels when this recorder is unplugged mid-transfer, since
+// nothing further can be read from a device that's gone. uploadCtx governs
+// the cloud uploads of files that already landed and verified locally;
+// those have no further need of the recorder, so cancelling the offload
+// must not abandon them. Passing the same context for both restores the
+// old behavior: unplugging a recorder silently drops every upload it had
+// already queued.
 func StartOffload(
 	ctx context.Context,
+	uploadCtx context.Context,
 	driver Driver,
 	v Volume,
 	recorderID string,
@@ -223,14 +254,6 @@ func StartOffload(
 			}
 			setFile(sf.DestRelPath, FileOffloadProgress{BytesTotal: size})
 		}
-
-		// uploadSem bounds how many cloud uploads run at once across this
-		// whole offload run. Files land locally in bursts (e.g. ~100 in 15
-		// minutes during an active recorder sync), and firing an unbounded
-		// goroutine per file at the remote (SharePoint/OneDrive) causes
-		// throttling/errors under load; this caps it the same way a normal
-		// rclone copy batch would be bounded.
-		uploadSem := make(chan struct{}, maxConcurrentUploads)
 
 		// emit publishes a progress snapshot. includeFiles controls whether
 		// the (cloned) per-file map is attached. Every call site below is a
@@ -381,21 +404,33 @@ func StartOffload(
 				relParts := append([]string{experimentName}, subpathParts...)
 				relParts = append(relParts, recorderID, sf.DestRelPath)
 				rel := filepath.Join(relParts...)
-				if onUpload != nil {
-					onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: syncengine.UploadQueued, BytesTotal: fileTotal})
+				report := func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
+					if onUpload == nil {
+						return
+					}
+					onUpload(UploadUpdate{
+						RecorderID: recorderID, RelPath: rel,
+						DestID: dest.ID, DestName: dest.Name,
+						Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr,
+					})
 				}
+				report(syncengine.UploadQueued, 0, fileTotal, nil)
 				go func(localPath, rel string) {
 					select {
 					case uploadSem <- struct{}{}:
-					case <-ctx.Done():
+					case <-uploadCtx.Done():
+						// Every queued file must end on a terminal event:
+						// a listener adds its entry at UploadQueued, so
+						// returning silently here would leave it stuck in
+						// the "uploading" list forever - and any caller
+						// deriving "is anything still transferring" from
+						// that list (see internal/ui's upload panel) would
+						// never see the session go idle again.
+						report(syncengine.UploadFailed, 0, fileTotal, uploadCtx.Err())
 						return
 					}
 					defer func() { <-uploadSem }()
-					uploadWithRetry(ctx, localPath, dest, rel, func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
-						if onUpload != nil {
-							onUpload(UploadUpdate{RecorderID: recorderID, RelPath: rel, Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr})
-						}
-					})
+					uploadWithRetry(uploadCtx, localPath, dest, rel, report)
 				}(localPath, rel)
 			}
 		}
@@ -458,10 +493,25 @@ func StartOffload(
 // "currently uploading" entry per retry, and UploadFailed is only forwarded
 // on the final attempt so a retried-then-succeeded upload doesn't flash an
 // error.
+//
+// Exactly one terminal event (UploadDone or UploadFailed) always reaches
+// onEvent before this returns. That matters on the cancellation path: a
+// failed non-final attempt has its UploadFailed suppressed on the
+// assumption another attempt follows, so when ctx is canceled during the
+// backoff - and no attempt ever follows - this reports that suppressed
+// failure itself rather than returning silently and leaving the caller's
+// "uploading" entry stuck forever.
 func uploadWithRetry(ctx context.Context, localPath string, dst syncengine.Location, relPath string, onEvent syncengine.UploadProgressFunc) {
+	// lastTotal remembers the file size seen by the attempt that just ran,
+	// so a failure reported here (rather than by StartFileUpload) still
+	// carries the same BytesTotal the caller's entry was created with.
+	var lastTotal int64
 	for attempt := 1; attempt <= maxUploadAttempts; attempt++ {
 		final := attempt == maxUploadAttempts
 		wrapped := func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
+			if bytesTotal > 0 {
+				lastTotal = bytesTotal
+			}
 			if onEvent == nil {
 				return
 			}
@@ -480,6 +530,9 @@ func uploadWithRetry(ctx context.Context, localPath string, dst syncengine.Locat
 		select {
 		case <-time.After(time.Duration(attempt) * 2 * time.Second):
 		case <-ctx.Done():
+			if onEvent != nil {
+				onEvent(syncengine.UploadFailed, 0, lastTotal, err)
+			}
 			return
 		}
 	}
@@ -496,14 +549,28 @@ func uploadWithRetry(ctx context.Context, localPath string, dst syncengine.Locat
 // landed locally, so correcting it locally afterward doesn't by itself push
 // the corrected copy anywhere - this does that push explicitly.
 func UploadCorrectedFile(ctx context.Context, recorderID, relPath, localPath string, dst syncengine.Location, onUpload func(UploadUpdate)) {
-	if onUpload != nil {
-		onUpload(UploadUpdate{RecorderID: recorderID, RelPath: relPath, Event: syncengine.UploadQueued})
-	}
-	uploadWithRetry(ctx, localPath, dst, relPath, func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
-		if onUpload != nil {
-			onUpload(UploadUpdate{RecorderID: recorderID, RelPath: relPath, Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr})
+	report := func(ev syncengine.UploadEvent, bytesDone, bytesTotal int64, uerr error) {
+		if onUpload == nil {
+			return
 		}
-	})
+		onUpload(UploadUpdate{
+			RecorderID: recorderID, RelPath: relPath,
+			DestID: dst.ID, DestName: dst.Name,
+			Event: ev, BytesDone: bytesDone, BytesTotal: bytesTotal, Err: uerr,
+		})
+	}
+	report(syncengine.UploadQueued, 0, 0, nil)
+	// Same process-wide cap as StartOffload's own per-file uploads: a
+	// correction can re-upload every file of every recorder in the session
+	// at once, which is exactly the burst uploadSem exists to flatten.
+	select {
+	case uploadSem <- struct{}{}:
+	case <-ctx.Done():
+		report(syncengine.UploadFailed, 0, 0, ctx.Err())
+		return
+	}
+	defer func() { <-uploadSem }()
+	uploadWithRetry(ctx, localPath, dst, relPath, report)
 }
 
 func cloneFileProgress(m map[string]FileOffloadProgress) map[string]FileOffloadProgress {

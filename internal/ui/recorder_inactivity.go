@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -30,16 +31,18 @@ func recorderInactivityTimeout(s *state) time.Duration {
 // showInactivitySyncPrompt is shown when no new recorder has attached within
 // recorderInactivityTimeout during an active sync session. "Continue Sync"
 // dismisses the prompt and resets the timer; "End Sync" mirrors the screen's
-// own End Sync button.
-func showInactivitySyncPrompt(s *state, onContinue func(), onEnd func()) {
+// own End Sync button. Either way the prompt is unregistered from w first
+// (see closePrompt), which is also what re-arms the countdown - so exactly
+// one prompt is ever open, rather than a fresh one stacking on top of the
+// unanswered one every timeout period.
+func showInactivitySyncPrompt(s *state, w *recorderInactivityWatcher, onEnd func()) {
 	var d dialog.Dialog
 	endBtn := widget.NewButton("End Sync", func() {
-		d.Hide()
+		w.closePrompt()
 		onEnd()
 	})
 	continueBtn := widget.NewButton("Continue Sync", func() {
-		d.Hide()
-		onContinue()
+		w.closePrompt()
 	})
 	continueBtn.Importance = widget.HighImportance
 	d = dialog.NewCustomWithoutButtons("Sync paused due to inactivity",
@@ -48,6 +51,7 @@ func showInactivitySyncPrompt(s *state, onContinue func(), onEnd func()) {
 				recorderInactivityTimeout(s))),
 			actionRow(endBtn, continueBtn),
 		), s.win)
+	w.setPrompt(func() { d.Hide() })
 	d.Show()
 }
 
@@ -58,6 +62,22 @@ func showInactivitySyncPrompt(s *state, onContinue func(), onEnd func()) {
 // independent of the row-management code in screen_recorder_sync.go.
 type recorderInactivityWatcher struct {
 	resetInactivity chan struct{}
+
+	// promptOpen is set from the moment run decides to fire the prompt
+	// until it's answered or dismissed, and suppresses the countdown for
+	// that whole time. Without it the poll below re-arms the timer the
+	// instant the prompt is handed to the UI thread (idle is, by
+	// definition, still true), so an unanswered prompt gets a second one
+	// stacked on top of it every timeout period - a wall of dialogs over
+	// the sync screen after a long break, hiding the recorders that were
+	// in fact still being detected behind them. It's set before the prompt
+	// reaches the UI thread rather than by the prompt itself, so a busy UI
+	// thread can't let a poll slip in between.
+	promptOpen atomic.Bool
+
+	mu sync.Mutex
+	// hidePrompt hides the open prompt's dialog; nil when none is open.
+	hidePrompt func()
 }
 
 func newRecorderInactivityWatcher() *recorderInactivityWatcher {
@@ -72,6 +92,34 @@ func (w *recorderInactivityWatcher) signalActivity() {
 	case w.resetInactivity <- struct{}{}:
 	default:
 	}
+}
+
+// setPrompt records how to hide the prompt now being shown, so activity
+// elsewhere can dismiss it (see closePrompt). Called from the UI thread by
+// showInactivitySyncPrompt.
+func (w *recorderInactivityWatcher) setPrompt(hide func()) {
+	w.mu.Lock()
+	w.hidePrompt = hide
+	w.mu.Unlock()
+}
+
+// closePrompt hides the inactivity prompt if one is open, then re-arms the
+// countdown. It's what the prompt's own buttons call, and also what the
+// attach/detach handlers call: a recorder being plugged in is the exact
+// thing the prompt was waiting for, so leaving it up (over the row that
+// recorder just started syncing on) makes the app look like it stopped
+// detecting recorders. Safe to call from any goroutine and when no prompt
+// is open; the hide hops onto the Fyne thread itself.
+func (w *recorderInactivityWatcher) closePrompt() {
+	w.mu.Lock()
+	hide := w.hidePrompt
+	w.hidePrompt = nil
+	w.mu.Unlock()
+	w.promptOpen.Store(false)
+	if hide != nil {
+		fyne.Do(hide)
+	}
+	w.signalActivity()
 }
 
 // run is the inactivity-timer goroutine: it polls idle far more often than
@@ -104,13 +152,18 @@ func (w *recorderInactivityWatcher) run(watchCtx context.Context, s *state, idle
 		select {
 		case <-watchCtx.Done():
 			stopTimer()
+			// The screen is being left: an inactivity prompt still up
+			// belongs to it, so take it down with it rather than leaving
+			// it floating over whatever screen comes next.
+			w.closePrompt()
 			return
 		case <-w.resetInactivity:
 			// A recorder was attached or removed, or the user chose to
 			// keep waiting: restart the countdown only if it's actually
-			// applicable (nothing left actively syncing); otherwise make
-			// sure it stays off until things go idle again.
-			if idle.Load() {
+			// applicable (nothing left actively syncing, and no prompt
+			// still waiting on the user); otherwise make sure it stays off
+			// until things go idle again.
+			if idle.Load() && !w.promptOpen.Load() {
 				restartTimer()
 				running = true
 			} else {
@@ -118,7 +171,7 @@ func (w *recorderInactivityWatcher) run(watchCtx context.Context, s *state, idle
 				running = false
 			}
 		case <-poll.C:
-			i := idle.Load()
+			i := idle.Load() && !w.promptOpen.Load()
 			if i && !running {
 				restartTimer()
 				running = true
@@ -129,6 +182,7 @@ func (w *recorderInactivityWatcher) run(watchCtx context.Context, s *state, idle
 		case <-timerC:
 			stopTimer()
 			running = false
+			w.promptOpen.Store(true)
 			fyne.Do(onTimeout)
 		}
 	}

@@ -43,8 +43,25 @@ type recorderSyncScreen struct {
 	params    recorderSyncParams
 	destRoots []string
 
+	// watchCtx governs everything tied to the screen itself: the volume
+	// watcher, the blink ticker, the inactivity timer, and each recorder's
+	// local copy/verify pass. cancelWatch is called on every path off this
+	// screen, including the ones that continue to another screen (the
+	// timestamp review, Batch Upload).
 	watchCtx    context.Context
 	cancelWatch context.CancelFunc
+
+	// uploadCtx governs cloud uploads only, and deliberately outlives
+	// watchCtx: an upload is of a file that already landed and verified
+	// locally, so it has no further need of the recorder or of this
+	// screen. Cancelling it drops data that would otherwise reach the
+	// cloud, so only endSync does that - after doConfirmEndSync's warning,
+	// which counts in-flight uploads explicitly. Without the split,
+	// unplugging a finished-looking recorder (onVolumeDetached cancels its
+	// job) or moving on to the timestamp review (checkTimestampsThen
+	// cancels watchCtx) silently abandoned every upload still queued.
+	uploadCtx    context.Context
+	cancelUpload context.CancelFunc
 
 	rows      []*recorderRow
 	renderers []*rowRenderer
@@ -104,6 +121,7 @@ type recorderSyncScreen struct {
 // watch).
 func showRecorderSync(s *state, params recorderSyncParams) {
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	uploadCtx, cancelUpload := context.WithCancel(context.Background())
 
 	destRoots := make([]string, len(params.destinations))
 	for i, d := range params.destinations {
@@ -116,6 +134,8 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 		destRoots:        destRoots,
 		watchCtx:         watchCtx,
 		cancelWatch:      cancelWatch,
+		uploadCtx:        uploadCtx,
+		cancelUpload:     cancelUpload,
 		blinkOn:          true,
 		rowsBox:          container.NewVBox(),
 		uploads:          newRecorderUploadPanel(s.win),
@@ -127,7 +147,7 @@ func showRecorderSync(s *state, params recorderSyncParams) {
 
 	go sc.runBlinkTicker()
 	go sc.inactivity.run(sc.watchCtx, s, &sc.recordersIdle, func() {
-		showInactivitySyncPrompt(s, sc.inactivity.signalActivity, sc.confirmEndSync)
+		showInactivitySyncPrompt(s, sc.inactivity, sc.confirmEndSync)
 	})
 	go sc.watchVolumes()
 
@@ -532,7 +552,7 @@ func (sc *recorderSyncScreen) beginOffload(row *recorderRow) {
 		}
 		row.destDirs = recorder.DestDirs(sc.destRoots, sc.params.subpath, sc.params.experimentName, row.id)
 	}
-	job, progress := recorder.StartOffload(sc.watchCtx, row.driver, row.volume, row.id, sc.destRoots, sc.params.subpath,
+	job, progress := recorder.StartOffload(sc.watchCtx, sc.uploadCtx, row.driver, row.volume, row.id, sc.destRoots, sc.params.subpath,
 		sc.params.experimentName, sc.params.uploads, sc.params.autoDelete, sc.params.batchUpload, sc.uploads.onUploadEvent)
 	row.job = job
 	sc.rebuildRows()
@@ -790,7 +810,12 @@ func runWithTimeout(timeout time.Duration, fn func()) (finished bool) {
 // conflict named - rather than silently dropped or silently resolved by
 // picking one driver.
 func (sc *recorderSyncScreen) onVolumeAttached(vol recorder.Volume) {
-	sc.inactivity.signalActivity()
+	// closePrompt, not just signalActivity: a recorder was plugged in,
+	// which is exactly what an open "Sync paused due to inactivity" prompt
+	// is waiting for - leaving it up over the row this is about to start
+	// syncing is what makes the app look like it stopped detecting
+	// recorders. It re-arms the countdown too.
+	sc.inactivity.closePrompt()
 	var driver recorder.Driver
 	var err error
 	if !runWithTimeout(volumeIOTimeout, func() { driver, err = recorder.Detect(vol) }) {
@@ -871,12 +896,17 @@ func (sc *recorderSyncScreen) onVolumeDetached(vol recorder.Volume) {
 			row.volume.MountPoint = ""
 		}
 		sc.rebuildRows()
-		sc.inactivity.signalActivity()
+		sc.inactivity.closePrompt()
 	})
 }
 
+// endSync leaves Screen 2 for the home screen. It's the one path that
+// cancels uploads as well as the screen's own work: it's only ever reached
+// with the user's agreement, and doConfirmEndSync has already warned them
+// (counting the in-flight uploads) whenever anything was still running.
 func (sc *recorderSyncScreen) endSync() {
 	sc.cancelWatch()
+	sc.cancelUpload()
 	showHome(sc.s)
 }
 
@@ -1000,6 +1030,10 @@ func (sc *recorderSyncScreen) doConfirmBatchUpload() {
 	// dialog on top of those later screens, repeatedly, since a canceled
 	// watchCtx is what actually stops recorderInactivityWatcher.run.
 	sc.cancelWatch()
+	// Batch mode never uploads per-file during the offload itself, so
+	// there is nothing in flight to interrupt here; this just releases the
+	// unused upload context on the way out.
+	sc.cancelUpload()
 	locs := append(append([]syncengine.Location{}, sc.params.destinations...), sc.params.uploads...)
 	runBatchUploadScan(sc.s, func() { showSyncExperiments(sc.s) }, locs, sc.params.experimentName, sc.batchUploadPaths)
 }

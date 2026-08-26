@@ -1119,7 +1119,11 @@ func reuploadCorrectedFiles(sc *recorderSyncScreen, row timestampReviewRow, dest
 		relPath := filepath.Join(relParts...)
 		for _, dest := range sc.params.uploads {
 			dest := dest
-			go recorder.UploadCorrectedFile(sc.watchCtx, row.recorderID, relPath, localPath, dest, sc.uploads.onUploadEvent)
+			// sc.uploadCtx, not sc.watchCtx: checkTimestampsThen cancels
+			// watchCtx before this screen is even shown (the screen it
+			// belongs to is gone), so a re-upload started on it would be
+			// dead on arrival - every corrected file failing instantly.
+			go recorder.UploadCorrectedFile(sc.uploadCtx, row.recorderID, relPath, localPath, dest, sc.uploads.onUploadEvent)
 		}
 	}
 }
