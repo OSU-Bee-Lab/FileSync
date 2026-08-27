@@ -214,12 +214,64 @@ func (ps *progressScreen) runSync() {
 	ctx, cancel := context.WithCancel(context.Background())
 	ps.activeCancel = cancel
 
+	// done[i] is closed when task i has finished (however it ended), with
+	// succeeded[i] written first — a task waiting on i reads it only after
+	// that close, so the channel carries the happens-before. This is what
+	// enforces scanTask.After: a chained copy can't start until the copy
+	// feeding its source has landed. Every task closes its channel on every
+	// path, including the early bail-outs, so a waiter can never hang.
+	done := make([]chan struct{}, len(ps.tasks))
+	succeeded := make([]bool, len(ps.tasks))
+	for i := range done {
+		done[i] = make(chan struct{})
+	}
+
 	go func() {
 		var wg sync.WaitGroup
 		sem := make(chan struct{}, maxConcurrentTasks)
 
 		runOne := func(i int, j scanJob) {
-			defer wg.Done()
+			ok := false
+			defer func() {
+				succeeded[i] = ok
+				close(done[i])
+				wg.Done()
+			}()
+
+			// Wait for dependencies before taking a semaphore slot, never
+			// while holding one — a slot held for the whole wait would let
+			// maxConcurrentTasks waiting tasks starve out the very tasks
+			// they're waiting for.
+			blockedBy := -1
+			for _, dep := range ps.tasks[i].After {
+				<-done[dep]
+				if !succeeded[dep] {
+					blockedBy = dep
+					break
+				}
+			}
+			if blockedBy >= 0 {
+				depLabel := ps.tasks[blockedBy].Label
+				srcName := "its source"
+				if len(j.Locs) > 0 {
+					srcName = j.Locs[0].Name
+				}
+				cancelled := ctx.Err() != nil
+				fyne.Do(func() {
+					if cancelled {
+						ps.expStates[i].status = statusCanceled
+					} else {
+						ps.expStates[i].status = statusError
+						ps.expStates[i].hasError = true
+						ps.expStates[i].err = fmt.Errorf("skipped: %s did not finish, so %s does not have these files to copy on",
+							depLabel, srcName)
+					}
+					ps.refreshUI()
+				})
+				return
+			}
+
+			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			if ctx.Err() != nil {
@@ -258,6 +310,11 @@ func (ps *progressScreen) runSync() {
 					ps.refreshUI()
 				})
 			}
+
+			// Recorded outside the fyne.Do below because that runs later, on
+			// the UI goroutine, while anything waiting on this task (see
+			// scanTask.After) reads succeeded[i] the moment done[i] closes.
+			ok = final.Status != syncengine.JobError && final.Status != syncengine.JobCanceled
 
 			fyne.Do(func() {
 				// This task is no longer moving bytes, so it must stop
@@ -301,9 +358,12 @@ func (ps *progressScreen) runSync() {
 			})
 		}
 
+		// Every task gets a goroutine up front — the semaphore, taken inside
+		// runOne, is what actually bounds concurrency. Launching them all
+		// keeps a task that's only waiting on a dependency from occupying a
+		// slot it isn't using.
 		for i, j := range jobs {
 			wg.Add(1)
-			sem <- struct{}{}
 			go runOne(i, j)
 		}
 		wg.Wait()

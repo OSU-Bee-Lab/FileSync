@@ -446,9 +446,9 @@ func oneWayScanLabel(dsts []syncengine.Location, relPath string) string {
 // strict one-way push: a path present only at a destination (never at the
 // source) is dropped entirely, so it's never propagated between destinations,
 // surfaced as a conflict, or touched by a resolution. runOneWayTransfers then
-// keeps only source→destination legs, so even a conflict resolved "keep a
-// destination's version" simply skips the file rather than writing back to the
-// source or fanning out between destinations.
+// keeps only legs whose bytes originate at the source, so even a conflict
+// resolved "keep a destination's version" simply skips the file rather than
+// writing back to the source or fanning out between destinations.
 //
 // mode mirrors All-Way exactly: NWayFullScan reads bytes and gates the sync
 // behind per-file conflict resolution; NWayQuickScan checks presence only,
@@ -538,15 +538,22 @@ func runOneWayScan(s *state, src syncengine.Location, dsts []syncengine.Location
 }
 
 // runOneWayTransfers builds the minimal transfer plan the same way
-// runNWayTransfers does, but keeps only source→destination legs (one task per
-// destination that has files to receive). result is re-filtered to
+// runNWayTransfers does, but keeps only the legs that carry the source's own
+// bytes outward: a direct source→destination leg, plus the chained second
+// leg of a download the source fed (see below). result is re-filtered to
 // source-present files first — the re-scan applyNWayResolutions runs after a
 // rename/delete is unfiltered, so this guards against a destination-only file
 // slipping into the plan there. Every remaining file has the source, so
-// forcing the source as the copy source guarantees no destination→source or
-// destination→destination leg is ever built; a conflict resolved "keep a
-// destination's version" leaves that file with a destination source, which the
-// forward-leg filter then drops (the file is skipped, never written back).
+// forcing the source as the copy source guarantees no destination→source leg
+// is ever built; a conflict resolved "keep a destination's version" leaves
+// that file with a destination source, which the filter below then drops (the
+// file is skipped, never written back).
+//
+// The one destination→destination leg this does build is a chained fan-out:
+// pulling from a remote source into several local destinations downloads the
+// files once and copies them on locally rather than downloading them per
+// destination. That leg still only ever carries the source's own content —
+// see the filter's comment for how that's enforced.
 func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Location, relPath string, result syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
 	result = syncengine.FilterNWayToSourcePresent(result, src.ID)
 	forceSrc := func(bestSoFar, candidate syncengine.Location) bool {
@@ -557,17 +564,43 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 		dstIDs[d.ID] = true
 	}
 
-	pairs := syncengine.BuildNWayTransferPlan(result, forceSrc)
+	pairs := syncengine.BuildNWayChainedTransferPlan(result, forceSrc)
+
+	keep := keepOneWayLegs(pairs, src.ID, dstIDs)
+
+	// Kept pairs become tasks in order, so a pair's DependsOn index maps
+	// onto the task list through this table.
+	taskIdx := make([]int, len(pairs))
+	next := 0
+	for i := range pairs {
+		taskIdx[i] = -1
+		if keep[i] {
+			taskIdx[i] = next
+			next++
+		}
+	}
+
 	var tasks []scanTask
-	for _, pair := range pairs {
-		if pair.Source.ID != src.ID || !dstIDs[pair.Dest.ID] {
+	for i, pair := range pairs {
+		if !keep[i] {
 			continue
 		}
 		transferResult := syncengine.ScanResultFromNWayTransfers(result, pair)
 		dest := pair.Dest
+		label := oneWayScanLabel([]syncengine.Location{dest}, relPath)
+		after := make([]int, len(pair.DependsOn))
+		for k, d := range pair.DependsOn {
+			after[k] = taskIdx[d]
+		}
+		if pair.Via.ID != "" {
+			// Name the hop so the leg reads as "Drive 1 → Drive 2 at /..." —
+			// the files came off the source once and are moving on locally.
+			label = fmt.Sprintf("%s %s", pair.Source.Name, label)
+		}
 		tasks = append(tasks, scanTask{
-			Label: oneWayScanLabel([]syncengine.Location{dest}, relPath),
+			Label: label,
 			Locs:  []syncengine.Location{pair.Source, pair.Dest},
+			After: after,
 			Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
 				return transferResult, nil
 			},
@@ -579,6 +612,57 @@ func runOneWayTransfers(s *state, src syncengine.Location, dsts []syncengine.Loc
 	runSyncTransferTasks(s, tasks, mode, autoSync,
 		fmt.Sprintf("Every file in the source folder already exists at the selected %s.",
 			pluralWord(len(dsts), "location", "")))
+}
+
+// keepOneWayLegs marks which of a One-Way plan's legs actually carry the
+// source's own bytes outward to a chosen destination — the rest are dropped,
+// which is what keeps One-Way one-way (see runOneWayTransfers).
+//
+// A direct leg qualifies only if it starts at the source and ends at a chosen
+// destination. A chained leg (see syncengine.BuildNWayChainedTransferPlan)
+// runs destination → destination, so it qualifies only as the tail of a
+// source-rooted download: its Via must be the source, and the leg feeding it
+// must itself have been kept. Every other destination → destination leg is
+// dropped, so a conflict resolved "keep a destination's version" still never
+// propagates sideways or writes back to the source.
+//
+// One pass over the chained legs is enough because the dependency graph is
+// only ever two deep — a chained leg always depends on a direct one, never on
+// another chained leg.
+func keepOneWayLegs(pairs []syncengine.NWayTransferPair, srcID string, dstIDs map[string]bool) []bool {
+	keep := make([]bool, len(pairs))
+	for i, p := range pairs {
+		keep[i] = p.Via.ID == "" && p.Source.ID == srcID && dstIDs[p.Dest.ID]
+	}
+	for i, p := range pairs {
+		if keep[i] || p.Via.ID != srcID || len(p.DependsOn) == 0 {
+			continue
+		}
+		if !dstIDs[p.Source.ID] || !dstIDs[p.Dest.ID] {
+			continue
+		}
+		rooted := true
+		for _, d := range p.DependsOn {
+			if !keep[d] {
+				rooted = false
+				break
+			}
+		}
+		keep[i] = rooted
+	}
+	return keep
+}
+
+// transferLegLabel names one transfer pair's direction. A chained leg (see
+// syncengine.BuildNWayChainedTransferPlan) is spelled out in full —
+// "SharePoint → Drive 1 → Drive 2" — so it's clear at a glance that the
+// files came down from the remote once and are being copied on locally,
+// rather than downloaded a second time.
+func transferLegLabel(pair syncengine.NWayTransferPair) string {
+	if pair.Via.ID != "" {
+		return fmt.Sprintf("%s → %s → %s", pair.Via.Name, pair.Source.Name, pair.Dest.Name)
+	}
+	return fmt.Sprintf("%s → %s", pair.Source.Name, pair.Dest.Name)
 }
 
 // nwayUnit is one convergence job: one experiment across the selected
@@ -773,16 +857,30 @@ func runSyncTransferTasks(s *state, tasks []scanTask, mode syncengine.NWayScanMo
 // column shows exactly which files move which way — and, for a mixed
 // Audio+Results run, which role's tree they belong to. autoSync is threaded
 // through to runSyncTransferTasks (see there).
+//
+// The plan is chained (BuildNWayChainedTransferPlan): a file that only exists
+// on a remote and is missing from several local locations is downloaded once,
+// into the highest-priority local location missing it, and copied on from
+// there — so a slow link carries it once, not once per drive. Those second
+// legs carry a task dependency (scanTask.After) on the download.
 func runNWayTransfers(s *state, units []nwayUnit, results []syncengine.NWayScanResult, mode syncengine.NWayScanMode, autoSync bool) {
 	var tasks []scanTask
 	for i, unit := range units {
-		pairs := syncengine.BuildNWayTransferPlan(results[i], syncengine.PreferLocalSource)
+		pairs := syncengine.BuildNWayChainedTransferPlan(results[i], syncengine.PreferLocalSource)
+		// Every pair becomes exactly one task, in order, so a pair's
+		// DependsOn index maps onto the task list by this unit's offset.
+		base := len(tasks)
 		for _, pair := range pairs {
 			result := syncengine.ScanResultFromNWayTransfers(results[i], pair)
 			expName := unit.expName
+			after := make([]int, len(pair.DependsOn))
+			for k, d := range pair.DependsOn {
+				after[k] = base + d
+			}
 			tasks = append(tasks, scanTask{
-				Label: fmt.Sprintf("%s: %s → %s", unit.label, pair.Source.Name, pair.Dest.Name),
+				Label: fmt.Sprintf("%s: %s", unit.label, transferLegLabel(pair)),
 				Locs:  []syncengine.Location{pair.Source, pair.Dest},
+				After: after,
 				Scan: func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error) {
 					return result, nil
 				},

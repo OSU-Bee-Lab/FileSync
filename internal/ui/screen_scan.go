@@ -21,6 +21,16 @@ type scanJob struct {
 type scanTask struct {
 	Label string
 	Locs  []syncengine.Location
+	// After holds indices, into the same []scanTask, of tasks whose copy
+	// must finish successfully before this task's Start may run — this
+	// task's source only holds the files once they have. It's what lets a
+	// chained N-way fan-out (see syncengine.BuildNWayChainedTransferPlan)
+	// download a file from a remote once and copy it on from the local
+	// location it landed in, instead of downloading it once per local
+	// destination. Indices may point forward as well as backward; the graph
+	// must be acyclic. Honoured by runSync only: Scan never needs it, since
+	// every scan just reads whatever is there at the time.
+	After []int
 	Scan  func(ctx context.Context, progress syncengine.ScanProgressFunc) (syncengine.ScanResult, error)
 	Start func(ctx context.Context, result syncengine.ScanResult) (*syncengine.Job, <-chan syncengine.ProgressSnapshot)
 }

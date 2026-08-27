@@ -713,3 +713,236 @@ func TestScanNWayWithProgress_EmptyDirectoryStillAppears(t *testing.T) {
 		t.Errorf("final Dirs missing the empty r/empty directory (dirs: %v)", final.Dirs)
 	}
 }
+
+// TestBuildNWayChainedTransferPlan_DownloadsOnce is the case this chaining
+// exists for: two local drives missing a file that only the remote has. A
+// plain fan-out pulls it down the wire twice; the chained plan pulls it once
+// into the first drive and copies it on from there.
+func TestBuildNWayChainedTransferPlan_DownloadsOnce(t *testing.T) {
+	d1 := Location{ID: "d1", Name: "Drive 1", Kind: LocationLocal}
+	d2 := Location{ID: "d2", Name: "Drive 2", Kind: LocationLocal}
+	remote := Location{ID: "sp", Name: "SharePoint", Kind: LocationRemote}
+
+	result := NWayScanResult{
+		Locations: []Location{d1, d2, remote},
+		Files: []FileConvergencePlan{{
+			RelPath: "r/f.mp3",
+			Status:  FileMissingSome,
+			States: []FileLocationState{
+				{Location: d1, Exists: false},
+				{Location: d2, Exists: false},
+				{Location: remote, Exists: true, Size: 100},
+			},
+		}},
+	}
+
+	pairs := BuildNWayChainedTransferPlan(result, PreferLocalSource)
+	if len(pairs) != 2 {
+		t.Fatalf("got %d pairs, want 2 (one download, one local hand-off): %+v", len(pairs), pairs)
+	}
+
+	downloads := 0
+	for _, p := range pairs {
+		if p.Source.Kind == LocationRemote {
+			downloads++
+		}
+	}
+	if downloads != 1 {
+		t.Errorf("got %d legs reading from the remote, want 1 — the file must only come down the wire once", downloads)
+	}
+
+	var hub, chained *NWayTransferPair
+	for i := range pairs {
+		if pairs[i].Via.ID == "" {
+			hub = &pairs[i]
+		} else {
+			chained = &pairs[i]
+		}
+	}
+	if hub == nil || chained == nil {
+		t.Fatalf("want one direct leg and one chained leg, got %+v", pairs)
+	}
+	if hub.Source.ID != "sp" || hub.Dest.ID != "d1" {
+		t.Errorf("download leg = %s → %s, want sp → d1 (the first local location missing it)", hub.Source.ID, hub.Dest.ID)
+	}
+	if chained.Source.ID != "d1" || chained.Dest.ID != "d2" || chained.Via.ID != "sp" {
+		t.Errorf("chained leg = %s → %s (via %s), want d1 → d2 (via sp)", chained.Source.ID, chained.Dest.ID, chained.Via.ID)
+	}
+	if len(chained.Files) != 1 || chained.Files[0].Size != 100 {
+		t.Errorf("chained leg files = %+v, want the one file at its source size", chained.Files)
+	}
+
+	hubIdx := 0
+	if &pairs[1] == hub {
+		hubIdx = 1
+	}
+	if len(chained.DependsOn) != 1 || chained.DependsOn[0] != hubIdx {
+		t.Errorf("chained leg DependsOn = %v, want [%d] (the download must land first)", chained.DependsOn, hubIdx)
+	}
+	if len(hub.DependsOn) != 0 {
+		t.Errorf("download leg DependsOn = %v, want none", hub.DependsOn)
+	}
+}
+
+// A remote destination is never fed through a local hop: rclone may be able
+// to copy remote → remote server-side, and rerouting it would turn that into
+// a download plus a full upload.
+func TestBuildNWayChainedTransferPlan_RemoteDestNotChained(t *testing.T) {
+	d1 := Location{ID: "d1", Name: "Drive 1", Kind: LocationLocal}
+	r1 := Location{ID: "r1", Name: "Remote 1", Kind: LocationRemote}
+	r2 := Location{ID: "r2", Name: "Remote 2", Kind: LocationRemote}
+
+	result := NWayScanResult{
+		Locations: []Location{d1, r2, r1},
+		Files: []FileConvergencePlan{{
+			RelPath: "r/f.mp3",
+			Status:  FileMissingSome,
+			States: []FileLocationState{
+				{Location: d1, Exists: false},
+				{Location: r2, Exists: false},
+				{Location: r1, Exists: true, Size: 100},
+			},
+		}},
+	}
+
+	for _, p := range BuildNWayChainedTransferPlan(result, PreferLocalSource) {
+		if p.Dest.ID == "r2" && p.Source.ID != "r1" {
+			t.Errorf("remote destination r2 fed from %s, want r1 (no local hop)", p.Source.ID)
+		}
+	}
+}
+
+// Chaining only applies when the bytes would otherwise cross the network
+// repeatedly. A local source is read straight by every destination.
+func TestBuildNWayChainedTransferPlan_LocalSourceUnchanged(t *testing.T) {
+	src := Location{ID: "src", Name: "src", Kind: LocationLocal}
+	d1 := Location{ID: "d1", Name: "d1", Kind: LocationLocal}
+	d2 := Location{ID: "d2", Name: "d2", Kind: LocationLocal}
+
+	result := NWayScanResult{
+		Locations: []Location{src, d1, d2},
+		Files: []FileConvergencePlan{{
+			RelPath: "r/f.mp3",
+			Status:  FileMissingSome,
+			States: []FileLocationState{
+				{Location: src, Exists: true, Size: 100},
+				{Location: d1, Exists: false},
+				{Location: d2, Exists: false},
+			},
+		}},
+	}
+
+	pairs := BuildNWayChainedTransferPlan(result, PreferLocalSource)
+	if len(pairs) != 2 {
+		t.Fatalf("got %d pairs, want 2", len(pairs))
+	}
+	for _, p := range pairs {
+		if p.Source.ID != "src" || p.Via.ID != "" || len(p.DependsOn) != 0 {
+			t.Errorf("pair %s → %s (via %q, deps %v) — a local source needs no chaining", p.Source.ID, p.Dest.ID, p.Via.ID, p.DependsOn)
+		}
+	}
+}
+
+// A chained leg never merges with an ordinary leg between the same two
+// locations: the files d1 already holds must not wait behind a download.
+func TestBuildNWayChainedTransferPlan_ChainedLegKeptSeparate(t *testing.T) {
+	d1 := Location{ID: "d1", Name: "d1", Kind: LocationLocal}
+	d2 := Location{ID: "d2", Name: "d2", Kind: LocationLocal}
+	remote := Location{ID: "sp", Name: "sp", Kind: LocationRemote}
+
+	states := func(onD1, onD2, onRemote bool) []FileLocationState {
+		return []FileLocationState{
+			{Location: d1, Exists: onD1, Size: 100},
+			{Location: d2, Exists: onD2, Size: 100},
+			{Location: remote, Exists: onRemote, Size: 100},
+		}
+	}
+	result := NWayScanResult{
+		Locations: []Location{d1, d2, remote},
+		Files: []FileConvergencePlan{
+			{RelPath: "already.mp3", Status: FileMissingSome, States: states(true, false, false)},
+			{RelPath: "remote_only.mp3", Status: FileMissingSome, States: states(false, false, true)},
+		},
+	}
+
+	var direct, chained *NWayTransferPair
+	pairs := BuildNWayChainedTransferPlan(result, PreferLocalSource)
+	for i := range pairs {
+		if pairs[i].Source.ID != "d1" || pairs[i].Dest.ID != "d2" {
+			continue
+		}
+		if pairs[i].Via.ID == "" {
+			direct = &pairs[i]
+		} else {
+			chained = &pairs[i]
+		}
+	}
+	if direct == nil || chained == nil {
+		t.Fatalf("want d1 → d2 split into a direct and a chained leg, got %+v", pairs)
+	}
+	if len(direct.Files) != 1 || direct.Files[0].RelPath != "already.mp3" {
+		t.Errorf("direct leg = %+v, want only already.mp3", direct.Files)
+	}
+	if len(direct.DependsOn) != 0 {
+		t.Errorf("direct leg DependsOn = %v, want none — d1 already holds that file", direct.DependsOn)
+	}
+	if len(chained.Files) != 1 || chained.Files[0].RelPath != "remote_only.mp3" {
+		t.Errorf("chained leg = %+v, want only remote_only.mp3", chained.Files)
+	}
+}
+
+// Every DependsOn index must be in range and the graph acyclic, whatever mix
+// of files it was built from — the runner deadlocks on a cycle.
+func TestBuildNWayChainedTransferPlan_DependenciesAcyclic(t *testing.T) {
+	d1 := Location{ID: "d1", Name: "d1", Kind: LocationLocal}
+	d2 := Location{ID: "d2", Name: "d2", Kind: LocationLocal}
+	d3 := Location{ID: "d3", Name: "d3", Kind: LocationLocal}
+	remote := Location{ID: "sp", Name: "sp", Kind: LocationRemote}
+	locs := []Location{d1, d2, d3, remote}
+
+	states := func(present ...bool) []FileLocationState {
+		out := make([]FileLocationState, len(locs))
+		for i := range locs {
+			out[i] = FileLocationState{Location: locs[i], Exists: present[i], Size: 100}
+		}
+		return out
+	}
+	result := NWayScanResult{
+		Locations: locs,
+		Files: []FileConvergencePlan{
+			{RelPath: "a.mp3", Status: FileMissingSome, States: states(false, false, false, true)},
+			{RelPath: "b.mp3", Status: FileMissingSome, States: states(false, true, false, true)},
+			{RelPath: "c.mp3", Status: FileMissingSome, States: states(true, false, true, false)},
+			{RelPath: "d.mp3", Status: FileMissingSome, States: states(false, false, true, true)},
+		},
+	}
+
+	pairs := BuildNWayChainedTransferPlan(result, PreferLocalSource)
+	// Depth-first cycle check over DependsOn.
+	const (
+		unvisited = 0
+		active    = 1
+		finished  = 2
+	)
+	mark := make([]int, len(pairs))
+	var visit func(int)
+	visit = func(i int) {
+		if mark[i] == active {
+			t.Fatalf("dependency cycle through pair %d (%s → %s)", i, pairs[i].Source.ID, pairs[i].Dest.ID)
+		}
+		if mark[i] == finished {
+			return
+		}
+		mark[i] = active
+		for _, d := range pairs[i].DependsOn {
+			if d < 0 || d >= len(pairs) {
+				t.Fatalf("pair %d DependsOn out-of-range index %d (%d pairs)", i, d, len(pairs))
+			}
+			visit(d)
+		}
+		mark[i] = finished
+	}
+	for i := range pairs {
+		visit(i)
+	}
+}

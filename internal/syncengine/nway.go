@@ -466,6 +466,20 @@ type NWayTransferPair struct {
 	Source Location
 	Dest   Location
 	Files  []NWayTransfer
+	// Via is set only on the second leg of a chained fan-out (see
+	// BuildNWayChainedTransferPlan): the remote these files actually
+	// originate from, which Source is itself receiving them from. Its ID is
+	// empty on every ordinary pair. Display only — the copy still runs
+	// Source → Dest.
+	Via Location
+	// DependsOn holds indices, into the same slice this pair came back in,
+	// of pairs that must finish before this one may start: a chained leg's
+	// Source doesn't hold the files yet, it's being sent them by the pair(s)
+	// listed here. Empty on every ordinary pair. Indices may point forward
+	// as well as backward — a chained leg reuses an existing (source, dest)
+	// grouping only when it carries the same Via, so callers must resolve
+	// these against the whole slice rather than assuming a running order.
+	DependsOn []int
 }
 
 // BuildNWayTransferPlan turns a scanned NWayScanResult into the minimal set
@@ -483,9 +497,68 @@ type NWayTransferPair struct {
 // e.g. pass a preferSource that prefers LocationLocal over LocationRemote
 // to avoid slow upload legs when a local copy is available.
 func BuildNWayTransferPlan(result NWayScanResult, preferSource func(bestSoFar, candidate Location) bool) []NWayTransferPair {
-	type pairKey struct{ src, dst string }
+	return buildNWayTransferPlan(result, preferSource, false)
+}
+
+// BuildNWayChainedTransferPlan is BuildNWayTransferPlan with the download
+// chained instead of repeated: when a file's only copies live on remotes and
+// two or more local locations are missing it, a plain fan-out would pull the
+// same bytes down over the network once per local destination. This instead
+// downloads it once, into the first local location missing it (first in the
+// order passed to ScanNWay, i.e. the user's priority order), and copies it
+// from there to every other local location missing it — disk-to-disk rather
+// than a second download. The resulting second legs carry Via (the remote the
+// bytes came from) and DependsOn (the download that has to land first); the
+// caller must honour DependsOn, since a chained leg's source doesn't hold the
+// files until its dependency has finished.
+//
+// Remote destinations are never chained: rclone can copy remote → remote
+// server-side when both sides are the same backend, and rerouting that
+// through a local disk would turn a free copy into a full download plus
+// upload. Only the destinations that provably benefit — local ones, which
+// have to receive the bytes over the wire either way — are rerouted.
+//
+// Chained legs never merge into an ordinary pair even when the (source,
+// dest) locations match: a chained leg has to wait for its download, and the
+// files a location already holds shouldn't be held up behind that. Keeping
+// them separate also keeps the graph shallow and provably acyclic — an
+// ordinary pair never depends on anything, and a chained leg always depends
+// on a pair whose source is a remote, so there is never a cycle.
+func BuildNWayChainedTransferPlan(result NWayScanResult, preferSource func(bestSoFar, candidate Location) bool) []NWayTransferPair {
+	return buildNWayTransferPlan(result, preferSource, true)
+}
+
+func buildNWayTransferPlan(result NWayScanResult, preferSource func(bestSoFar, candidate Location) bool, chain bool) []NWayTransferPair {
+	// via is the ID of the remote a chained leg's files originate from, and
+	// is empty for an ordinary pair, so the two never share a grouping.
+	type pairKey struct{ src, dst, via string }
 	pairIndex := make(map[pairKey]int)
 	var pairs []NWayTransferPair
+	var deps []map[int]bool
+
+	// addFile appends one file to the (source, dest, via) pair, creating it
+	// on first use, and returns that pair's index. after is the index of a
+	// pair that must finish first, or -1 for none.
+	addFile := func(src, dst, via Location, relPath string, size int64, after int) int {
+		key := pairKey{src.ID, dst.ID, via.ID}
+		idx, ok := pairIndex[key]
+		if !ok {
+			idx = len(pairs)
+			pairIndex[key] = idx
+			pairs = append(pairs, NWayTransferPair{Source: src, Dest: dst, Via: via})
+			deps = append(deps, map[int]bool{})
+		}
+		pairs[idx].Files = append(pairs[idx].Files, NWayTransfer{
+			Source:  src,
+			Dest:    dst,
+			RelPath: relPath,
+			Size:    size,
+		})
+		if after >= 0 {
+			deps[idx][after] = true
+		}
+		return idx
+	}
 
 	for _, plan := range result.Files {
 		if plan.Status != FileMissingSome {
@@ -510,24 +583,44 @@ func BuildNWayTransferPlan(result NWayScanResult, preferSource func(bestSoFar, c
 		}
 		src := plan.States[srcIdx]
 
+		// hub is the local location the single download lands in; every
+		// other local location missing the file is then fed from it. Only
+		// worth doing when the bytes would otherwise come off a remote once
+		// per local destination.
+		hub := -1
+		if chain && src.Location.Kind == LocationRemote {
+			for i, st := range plan.States {
+				if !st.Exists && st.Location.Kind == LocationLocal {
+					hub = i
+					break
+				}
+			}
+		}
+		hubPair := -1
+		if hub >= 0 {
+			hubPair = addFile(src.Location, plan.States[hub].Location, Location{}, plan.RelPath, src.Size, -1)
+		}
+
 		for i, st := range plan.States {
-			if st.Exists {
+			if st.Exists || i == hub {
 				continue
 			}
-			key := pairKey{src.Location.ID, plan.States[i].Location.ID}
-			idx, ok := pairIndex[key]
-			if !ok {
-				idx = len(pairs)
-				pairIndex[key] = idx
-				pairs = append(pairs, NWayTransferPair{Source: src.Location, Dest: plan.States[i].Location})
+			if hub >= 0 && st.Location.Kind == LocationLocal {
+				addFile(plan.States[hub].Location, st.Location, src.Location, plan.RelPath, src.Size, hubPair)
+				continue
 			}
-			pairs[idx].Files = append(pairs[idx].Files, NWayTransfer{
-				Source:  src.Location,
-				Dest:    plan.States[i].Location,
-				RelPath: plan.RelPath,
-				Size:    src.Size,
-			})
+			addFile(src.Location, st.Location, Location{}, plan.RelPath, src.Size, -1)
 		}
+	}
+
+	for i := range pairs {
+		if len(deps[i]) == 0 {
+			continue
+		}
+		for d := range deps[i] {
+			pairs[i].DependsOn = append(pairs[i].DependsOn, d)
+		}
+		sort.Ints(pairs[i].DependsOn)
 	}
 
 	return pairs
