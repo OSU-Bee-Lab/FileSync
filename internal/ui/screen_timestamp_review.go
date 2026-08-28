@@ -193,7 +193,7 @@ func timestampIssueDetail(check recorder.TimestampIssue, tolerance time.Duration
 			check.Recorded.Month() == check.ConsensusMonth &&
 			check.Recorded.Day() == check.ConsensusDay
 		if !sameDate {
-			return fmt.Sprintf("first file dated %s — the other recorders agree on %s", recDate, conDate)
+			return fmt.Sprintf("first file dated %s — the other recorders agree on %s; suggested start is their median date and time, so listen back to check it before applying", recDate, conDate)
 		}
 		if check.MinutesFromMedian >= 0 {
 			dir := "earlier than"

@@ -137,20 +137,40 @@ func TestCheckRecorderTimestamp(t *testing.T) {
 		}
 	})
 
-	t.Run("multiple date fields AND time-of-day off: no confident guess, stays IssueOther", func(t *testing.T) {
+	t.Run("multiple date fields AND time-of-day off: snap both to the session median", func(t *testing.T) {
 		// Month, day, and time-of-day (132 min from the median) are all off
-		// at once - unlike the single-date-field compound case, there's no
-		// one clear pattern to anchor a suggestion on, so this must stay
-		// IssueOther with Suggested left at Recorded, same as any other
-		// unrecognized mismatch.
+		// at once. There's no one clean pattern, but the date is plainly
+		// garbage and the time-of-day misses too, so both snap to the
+		// session consensus/median as a low-confidence starting point (the
+		// user listens back and adjusts) rather than being left blank.
 		files := []SourceFile{{DestRelPath: "a"}}
 		times := map[string]time.Time{"a": mustTime("2026-08-15 16:06")}
+		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, otherStarts, time.Hour)
+		if check == nil || !check.Suspicious || check.Kind != IssueDateAndTime {
+			t.Fatalf("expected suspicious IssueDateAndTime, got %+v", check)
+		}
+		want := mustTime("2026-07-10 13:54")
+		if !check.Suggested.Equal(want) {
+			t.Fatalf("expected Suggested %v (consensus date + median time-of-day), got %v", want, check.Suggested)
+		}
+	})
+
+	t.Run("wholly-bad date but plausible time-of-day: snap date to consensus, keep the time", func(t *testing.T) {
+		// The classic never-set / factory-reset clock: year, month, and day
+		// are all wrong (2016-01-07), but the recorded time-of-day (14:01)
+		// still lands within tolerance of the other recorders' median start.
+		// Keep that time-of-day, snap the date to consensus, and offer it as
+		// a low-confidence IssueOther suggestion instead of leaving the
+		// field blank the way this used to.
+		files := []SourceFile{{DestRelPath: "a"}}
+		times := map[string]time.Time{"a": mustTime("2016-01-07 14:01")}
 		check := CheckRecorderTimestamp(files, fakeParser{times}, consensusYear, consensusMonth, consensusDay, otherStarts, time.Hour)
 		if check == nil || !check.Suspicious || check.Kind != IssueOther {
 			t.Fatalf("expected suspicious IssueOther, got %+v", check)
 		}
-		if !check.Suggested.Equal(check.Recorded) {
-			t.Fatalf("expected Suggested == Recorded when no confident guess applies, got %+v", check)
+		want := mustTime("2026-07-10 14:01")
+		if !check.Suggested.Equal(want) {
+			t.Fatalf("expected Suggested %v (consensus date + kept time-of-day), got %v", want, check.Suggested)
 		}
 	})
 
