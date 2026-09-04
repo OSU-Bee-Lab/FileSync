@@ -1,5 +1,5 @@
 // Package recorder handles offloading files from field recorders (Sony
-// ICD-PX370, Olympus VN-541PC, etc.) onto local disk. smartcopy.go is a
+// ICD-PX370, Olympus VN-541PC, AudioMoth, etc.) onto local disk. smartcopy.go is a
 // faithful port of the filesync project's files.py: a resumable,
 // verified byte-copy so an interrupted transfer picks up where it left
 // off instead of restarting, and destination files are only ever trusted

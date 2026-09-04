@@ -42,7 +42,7 @@ Locations and their filter/mtime defaults are saved per-machine (`~/Library/Appl
 - Never deletes: every copy is additive (rclone `copy`, never `sync`), on both the sync and download screens.
 - Multi-destination sync - fan a backup out to several Locations (local and cloud) from one scan.
 - Per-file live progress on both the current transfer and the upload queue, with bounded concurrency and automatic retry on failure.
-- Recorder-aware sync (Sony ICD-PX370, Olympus VN-541PC) with optional auto-delete-after-verify to reset a recorder for reuse in the field.
+- Recorder-aware sync (Sony ICD-PX370, Olympus VN-541PC, AudioMoth) with optional auto-delete-after-verify to reset a recorder for reuse in the field.
 - Works with any storage layout following `[location]/experiments/[name]/...`
   - not hardcoded to the Bee Lab's own folders.
 

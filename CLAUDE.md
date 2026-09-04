@@ -76,7 +76,8 @@ option to scan experiments).
   by the project owner.
 - This never-delete rule scopes to rclone/cloud destinations only. It does
   not cover `internal/recorder`'s recorder-side deletion: once a file has
-  been copied off a recorder (Sony ICD-PX370, Olympus VN-541PC, ...) and
+  been copied off a recorder (Sony ICD-PX370, Olympus VN-541PC, AudioMoth,
+  ...) and
   verified byte-for-byte, deleting it from the recorder's own storage is
   intentional and user-toggleable (`RecorderSettings.AutoDeleteAfterVerify`)
   — it's how a recorder gets reset for reuse in the field, not data loss.

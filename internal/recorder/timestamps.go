@@ -8,12 +8,12 @@ import (
 
 // TimestampParser is implemented by drivers whose destination filenames
 // encode a recording timestamp that can be checked for operator error (wrong
-// AM/PM, wrong year/month/day at recorder setup time). Currently only Sony
-// ICD-PX370's YYMMDD_HHMM(.mp3) naming qualifies — Olympus VN-541PC's
-// destination names are already derived from filesystem metadata (see
-// BestCreationTime), not the recorder's own clock, so a bad Olympus
-// filename would just reflect a bad host-machine clock, not a bad manual
-// entry on the device.
+// AM/PM, wrong year/month/day at recorder setup time). Sony ICD-PX370's
+// YYMMDD_HHMM(.mp3) and AudioMoth's YYYYMMDD_HHMMSS(.WAV) naming both
+// qualify — Olympus VN-541PC's destination names are already derived from
+// filesystem metadata (see BestCreationTime), not the recorder's own clock,
+// so a bad Olympus filename would just reflect a bad host-machine clock,
+// not a bad manual entry on the device.
 type TimestampParser interface {
 	// ParseTimestamp extracts the recording time encoded in destRelPath, or
 	// reports ok=false if destRelPath doesn't match this driver's pattern.
