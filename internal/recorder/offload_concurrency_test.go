@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // bigContent builds deterministic pseudo-random bytes of size n. Copies are
@@ -203,5 +204,77 @@ func TestOffloadCancelStopsEveryWorker(t *testing.T) {
 
 	if status != OffloadCanceled && status != OffloadDone {
 		t.Fatalf("status = %v, want OffloadCanceled (or OffloadDone if it beat the cancel)", status)
+	}
+}
+
+// TestOffloadStatusLineAdvancesInOrder pins down what the worker pool broke
+// in the UI: with each worker emitting its own snapshot as it picked up a
+// file, CurrentFile jumped between whichever files the four workers happened
+// to be starting, and the phase flickered between "checking" and "syncing"
+// several times a second. Only the ticker emits a running status line now,
+// naming the lowest-indexed file still in hand - so CurrentFile must never
+// move backwards through the file list, and a file must never be seen
+// checking again after it has started syncing.
+func TestOffloadStatusLineAdvancesInOrder(t *testing.T) {
+	card := t.TempDir()
+	destRoot := t.TempDir()
+
+	const nFiles = 40
+	order := make(map[string]int, nFiles)
+	for i := 0; i < nFiles; i++ {
+		name := fmt.Sprintf("rec%02d.wav", i)
+		order[name] = i
+		if err := os.WriteFile(filepath.Join(card, name), bigContent(int64(i), 1<<20), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Tick fast enough to sample the status line many times over a run this
+	// small, instead of needing hundreds of megabytes to outlast the real
+	// 300ms interval.
+	defer func(d time.Duration) { progressTickInterval = d }(progressTickInterval)
+	progressTickInterval = time.Millisecond
+
+	ctx := context.Background()
+	_, progress := StartOffload(ctx, ctx, offloadDriver{id: "REC1"}, Volume{MountPoint: card}, "REC1",
+		[]string{destRoot}, "", "exp", nil, false, true, nil)
+
+	lastIdx := -1
+	seen := 0
+	synced := make(map[string]bool)
+	status := OffloadRunning
+	for p := range progress {
+		status = p.Status
+		if p.Status != OffloadRunning || p.CurrentFile == "" {
+			continue
+		}
+		seen++
+		idx, ok := order[p.CurrentFile]
+		if !ok {
+			t.Fatalf("CurrentFile %q is not one of the source files", p.CurrentFile)
+		}
+		if idx < lastIdx {
+			t.Errorf("CurrentFile went backwards: file %d after file %d", idx, lastIdx)
+		}
+		lastIdx = idx
+
+		switch p.Phase {
+		case "syncing":
+			synced[p.CurrentFile] = true
+		case "checking":
+			if synced[p.CurrentFile] {
+				t.Errorf("%s went back to checking after it had started syncing", p.CurrentFile)
+			}
+		default:
+			t.Errorf("unexpected phase %q", p.Phase)
+		}
+	}
+	if status != OffloadDone {
+		t.Fatalf("status = %v, want OffloadDone", status)
+	}
+	// The point of shortening the tick interval: a vacuous pass here would
+	// hide a regression rather than report one.
+	if seen < 10 {
+		t.Fatalf("only %d status-line snapshots observed; too few to assert on", seen)
 	}
 }

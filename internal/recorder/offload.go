@@ -55,6 +55,14 @@ const maxConcurrentUploads = 3
 // exists to prevent.
 var uploadSem = make(chan struct{}, maxConcurrentUploads)
 
+// progressTickInterval is how often a running offload publishes a progress
+// snapshot. It is a var rather than a const purely so tests can shorten it:
+// the status line is produced by this ticker alone (see inFlightCopy), so a
+// test asserting on what the UI would show has to be able to observe more
+// than one tick without copying hundreds of megabytes to outlast the real
+// interval.
+var progressTickInterval = 300 * time.Millisecond
+
 // maxUploadAttempts is how many times uploadWithRetry tries a single file
 // upload (including the first attempt) before reporting it failed.
 const maxUploadAttempts = 3
@@ -359,15 +367,24 @@ func StartOffload(
 		// the per-file map mid-update.
 		var mu sync.Mutex
 
-		// inFlightCopy is one file currently being copied, keyed in inFlight
-		// by its index in offloadFiles. The ticker below folds each one's live
-		// byte count into `files` and names the lowest-indexed one as
-		// CurrentFile, so the UI's status line follows the oldest copy still
-		// running and advances roughly in order, rather than flickering
-		// between whichever workers happened to tick.
+		// inFlightCopy is one file a worker currently has in hand, keyed in
+		// inFlight by its index in offloadFiles. cp is nil until the copy
+		// itself starts (the classification pass ahead of it has no byte
+		// count), which is what phase distinguishes.
+		//
+		// The ticker below is the *only* thing that emits a running status
+		// line, and it reports the lowest-indexed entry here. That matters
+		// with a worker pool: each worker used to emit its own "checking"
+		// snapshot as it picked up a file, so with four of them the status
+		// line took ~9 phase/filename changes a second from the workers and
+		// ~3 from the ticker, and visibly thrashed between Checking and
+		// Syncing. Funnelling it through one emitter restores the
+		// sequential behavior - the line follows the oldest file still in
+		// hand and changes only when that file is done.
 		type inFlightCopy struct {
-			rel string
-			cp  *CopyProgress
+			rel   string
+			phase string
+			cp    *CopyProgress
 		}
 		inFlight := make(map[int]*inFlightCopy)
 
@@ -404,7 +421,7 @@ func StartOffload(
 		tickerWG.Add(1)
 		go func() {
 			defer tickerWG.Done()
-			ticker := time.NewTicker(300 * time.Millisecond)
+			ticker := time.NewTicker(progressTickInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -412,18 +429,20 @@ func StartOffload(
 					return
 				case <-ticker.C:
 					mu.Lock()
-					current, lowest := "", -1
+					current, phase, lowest := "", "", -1
 					for idx, f := range inFlight {
-						setFile(f.rel, FileOffloadProgress{
-							BytesDone:  f.cp.ByteCurrent.Load(),
-							BytesTotal: f.cp.BytesTotal.Load(),
-						})
+						if f.cp != nil {
+							setFile(f.rel, FileOffloadProgress{
+								BytesDone:  f.cp.ByteCurrent.Load(),
+								BytesTotal: f.cp.BytesTotal.Load(),
+							})
+						}
 						if lowest < 0 || idx < lowest {
-							current, lowest = f.rel, idx
+							current, phase, lowest = f.rel, f.phase, idx
 						}
 					}
 					if current != "" {
-						emit(OffloadRunning, "syncing", current, nil, false)
+						emit(OffloadRunning, phase, current, nil, false)
 					}
 					mu.Unlock()
 				}
@@ -444,9 +463,21 @@ func StartOffload(
 				return
 			}
 
+			// Registering the file is what puts it on the status line; the
+			// ticker takes it from here. The deferred removal covers the
+			// error and conflict returns below - the success paths drop it
+			// in the same critical section that marks the file complete,
+			// so the ticker can never fold a stale in-flight byte count
+			// back over a finished file.
+			entry := &inFlightCopy{rel: sf.DestRelPath, phase: "checking"}
 			mu.Lock()
-			emit(OffloadRunning, "checking", sf.DestRelPath, nil, true)
+			inFlight[idx] = entry
 			mu.Unlock()
+			defer func() {
+				mu.Lock()
+				delete(inFlight, idx)
+				mu.Unlock()
+			}()
 
 			destPaths := make([]string, len(destDirs))
 			for i, dir := range destDirs {
@@ -501,7 +532,7 @@ func StartOffload(
 
 			cp := &CopyProgress{}
 			mu.Lock()
-			inFlight[idx] = &inFlightCopy{rel: sf.DestRelPath, cp: cp}
+			entry.cp, entry.phase = cp, "syncing"
 			mu.Unlock()
 
 			copyErr := smartcopy(runCtx, sf.AbsPath, pending, cp)
@@ -523,7 +554,6 @@ func StartOffload(
 			}
 			total := cp.BytesTotal.Load()
 			setFile(sf.DestRelPath, FileOffloadProgress{State: StateComplete, BytesDone: total, BytesTotal: total})
-			emit(OffloadRunning, "syncing", sf.DestRelPath, nil, true)
 			mu.Unlock()
 
 			if batchUpload {
