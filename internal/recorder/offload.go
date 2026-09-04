@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -295,6 +296,19 @@ func StartOffload(
 			if includeFiles {
 				snapshot.Files = cloneFileProgress(files)
 			}
+			// A terminal status is sent unconditionally. Racing it against
+			// ctx.Done the way progress updates are would let the select drop
+			// exactly the outcome the caller is waiting for - on the
+			// cancellation path ctx is *always* already done, so an
+			// OffloadCanceled had a coin-flip chance of never being
+			// delivered, leaving the UI showing the run as still syncing
+			// until the channel closed under it. Callers range over
+			// progressCh until it closes (see internal/ui's recorder sync
+			// screen), so this send always has a receiver.
+			if status != OffloadRunning {
+				progressCh <- snapshot
+				return
+			}
 			select {
 			case progressCh <- snapshot:
 			case <-ctx.Done():
@@ -324,19 +338,115 @@ func StartOffload(
 			return nil
 		}
 
-		for _, sf := range offloadFiles {
-			if ctx.Err() != nil {
-				emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err(), true)
-				return
-			}
+		// Files are copied by a small pool of workers rather than strictly one
+		// at a time. A single file can't be copied faster than the card's
+		// sequential read (smartcopy's pipeline already gets it there), but a
+		// recorder holding thousands of small files — an AudioMoth on a duty
+		// cycle writes ~9.6 MB per recording, thousands per card — spends a
+		// large share of the run inside each file's closing Sync, with the
+		// card idle. Keeping a few copies in flight covers that latency.
+		// Measured on an AudioMoth card, the pipeline and this pool together
+		// took the offload from roughly half the card's sequential read speed
+		// to essentially all of it. The pool is deliberately small: the gain
+		// is in hiding per-file latency, not in parallel reads (the card
+		// saturates at a single reader), and every extra worker is one more
+		// partially-written file to resume after an interruption.
+		const copyWorkers = 4
 
+		// mu guards everything the workers share: `files` and its aggregates
+		// (i.e. every setFile call), inFlight, and the fatal* fields below.
+		// emit is always called with mu held, so a snapshot can never catch
+		// the per-file map mid-update.
+		var mu sync.Mutex
+
+		// inFlightCopy is one file currently being copied, keyed in inFlight
+		// by its index in offloadFiles. The ticker below folds each one's live
+		// byte count into `files` and names the lowest-indexed one as
+		// CurrentFile, so the UI's status line follows the oldest copy still
+		// running and advances roughly in order, rather than flickering
+		// between whichever workers happened to tick.
+		type inFlightCopy struct {
+			rel string
+			cp  *CopyProgress
+		}
+		inFlight := make(map[int]*inFlightCopy)
+
+		// runCtx is what the workers copy under. The first one to fail cancels
+		// it so the others wind down promptly instead of copying files that
+		// are about to be discarded — the concurrent equivalent of the old
+		// sequential loop returning on the spot. It descends from ctx, so an
+		// outside cancellation (recorder unplugged) still reaches every
+		// worker.
+		runCtx, runCancel := context.WithCancel(ctx)
+		defer runCancel()
+
+		// The first worker to hit a conflict or error records it here and
+		// cancels runCtx; the run's outcome is emitted once, after every
+		// worker has stopped. Subsequent failures are dropped: with runCtx
+		// canceled they're overwhelmingly the cancellation itself, and
+		// reporting one of those would mask the cause. Callers must hold mu.
+		var fatalStatus OffloadStatus
+		var fatalErr error
+		var fatalFile string
+		fail := func(status OffloadStatus, rel string, err error) {
+			if fatalErr == nil {
+				fatalStatus, fatalFile, fatalErr = status, rel, err
+			}
+			runCancel()
+		}
+
+		// One ticker for the whole run, rather than the per-file ticker the
+		// sequential loop used: with several copies in flight, per-file
+		// tickers would emit copyWorkers snapshots per interval, each
+		// clobbering the last's CurrentFile.
+		tickerStop := make(chan struct{})
+		var tickerWG sync.WaitGroup
+		tickerWG.Add(1)
+		go func() {
+			defer tickerWG.Done()
+			ticker := time.NewTicker(300 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-tickerStop:
+					return
+				case <-ticker.C:
+					mu.Lock()
+					current, lowest := "", -1
+					for idx, f := range inFlight {
+						setFile(f.rel, FileOffloadProgress{
+							BytesDone:  f.cp.ByteCurrent.Load(),
+							BytesTotal: f.cp.BytesTotal.Load(),
+						})
+						if lowest < 0 || idx < lowest {
+							current, lowest = f.rel, idx
+						}
+					}
+					if current != "" {
+						emit(OffloadRunning, "syncing", current, nil, false)
+					}
+					mu.Unlock()
+				}
+			}
+		}()
+
+		// copyOne runs the whole per-file pass — identity re-check, state
+		// classification, copy, upload queueing — for one file, on a worker
+		// goroutine. It reports failures through fail rather than returning
+		// them: the run's single outcome is decided after all the workers
+		// have finished.
+		copyOne := func(idx int, sf SourceFile) {
 			if err := verifyIdentity(); err != nil {
+				mu.Lock()
 				setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
-				emit(OffloadError, "", sf.DestRelPath, err, true)
+				fail(OffloadError, sf.DestRelPath, err)
+				mu.Unlock()
 				return
 			}
 
+			mu.Lock()
 			emit(OffloadRunning, "checking", sf.DestRelPath, nil, true)
+			mu.Unlock()
 
 			destPaths := make([]string, len(destDirs))
 			for i, dir := range destDirs {
@@ -344,16 +454,20 @@ func StartOffload(
 			}
 			for _, dp := range destPaths {
 				if err := os.MkdirAll(filepath.Dir(dp), 0o755); err != nil {
+					mu.Lock()
 					setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
-					emit(OffloadError, "", sf.DestRelPath, err, true)
+					fail(OffloadError, sf.DestRelPath, err)
+					mu.Unlock()
 					return
 				}
 			}
 
 			states, err := fileStates(sf.AbsPath, destPaths)
 			if err != nil {
+				mu.Lock()
 				setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
-				emit(OffloadError, "", sf.DestRelPath, err, true)
+				fail(OffloadError, sf.DestRelPath, err)
+				mu.Unlock()
 				return
 			}
 
@@ -371,48 +485,49 @@ func StartOffload(
 			}
 			if conflict {
 				err := fmt.Errorf("%s already exists at destination with different content", sf.DestRelPath)
+				mu.Lock()
 				setFile(sf.DestRelPath, FileOffloadProgress{Err: err, State: StateConflict})
-				emit(OffloadConflict, "", sf.DestRelPath, err, true)
+				fail(OffloadConflict, sf.DestRelPath, err)
+				mu.Unlock()
 				return
 			}
 			if len(pending) == 0 {
+				mu.Lock()
 				sz := files[sf.DestRelPath].BytesTotal
 				setFile(sf.DestRelPath, FileOffloadProgress{State: StateComplete, BytesDone: sz, BytesTotal: sz})
-				continue
+				mu.Unlock()
+				return
 			}
 
 			cp := &CopyProgress{}
-			copyDone := make(chan error, 1)
-			go func(src string, dsts []string) { copyDone <- smartcopy(ctx, src, dsts, cp) }(sf.AbsPath, pending)
+			mu.Lock()
+			inFlight[idx] = &inFlightCopy{rel: sf.DestRelPath, cp: cp}
+			mu.Unlock()
 
-			ticker := time.NewTicker(300 * time.Millisecond)
-		copyLoop:
-			for {
-				select {
-				case err := <-copyDone:
-					ticker.Stop()
-					if err != nil {
-						setFile(sf.DestRelPath, FileOffloadProgress{Err: err})
-						emit(OffloadError, "", sf.DestRelPath, err, true)
-						return
-					}
-					break copyLoop
-				case <-ticker.C:
-					setFile(sf.DestRelPath, FileOffloadProgress{BytesDone: cp.ByteCurrent.Load(), BytesTotal: cp.BytesTotal.Load()})
-					emit(OffloadRunning, "syncing", sf.DestRelPath, nil, false)
-				case <-ctx.Done():
-					ticker.Stop()
-					emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err(), true)
-					return
+			copyErr := smartcopy(runCtx, sf.AbsPath, pending, cp)
+
+			mu.Lock()
+			delete(inFlight, idx)
+			if copyErr != nil {
+				// A copy aborted because runCtx was canceled says nothing
+				// about this file — it's a consequence of another worker's
+				// failure, or of the caller canceling the offload. Recording
+				// it would race to become the reported cause and hide the
+				// real one.
+				if runCtx.Err() == nil {
+					setFile(sf.DestRelPath, FileOffloadProgress{Err: copyErr})
+					fail(OffloadError, sf.DestRelPath, copyErr)
 				}
+				mu.Unlock()
+				return
 			}
-
 			total := cp.BytesTotal.Load()
 			setFile(sf.DestRelPath, FileOffloadProgress{State: StateComplete, BytesDone: total, BytesTotal: total})
 			emit(OffloadRunning, "syncing", sf.DestRelPath, nil, true)
+			mu.Unlock()
 
 			if batchUpload {
-				continue
+				return
 			}
 
 			fileTotal := total
@@ -451,6 +566,54 @@ func StartOffload(
 					uploadWithRetry(uploadCtx, localPath, dest, rel, report)
 				}(localPath, rel)
 			}
+		}
+
+		// Work is handed out in offloadFiles order, so recordings are still
+		// picked up before the metadata files appended after them (see
+		// offloadFiles above) — with the pool, up to copyWorkers-1 of the last
+		// recordings may merely be in flight rather than finished when the
+		// first metadata file starts, which is as close to that ordering as
+		// concurrency allows and leaves any partial copy resumable anyway.
+		type workItem struct {
+			idx int
+			sf  SourceFile
+		}
+		work := make(chan workItem)
+		var workerWG sync.WaitGroup
+		for w := 0; w < copyWorkers; w++ {
+			workerWG.Add(1)
+			go func() {
+				defer workerWG.Done()
+				for item := range work {
+					if runCtx.Err() != nil {
+						return
+					}
+					copyOne(item.idx, item.sf)
+				}
+			}()
+		}
+		go func() {
+			defer close(work)
+			for i, sf := range offloadFiles {
+				select {
+				case work <- workItem{idx: i, sf: sf}:
+				case <-runCtx.Done():
+					return
+				}
+			}
+		}()
+		workerWG.Wait()
+
+		close(tickerStop)
+		tickerWG.Wait()
+
+		if fatalErr != nil {
+			emit(fatalStatus, "", fatalFile, fatalErr, true)
+			return
+		}
+		if err := ctx.Err(); err != nil {
+			emit(OffloadCanceled, "", "", err, true)
+			return
 		}
 
 		allComplete := true

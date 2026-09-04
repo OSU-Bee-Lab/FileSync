@@ -246,7 +246,11 @@ type CopyProgress struct {
 // getting silently retried — against a source path that may no longer point
 // at the same physical device.
 func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progress *CopyProgress) error {
-	const chunkSize = 4096 * 256
+	// chunkSize/copyBuffers size the read-ahead pipeline at the bottom of
+	// this function. copyBuffers is one more than the pipeline's in-flight
+	// capacity so a consumed buffer can always be recycled without blocking.
+	const chunkSize = 4 << 20
+	const copyBuffers = 3
 
 	fileSource, err := os.Open(sourcePath)
 	if err != nil {
@@ -392,32 +396,103 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 		}
 	}
 
-	buf := make([]byte, chunkSize)
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
+	// startByte is read back rather than assumed to be pickupByte: a
+	// matchpoint search above may have rewound the source (and every
+	// destination) by a multiple of checkSize before settling, and the
+	// progress counter below has to start from where the copy actually
+	// resumes.
+	startByte, err := fileSource.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return err
+	}
+
+	// The copy is pipelined: a reader goroutine pulls the next chunk off the
+	// recorder while this goroutine writes the previous one to every
+	// destination, instead of the two taking strict turns and leaving the
+	// card idle for the duration of each write. On an AudioMoth card (~90
+	// MB/s read, thousands of ~9.6 MB files) the strictly-alternating loop
+	// this replaced ran at roughly half the card's sequential read speed.
+	// The other half of that gap is the per-file Sync below, which is
+	// covered by offload.go copying several files at once rather than by
+	// anything here.
+	copyCtx, copyCancel := context.WithCancel(ctx)
+	defer copyCancel()
+
+	type chunk struct {
+		buf []byte
+		n   int
+	}
+	free := make(chan []byte, copyBuffers)
+	full := make(chan chunk, copyBuffers-1)
+	for i := 0; i < copyBuffers; i++ {
+		free <- make([]byte, chunkSize)
+	}
+
+	// readDone carries the reader's terminal error (nil at EOF). Both of its
+	// sends are followed immediately by a return, and it's buffered, so the
+	// reader never blocks on it.
+	readDone := make(chan error, 1)
+	go func() {
+		defer close(full)
+		for {
+			var buf []byte
+			select {
+			case buf = <-free:
+			case <-copyCtx.Done():
+				readDone <- copyCtx.Err()
+				return
+			}
+			n, rerr := fileSource.Read(buf)
+			if n > 0 {
+				select {
+				case full <- chunk{buf: buf, n: n}:
+				case <-copyCtx.Done():
+					readDone <- copyCtx.Err()
+					return
+				}
+			} else {
+				free <- buf
+			}
+			if rerr == io.EOF {
+				readDone <- nil
+				return
+			}
+			if rerr != nil {
+				readDone <- rerr
+				return
+			}
 		}
-		n, readErr := fileSource.Read(buf)
-		if n > 0 {
+	}()
+
+	written := startByte
+	var writeErr error
+	for c := range full {
+		// Once a write has failed, keep draining full to completion rather
+		// than breaking out: copyCancel has told the reader to stop, but it
+		// may already be blocked sending a chunk, and abandoning the channel
+		// would leak that goroutine until the select's ctx case fired.
+		if writeErr == nil {
 			for _, f := range filesDest {
-				if _, werr := f.Write(buf[:n]); werr != nil {
-					return werr
+				if _, werr := f.Write(c.buf[:c.n]); werr != nil {
+					writeErr = werr
+					copyCancel()
+					break
 				}
 			}
-			if progress != nil {
-				pos, err := fileSource.Seek(0, io.SeekCurrent)
-				if err != nil {
-					return err
+			if writeErr == nil {
+				written += int64(c.n)
+				if progress != nil {
+					progress.ByteCurrent.Store(written)
 				}
-				progress.ByteCurrent.Store(pos)
 			}
 		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
+		free <- c.buf
+	}
+	if writeErr != nil {
+		return writeErr
+	}
+	if err := <-readDone; err != nil {
+		return err
 	}
 
 	// Flush and close every destination now, before returning success, so a
