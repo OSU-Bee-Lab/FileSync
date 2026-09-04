@@ -133,7 +133,8 @@ type UploadUpdate struct {
 	Err        error
 }
 
-// StartOffload copies every file driver.SourceFiles(v) reports into
+// StartOffload copies every file driver.SourceFiles(v) and
+// recorder.MetadataFiles(driver, v) report into
 // destRoot/experimentName/subpath/recorderID/... for each destRoot in
 // destRoots (subpath is the schema's "intermediate directories", e.g. a
 // deployment date or site, and is skipped if empty),
@@ -155,7 +156,9 @@ type UploadUpdate struct {
 // button on Sync Recorders' active-sync screen).
 //
 // Once every file is verified complete, source files on the recorder are
-// deleted if autoDelete is set. This is the one place in FileSync that
+// deleted if autoDelete is set - recordings only, never the driver's
+// metadata files, which are copied on the same terms as recordings but stay
+// on the device (see MetadataFileLister). This is the one place in FileSync that
 // deletes data, deliberately: it's the recorder's own storage being reset
 // for reuse, not a synced destination, and it only happens after a
 // verified copy — see CLAUDE.md for the scoping of the project's
@@ -200,11 +203,26 @@ func StartOffload(
 			return
 		}
 
+		// sourceFiles is the recordings - the only files the delete pass
+		// below may touch. metadataFiles is the driver's copy-but-never-
+		// delete set, appended after the recordings so that everything the
+		// device can't regenerate is already safely copied before a
+		// metadata conflict (see the conflict handling below) can halt the
+		// run. offloadFiles is the two together: the copy/verify/upload
+		// pass draws no distinction between them.
 		sourceFiles, err := driver.SourceFiles(v)
 		if err != nil {
 			progressCh <- OffloadProgress{Status: OffloadError, Err: err}
 			return
 		}
+		metadataFiles, err := MetadataFiles(driver, v)
+		if err != nil {
+			progressCh <- OffloadProgress{Status: OffloadError, Err: err}
+			return
+		}
+		offloadFiles := make([]SourceFile, 0, len(sourceFiles)+len(metadataFiles))
+		offloadFiles = append(offloadFiles, sourceFiles...)
+		offloadFiles = append(offloadFiles, metadataFiles...)
 
 		subpathParts := splitSubpath(subpath)
 		destDirs := DestDirs(destRoots, subpath, experimentName, recorderID)
@@ -215,7 +233,7 @@ func StartOffload(
 		// bytesTotal once their own copy started, so bytesTotal would grow
 		// mid-run: the bar could reach 100% on file 1 alone, then drop back
 		// down the instant file 2's entry inflated the denominator.
-		files := make(map[string]FileOffloadProgress, len(sourceFiles))
+		files := make(map[string]FileOffloadProgress, len(offloadFiles))
 
 		// aggDone/aggBytesDone/aggBytesTotal are running totals mirroring
 		// `files`, maintained incrementally by setFile below rather than
@@ -247,7 +265,7 @@ func StartOffload(
 			aggBytesTotal += fp.BytesTotal
 		}
 
-		for _, sf := range sourceFiles {
+		for _, sf := range offloadFiles {
 			var size int64
 			if info, err := os.Stat(sf.AbsPath); err == nil {
 				size = info.Size()
@@ -266,7 +284,7 @@ func StartOffload(
 		emit := func(status OffloadStatus, phase, current string, err error, includeFiles bool) {
 			snapshot := OffloadProgress{
 				FilesDone:   aggDone,
-				FilesTotal:  len(sourceFiles),
+				FilesTotal:  len(offloadFiles),
 				BytesDone:   aggBytesDone,
 				BytesTotal:  aggBytesTotal,
 				CurrentFile: current,
@@ -306,7 +324,7 @@ func StartOffload(
 			return nil
 		}
 
-		for _, sf := range sourceFiles {
+		for _, sf := range offloadFiles {
 			if ctx.Err() != nil {
 				emit(OffloadCanceled, "", sf.DestRelPath, ctx.Err(), true)
 				return
@@ -443,6 +461,9 @@ func StartOffload(
 			}
 		}
 
+		// Note the range over sourceFiles, not offloadFiles: metadata files
+		// were copied and verified alongside the recordings, but deleting
+		// them is exactly what MetadataFileLister exists to prevent.
 		if autoDelete && allComplete {
 			for _, sf := range sourceFiles {
 				if ctx.Err() != nil {

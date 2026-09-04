@@ -230,6 +230,29 @@ func (AudioMoth) RenameForTimestamp(destRelPath string, t time.Time) string {
 	return filepath.Join(dir, newBase)
 }
 
+// MetadataFiles implements recorder.MetadataFileLister: CONFIG.TXT is the
+// device's own record of the settings a deployment was recorded under -
+// sample rate, gain, filter, schedule, location - none of which is
+// recoverable from the WAV files alone, so it's worth archiving next to the
+// audio it describes. It lands at the root of the recorder directory under
+// its own name.
+//
+// It must never be deleted from the card, which is what keeps it out of
+// SourceFiles: it's the only thing identifying the device (see Detect), so
+// an auto-delete offload that took it would leave the card unrecognizable
+// until the AudioMoth next started a deployment on it.
+func (d AudioMoth) MetadataFiles(v recorder.Volume) ([]recorder.SourceFile, error) {
+	path := d.configPath(v)
+	if _, err := os.Stat(path); err != nil {
+		// Detect gates every offload, so a card being handled by this
+		// driver has a readable CONFIG.TXT; if it vanished between then and
+		// now the card has been swapped or pulled, and the offload's own
+		// identity re-check is the right place for that to surface.
+		return nil, nil
+	}
+	return []recorder.SourceFile{{AbsPath: path, DestRelPath: "CONFIG.TXT"}}, nil
+}
+
 // RecorderDirDepth implements recorder.TimestampParser: SourceFiles flattens
 // every recording into the recorder directory itself, so a matched file's
 // own containing directory is that recorder directory.

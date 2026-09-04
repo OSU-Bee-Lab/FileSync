@@ -92,7 +92,44 @@ type Driver interface {
 	// SourceFiles lists every file on the recorder that should be
 	// offloaded, with the relative path it should land at under the
 	// recorder's destination directory.
+	//
+	// This is also the delete list under auto-delete-after-verify (see
+	// StartOffload), so it must contain only files the recorder can
+	// regenerate or genuinely no longer needs - anything that has to stay
+	// on the device belongs in MetadataFiles instead.
 	SourceFiles(v Volume) ([]SourceFile, error)
+}
+
+// MetadataFileLister is the optional half of Driver, implemented by drivers
+// whose recorders write device-authored metadata alongside the recordings -
+// deployment settings, calibration, an identity file - that is worth keeping
+// next to the audio but must not be removed from the device.
+//
+// It exists because SourceFiles pulls double duty as the offload list and
+// the auto-delete list, which is exactly wrong for a file like AudioMoth's
+// CONFIG.TXT: it's the only thing on the card that identifies the device, so
+// deleting it after a verified copy would leave a just-offloaded card
+// unrecognizable. Files returned here are copied, verified, and uploaded on
+// the same terms as recordings, and skipped by the delete pass.
+//
+// A driver whose hardware writes no such file simply doesn't implement this.
+type MetadataFileLister interface {
+	// MetadataFiles lists the device-written metadata on v to copy but
+	// never delete, with the relative path each should land at under the
+	// recorder's destination directory - the same contract as SourceFiles.
+	MetadataFiles(v Volume) ([]SourceFile, error)
+}
+
+// MetadataFiles returns d's copy-but-never-delete metadata files for v, or
+// nil for a driver that doesn't implement MetadataFileLister. Callers should
+// use this rather than type-asserting themselves, so "no metadata" and "some
+// metadata" stay one code path.
+func MetadataFiles(d Driver, v Volume) ([]SourceFile, error) {
+	lister, ok := d.(MetadataFileLister)
+	if !ok {
+		return nil, nil
+	}
+	return lister.MetadataFiles(v)
 }
 
 // Drivers is the registry of supported recorder models, checked in order
