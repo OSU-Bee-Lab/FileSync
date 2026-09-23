@@ -401,3 +401,43 @@ func TestApplyMove_DirectoryIntoNewOwnSubdirectory(t *testing.T) {
 		t.Errorf("expected only griffith left in the source, got %v", entries)
 	}
 }
+
+// Checking several files in one recorder directory and moving them to a new
+// sibling moves just those files, keeping their names, and leaves the rest
+// (and the source directory) in place.
+func TestPlanMoveSelected_MovesOnlyCheckedFilesKeepingNames(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/8/a.mp3"), "a")
+	writeFile(t, filepath.Join(root, "exp/8/b.mp3"), "b")
+	writeFile(t, filepath.Join(root, "exp/8/c.mp3"), "c")
+	writeFile(t, filepath.Join(root, "exp/8b/c.mp3"), "other c")
+
+	ctx := context.Background()
+	plan, err := PlanMoveSelected(ctx, loc, "exp/8", "exp/8b", []string{"exp/8/a.mp3", "exp/8/c.mp3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 2 {
+		t.Fatalf("got %d planned moves, want 2: %+v", len(plan.Moves), plan.Moves)
+	}
+	if len(plan.Collisions) != 1 || plan.Collisions[0] != "exp/8b/c.mp3" {
+		t.Fatalf("collisions = %+v, want [exp/8b/c.mp3]", plan.Collisions)
+	}
+	if err := ApplyMove(ctx, loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{
+		"exp/8b/a.mp3": "a",       // moved
+		"exp/8/b.mp3":  "b",       // not checked
+		"exp/8/c.mp3":  "c",       // collision skipped by default
+		"exp/8b/c.mp3": "other c", // untouched
+	} {
+		if data, err := os.ReadFile(filepath.Join(root, p)); err != nil || string(data) != want {
+			t.Errorf("%s = %q, err=%v; want %q", p, data, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "exp/8/a.mp3")); !os.IsNotExist(err) {
+		t.Errorf("exp/8/a.mp3 should have moved, stat err=%v", err)
+	}
+}

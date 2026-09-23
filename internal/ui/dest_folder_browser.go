@@ -92,9 +92,15 @@ type destFolderBrowser struct {
 	// multiSelect switches selectFile from replacing selectedFile to
 	// toggling membership in selectedFiles, letting a caller (Pull Files)
 	// gather files from more than one folder into one destination
-	// preview. Off for every other selectFiles call site (Manage Files'
-	// move/delete needs exactly one target).
+	// preview. Manage Files turns it on (with checkFiles) for Rename/Move
+	// only; its Delete and Retime need exactly one target.
 	multiSelect bool
+
+	// checkFiles puts a checkbox beside every file row, toggling the same
+	// selectedFiles membership a row tap does - Manage Files' Rename/Move,
+	// where a selection's size decides what "From" means (see
+	// showManageFiles). Only meaningful with multiSelect on.
+	checkFiles bool
 
 	// selectedFiles holds full relative paths (relPath+name, unlike
 	// selectedFile's bare name) of every file picked while multiSelect is
@@ -194,7 +200,10 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
 			entry.Hide()
-			return audioRow(container.NewStack(widget.NewButton("", nil), entry), newPresenceIndicator())
+			check := widget.NewCheck("", nil)
+			check.Hide()
+			content := container.NewBorder(nil, nil, check, nil, container.NewStack(widget.NewButton("", nil), entry))
+			return audioRow(content, newPresenceIndicator())
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) { b.updateRow(id, obj) },
 	)
@@ -271,6 +280,21 @@ func (b *destFolderBrowser) SetSelectedFiles(names []string) {
 	b.selectedFiles = make(map[string]bool, len(names))
 	for _, n := range names {
 		b.selectedFiles[joinRel(b.relPath, n)] = true
+	}
+	b.list.Refresh()
+}
+
+// SetSelectedPaths replaces the multiSelect selection with full relative
+// paths (SelectedFiles' own form) - e.g. Manage Files restoring a checked
+// set across a round trip through Preview, where the files may sit in
+// different folders.
+func (b *destFolderBrowser) SetSelectedPaths(paths []string) {
+	b.selectedFiles = nil
+	if len(paths) > 0 {
+		b.selectedFiles = make(map[string]bool, len(paths))
+		for _, p := range paths {
+			b.selectedFiles[p] = true
+		}
 	}
 	b.list.Refresh()
 }
@@ -431,9 +455,16 @@ func (b *destFolderBrowser) fileLabel(e syncengine.Entry) string {
 
 func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObject) {
 	row := obj.(*fyne.Container)
-	stack := row.Objects[0].(*fyne.Container)
+	// row.Objects[0] is the Border built in newDestFolderBrowser: the
+	// button/entry stack in the center plus the file checkbox on the left
+	// (NewBorder lists its center objects first, then the edges).
+	content := row.Objects[0].(*fyne.Container)
+	stack := content.Objects[0].(*fyne.Container)
+	check := content.Objects[1].(*widget.Check)
 	btn := stack.Objects[0].(*widget.Button)
 	entry := stack.Objects[1].(*widget.Entry)
+	check.OnChanged = nil
+	check.Hide()
 	audioControls := audioControlsFrom(row)
 	presence := presenceFrom(row)
 
@@ -482,7 +513,15 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 			if b.multiSelect {
 				selected = b.selectedFiles[joinRel(b.relPath, name)]
 			}
-			if selected {
+			if b.checkFiles && b.multiSelect {
+				check.SetChecked(selected)
+				check.OnChanged = func(bool) { b.selectFile(name) }
+				check.Show()
+			}
+			if selected && b.checkFiles {
+				btn.Importance = widget.HighImportance
+				btn.SetText("\U0001F4C4 " + label)
+			} else if selected {
 				btn.Importance = widget.HighImportance
 				btn.SetText("✅ " + label)
 			} else {
@@ -596,7 +635,14 @@ func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pre
 		b.pendingSelectFile = ""
 		for _, e := range entries {
 			if !e.IsDir && e.Name == want {
-				b.selectedFile = want
+				if b.multiSelect {
+					if b.selectedFiles == nil {
+						b.selectedFiles = make(map[string]bool)
+					}
+					b.selectedFiles[joinRel(b.relPath, want)] = true
+				} else {
+					b.selectedFile = want
+				}
 				break
 			}
 		}

@@ -255,6 +255,46 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 	return plan, nil
 }
 
+// PlanMoveSelected is PlanMove from srcDir to dstDir, narrowed to just
+// files (paths relative to the Location root, under srcDir) - Manage Files'
+// multi-file move, where the user checks several files and "From" becomes
+// their shared folder. Each kept file lands at the same path beneath dstDir
+// that it had beneath srcDir, exactly as in PlanMove, so moving checked
+// files out of a recorder directory into a new one keeps their names. At a
+// Results Location, each audio path also matches its result file (see
+// resultsLeaf), since that tree is listed under its own names.
+//
+// The plan is always applied file by file, and SrcRoot is left empty so
+// ApplyMove's cleanup never removes a directory under srcDir the user
+// didn't touch - a source directory emptied by the move stays behind.
+func PlanMoveSelected(ctx context.Context, loc Location, srcDir, dstDir string, files []string) (MovePlan, error) {
+	full, err := PlanMove(ctx, loc, srcDir, dstDir)
+	if err != nil {
+		return MovePlan{}, err
+	}
+	keep := make(map[string]bool, len(files)*2)
+	for _, f := range files {
+		keep[f] = true
+		if loc.Role == RoleResults {
+			keep[resultsLeaf(f)] = true
+		}
+	}
+	plan := MovePlan{}
+	kept := map[string]bool{}
+	for _, m := range full.Moves {
+		if keep[m.SrcRelPath] && m.SrcRelPath != m.DstRelPath {
+			plan.Moves = append(plan.Moves, m)
+			kept[m.DstRelPath] = true
+		}
+	}
+	for _, c := range full.Collisions {
+		if kept[c] {
+			plan.Collisions = append(plan.Collisions, c)
+		}
+	}
+	return plan, nil
+}
+
 // CollisionResolution is the user's explicit per-path decision for a
 // colliding destination in a MovePlan — never guessed automatically.
 type CollisionResolution int

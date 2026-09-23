@@ -89,6 +89,9 @@ type state struct {
 	manageFilesTo            string
 	manageFilesDeleteConfirm string
 	manageFilesPickerTarget  string
+	// manageFilesFromFiles caches the files checked in the "From" browser
+	// under Rename/Move/Merge (full relative paths), the same way.
+	manageFilesFromFiles []string
 	// manageFilesRetimeWalk caches Retime's "Walk deployments one at a
 	// time" checkbox the same way.
 	manageFilesRetimeWalk bool

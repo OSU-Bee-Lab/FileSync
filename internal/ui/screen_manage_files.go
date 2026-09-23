@@ -336,9 +336,53 @@ func showManageFiles(s *state) {
 
 	// Each browser mirrors its chosen path (a browsed folder, or a tapped
 	// file) into its own From/To field; "From" also re-validates on change.
+	//
+	// Under Rename/Move/Merge, "From" file rows carry checkboxes instead
+	// (see setFromChecks), and how many are checked decides what "From" is:
+	// none - the browsed folder, as without checkboxes; one - that file,
+	// still editable, so it can be renamed outright; several - their shared
+	// folder, locked, with the move narrowed to just the checked files
+	// (syncengine.PlanMoveSelected), each keeping its name beneath "To".
+	fromSelNote := widget.NewLabel("")
+	fromSelNote.Wrapping = fyne.TextWrapWord
+	fromSelNote.Hide()
 	browserFrom.OnPathChanged = func(rel string) {
-		fromEntry.SetText(rel)
+		files := browserFrom.SelectedFiles()
+		if browserFrom.checkFiles {
+			s.manageFilesFromFiles = files
+		}
+		switch {
+		case !browserFrom.checkFiles || len(files) == 0:
+			fromEntry.Enable()
+			fromSelNote.Hide()
+			fromEntry.SetText(rel)
+		case len(files) == 1:
+			fromEntry.Enable()
+			fromSelNote.Hide()
+			fromEntry.SetText(files[0])
+		default:
+			fromEntry.SetText(syncengine.CommonDir(files))
+			fromEntry.Disable()
+			fromSelNote.SetText(fmt.Sprintf("%s checked - each moves into \"To\" under its own name. Uncheck down to one to rename a single file.", plural(len(files), "file", "")))
+			fromSelNote.Show()
+		}
 		validateFromPath()
+	}
+	// setFromChecks turns the "From" browser's file checkboxes on (Rename/
+	// Move/Merge) or off (Delete, Retime - both act on exactly one path),
+	// dropping any checked files either way.
+	setFromChecks := func(on bool) {
+		if browserFrom.checkFiles == on {
+			return
+		}
+		browserFrom.checkFiles = on
+		browserFrom.multiSelect = on
+		browserFrom.selectFiles = true
+		browserFrom.selectedFile = "" // a single-select pick from the other mode
+		browserFrom.ClearSelectedFiles()
+		s.manageFilesFromFiles = nil
+		fromEntry.Enable()
+		fromSelNote.Hide()
 	}
 	browserTo.OnPathChanged = func(rel string) {
 		toEntry.SetText(rel)
@@ -348,6 +392,9 @@ func showManageFiles(s *state) {
 	// is-a-file path is tolerated by the lister above).
 	fromEntry.OnSubmitted = func(text string) {
 		if pickerTarget == "From" {
+			// A typed path replaces whatever was checked (a typed file
+			// path gets re-checked once its folder lists).
+			browserFrom.ClearSelectedFiles()
 			browserFrom.NavigateTo(text)
 		}
 	}
@@ -408,6 +455,7 @@ func showManageFiles(s *state) {
 
 	opGroup.OnChanged = func(v string) {
 		s.manageFilesOp = v
+		setFromChecks(v == "Rename / Move / Merge")
 		toForm.Hide()
 		deleteForm.Hide()
 		walkCheck.Hide()
@@ -432,7 +480,14 @@ func showManageFiles(s *state) {
 	if initialOp == "" {
 		initialOp = "Rename / Move / Merge"
 	}
+	// Selecting the op (re)builds the checkbox mode and drops any checked
+	// files, so restore the ones cached from before Preview afterward.
+	restoredFiles := s.manageFilesFromFiles
 	opGroup.SetSelected(initialOp)
+	if browserFrom.checkFiles && len(restoredFiles) > 0 {
+		browserFrom.SetSelectedPaths(restoredFiles)
+		s.manageFilesFromFiles = restoredFiles
+	}
 
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
@@ -442,7 +497,11 @@ func showManageFiles(s *state) {
 			return
 		}
 		from := strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
-		if from == "" {
+		var files []string
+		if browserFrom.checkFiles && len(browserFrom.SelectedFiles()) > 1 {
+			files = browserFrom.SelectedFiles()
+		}
+		if from == "" && files == nil {
 			dialog.ShowInformation("Missing path", "Pick or type a \"From\" path first.", s.win)
 			return
 		}
@@ -471,7 +530,7 @@ func showManageFiles(s *state) {
 			case "Delete":
 				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from})
 			default:
-				showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to})
+				showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to, files: files})
 			}
 		})
 	})
@@ -484,6 +543,7 @@ func showManageFiles(s *state) {
 		widget.NewSeparator(),
 		opGroup,
 		fromForm,
+		fromSelNote,
 		fromPathError,
 		toForm,
 		deleteForm,
@@ -514,6 +574,10 @@ func showManageFiles(s *state) {
 	// path naming a file is re-anchored at its folder by the lister.
 	browserFrom.relPath = strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
 	browserTo.relPath = strings.Trim(strings.TrimSpace(toEntry.Text), "/")
+	if len(browserFrom.SelectedFiles()) > 0 {
+		// Re-derive "From" (and its lock/note) from the restored checks.
+		browserFrom.OnPathChanged(browserFrom.relPath)
+	}
 	// Show the previously-active browser (From, or a restored To) first,
 	// then point both browsers at the current selection and list it
 	// (restoring a persisted Location's picker/warning state -
@@ -759,6 +823,19 @@ type manageFilesRequest struct {
 	locs []syncengine.Location
 	from string
 	to   string // only used for manageOpMove
+	// files narrows a move to just these checked files under from (their
+	// shared folder) - see syncengine.PlanMoveSelected. nil moves all of
+	// from.
+	files []string
+}
+
+// fromLabel names what's being moved or deleted, for titles and prompts:
+// the From path, or "N files in <from>" for a checked-files move.
+func (r manageFilesRequest) fromLabel() string {
+	if len(r.files) == 0 {
+		return r.from
+	}
+	return fmt.Sprintf("%s in %s", plural(len(r.files), "file", ""), "experiments/"+r.from)
 }
 
 // manageFilesLocPlan is one Location's computed plan: the raw
@@ -993,8 +1070,8 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 	// previewTitle and applyingTitle both name the exact operation - the
 	// only difference is the verb - so the header reads the same way
 	// before and during Apply, just swapping "Preview" for "Applying".
-	previewTitle := "Preview: " + req.from + " → " + req.to
-	applyingTitle := "Applying: " + req.from + " → " + req.to
+	previewTitle := "Preview: " + req.fromLabel() + " → " + req.to
+	applyingTitle := "Applying: " + req.fromLabel() + " → " + req.to
 	verb := "moved"
 	if req.op == manageOpDelete {
 		previewTitle = "Preview: DELETE " + req.from
@@ -1117,7 +1194,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 		foldList.Refresh()
 		fileList.Refresh()
 
-		locs, op, from, to := req.locs, req.op, req.from, req.to
+		locs, op, from, to, files := req.locs, req.op, req.from, req.to, req.files
 		go func() {
 			ctx := context.Background()
 			results := make([]managePlanCompute, len(locs))
@@ -1132,7 +1209,13 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					c := managePlanCompute{loc: loc}
 					switch op {
 					case manageOpMove:
-						plan, err := syncengine.PlanMove(ctx, loc, from, to)
+						var plan syncengine.MovePlan
+						var err error
+						if len(files) > 0 {
+							plan, err = syncengine.PlanMoveSelected(ctx, loc, from, to, files)
+						} else {
+							plan, err = syncengine.PlanMove(ctx, loc, from, to)
+						}
 						if err != nil {
 							c.err = err
 							break
@@ -1228,7 +1311,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 	}
 	buildPlans()
 
-	collisionsBtn.OnTapped = func() { showManageCollisionsDialog(s.win, plans, req.from, req.to) }
+	collisionsBtn.OnTapped = func() { showManageCollisionsDialog(s.win, plans, req.fromLabel(), req.to) }
 
 	foldFilesSplit := container.NewHSplit(
 		createColumn("Folders", foldList),
