@@ -493,6 +493,12 @@ func showManageFiles(s *state) {
 		columns,
 	)
 	s.setContent(container.NewPadded(content))
+	// Anchor each browser at its restored From/To path (e.g. coming Back
+	// from Preview or the Retime review) before the first listing, rather
+	// than at experiments/ with the entry still showing the old path. A
+	// path naming a file is re-anchored at its folder by the lister.
+	browserFrom.relPath = strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
+	browserTo.relPath = strings.Trim(strings.TrimSpace(toEntry.Text), "/")
 	// Show the previously-active browser (From, or a restored To) first,
 	// then point both browsers at the current selection and list it
 	// (restoring a persisted Location's picker/warning state -
