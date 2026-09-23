@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
@@ -452,12 +453,13 @@ func showManageFiles(s *state) {
 	// widget lives in exactly one form/container at a time.
 	fromForm := widget.NewForm(widget.NewFormItem("From", fromFocusEntry))
 	toForm := widget.NewForm(widget.NewFormItem("To", toFocusEntry))
-	// Each confirm field is wrapped in a confirmTint, turning its text blue
-	// once it's typed correctly - and red only when Preview is pressed with
+	// Each confirm field's prompt is a confirmTint, turning blue once the
+	// field is typed correctly - and red only when Preview is pressed with
 	// it still wrong, until it's next edited (see recheckDeleteTints and
-	// flagDeleteTints).
-	deleteConfirmTint := newConfirmTint(deleteConfirmEntry)
-	deleteForm := widget.NewForm(widget.NewFormItem("Confirm path", deleteConfirmTint.over))
+	// flagDeleteTints). A plain form-layout grid rather than widget.Form,
+	// whose own labels can't be recolored.
+	deleteConfirmTint := newConfirmTint("Confirm path")
+	deleteForm := container.New(layout.NewFormLayout(), deleteConfirmTint.label, deleteConfirmEntry)
 	// deleteFileEntries are the per-file confirm fields shown beneath
 	// "Confirm folder" once two or more files are checked for Delete - one
 	// per checked file, each to be filled with a checked file's name
@@ -535,7 +537,8 @@ func showManageFiles(s *state) {
 	refreshDeleteForm = func() {
 		n := len(checkedFiles())
 		if n == 0 {
-			deleteForm.Items = []*widget.FormItem{widget.NewFormItem("Confirm path", deleteConfirmTint.over)}
+			deleteConfirmTint.label.SetText("Confirm path")
+			deleteForm.Objects = []fyne.CanvasObject{deleteConfirmTint.label, deleteConfirmEntry}
 			deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
 			deleteForm.Refresh()
 			recheckDeleteTints()
@@ -567,15 +570,16 @@ func showManageFiles(s *state) {
 					recheckDeleteTints()
 				}
 				deleteFileEntries[i] = e
-				deleteFileTints[i] = newConfirmTint(e)
+				deleteFileTints[i] = newConfirmTint(fmt.Sprintf("File %d", i+1))
 			}
 		}
-		items := []*widget.FormItem{widget.NewFormItem("Confirm folder", deleteConfirmTint.over)}
+		deleteConfirmTint.label.SetText("Confirm folder")
+		objs := []fyne.CanvasObject{deleteConfirmTint.label, deleteConfirmEntry}
 		for i, t := range deleteFileTints {
-			items = append(items, widget.NewFormItem(fmt.Sprintf("File %d", i+1), t.over))
+			objs = append(objs, t.label, deleteFileEntries[i])
 		}
 		deleteConfirmEntry.SetPlaceHolder("type the folder's exact relative path")
-		deleteForm.Items = items
+		deleteForm.Objects = objs
 		deleteForm.Refresh()
 		recheckDeleteTints()
 	}
