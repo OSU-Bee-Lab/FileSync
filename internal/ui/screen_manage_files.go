@@ -325,7 +325,6 @@ func showManageFiles(s *state) {
 	toFocusEntry.SetPlaceHolder("experiments/<new name or destination folder>")
 	fromEntry = &fromFocusEntry.Entry
 	toEntry = &toFocusEntry.Entry
-	fromEntry.OnChanged = func(t string) { s.manageFilesFrom = t }
 	toEntry.OnChanged = func(t string) { s.manageFilesTo = t }
 	if s.manageFilesFrom != "" {
 		fromEntry.SetText(s.manageFilesFrom)
@@ -453,64 +452,39 @@ func showManageFiles(s *state) {
 	// widget lives in exactly one form/container at a time.
 	fromForm := widget.NewForm(widget.NewFormItem("From", fromFocusEntry))
 	toForm := widget.NewForm(widget.NewFormItem("To", toFocusEntry))
-	deleteForm := widget.NewForm(widget.NewFormItem("Confirm path", deleteConfirmEntry))
+	// Each confirm field is wrapped in a confirmTint, turning its text blue
+	// once it's typed correctly - and red only when Preview is pressed with
+	// it still wrong, until it's next edited (see recheckDeleteTints and
+	// flagDeleteTints).
+	deleteConfirmTint := newConfirmTint(deleteConfirmEntry)
+	deleteForm := widget.NewForm(widget.NewFormItem("Confirm path", deleteConfirmTint.over))
 	// deleteFileEntries are the per-file confirm fields shown beneath
 	// "Confirm folder" once two or more files are checked for Delete - one
 	// per checked file, each to be filled with a checked file's name
 	// (relative to the folder, in any order). Kept, typing and all, while
 	// the checked count doesn't change.
 	var deleteFileEntries []*widget.Entry
-	refreshDeleteForm = func() {
-		n := len(browserFrom.SelectedFiles())
-		if !browserFrom.checkFiles || n < 2 {
-			n = 0
+	var deleteFileTints []*confirmTint
+
+	// checkedFiles is the checked-files set an operation narrows to: two or
+	// more checked files, or nil (one checked file is just "From").
+	checkedFiles := func() []string {
+		if files := browserFrom.SelectedFiles(); browserFrom.checkFiles && len(files) > 1 {
+			return files
 		}
-		if n == 0 {
-			deleteForm.Items = []*widget.FormItem{widget.NewFormItem("Confirm path", deleteConfirmEntry)}
-			deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
-			deleteForm.Refresh()
-			return
-		}
-		if len(deleteFileEntries) != n {
-			saved := s.manageFilesDeleteConfirmFiles
-			if len(saved) != n {
-				saved = nil
-			}
-			deleteFileEntries = make([]*widget.Entry, n)
-			for i := range deleteFileEntries {
-				e := widget.NewEntry()
-				e.SetPlaceHolder("type a checked file's name")
-				if saved != nil {
-					e.SetText(saved[i])
-				}
-				e.OnChanged = func(string) {
-					typed := make([]string, len(deleteFileEntries))
-					for j, fe := range deleteFileEntries {
-						typed[j] = fe.Text
-					}
-					s.manageFilesDeleteConfirmFiles = typed
-				}
-				deleteFileEntries[i] = e
-			}
-		}
-		items := []*widget.FormItem{widget.NewFormItem("Confirm folder", deleteConfirmEntry)}
-		for i, e := range deleteFileEntries {
-			items = append(items, widget.NewFormItem(fmt.Sprintf("File %d", i+1), e))
-		}
-		deleteConfirmEntry.SetPlaceHolder("type the folder's exact relative path")
-		deleteForm.Items = items
-		deleteForm.Refresh()
+		return nil
 	}
-	// deleteConfirmed reports whether the confirm fields match what Delete
-	// is about to remove: the exact From path, or - with files checked - the
-	// folder's path plus every checked file's name, each typed once.
-	deleteConfirmed := func(from string, files []string) bool {
+	// deleteConfirmState checks the confirm fields against what Delete is
+	// about to remove: the exact From path, or - with files checked - the
+	// folder's path plus every checked file's name, each matched once in
+	// any order. It reports the path/folder field and each file field
+	// separately, for the live tints, and whether all of it is confirmed.
+	deleteConfirmState := func(from string, files []string) (pathOK bool, fileOK []bool, all bool) {
 		if len(files) == 0 {
-			return deleteConfirmEntry.Text == from
+			pathOK = deleteConfirmEntry.Text == from
+			return pathOK, nil, pathOK
 		}
-		if strings.Trim(strings.TrimSpace(deleteConfirmEntry.Text), "/") != from || len(deleteFileEntries) != len(files) {
-			return false
-		}
+		pathOK = strings.Trim(strings.TrimSpace(deleteConfirmEntry.Text), "/") == from
 		want := make(map[string]int, len(files))
 		for _, f := range files {
 			rel := f
@@ -519,14 +493,91 @@ func showManageFiles(s *state) {
 			}
 			want[rel]++
 		}
-		for _, e := range deleteFileEntries {
+		all = pathOK && len(deleteFileEntries) == len(files)
+		fileOK = make([]bool, len(deleteFileEntries))
+		for i, e := range deleteFileEntries {
 			name := strings.TrimSpace(e.Text)
-			if want[name] == 0 {
-				return false
+			if want[name] > 0 {
+				want[name]--
+				fileOK[i] = true
+			} else {
+				all = false
 			}
-			want[name]--
 		}
-		return true
+		return pathOK, fileOK, all
+	}
+	recheckDeleteTints := func() {
+		pathOK, fileOK, _ := deleteConfirmState(strings.Trim(strings.TrimSpace(fromEntry.Text), "/"), checkedFiles())
+		deleteConfirmTint.update(pathOK)
+		for i, t := range deleteFileTints {
+			t.update(i < len(fileOK) && fileOK[i])
+		}
+	}
+	// flagDeleteTints marks every confirm field that's still wrong red,
+	// in place of an error dialog, when Preview is pressed unconfirmed.
+	flagDeleteTints := func() {
+		deleteConfirmTint.flagged = true
+		for _, t := range deleteFileTints {
+			t.flagged = true
+		}
+		recheckDeleteTints()
+	}
+	deleteConfirmEntry.OnChanged = func(t string) {
+		s.manageFilesDeleteConfirm = t
+		deleteConfirmTint.flagged = false
+		recheckDeleteTints()
+	}
+	fromEntry.OnChanged = func(t string) {
+		s.manageFilesFrom = t
+		recheckDeleteTints()
+	}
+
+	refreshDeleteForm = func() {
+		n := len(checkedFiles())
+		if n == 0 {
+			deleteForm.Items = []*widget.FormItem{widget.NewFormItem("Confirm path", deleteConfirmTint.over)}
+			deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
+			deleteForm.Refresh()
+			recheckDeleteTints()
+			return
+		}
+		if len(deleteFileEntries) != n {
+			saved := s.manageFilesDeleteConfirmFiles
+			if len(saved) != n {
+				saved = nil
+			}
+			deleteFileEntries = make([]*widget.Entry, n)
+			deleteFileTints = make([]*confirmTint, n)
+			for i := range deleteFileEntries {
+				e := widget.NewEntry()
+				e.SetPlaceHolder("type a checked file's name")
+				if saved != nil {
+					e.SetText(saved[i])
+				}
+				i := i
+				e.OnChanged = func(string) {
+					if i < len(deleteFileTints) {
+						deleteFileTints[i].flagged = false
+					}
+					typed := make([]string, len(deleteFileEntries))
+					for j, fe := range deleteFileEntries {
+						typed[j] = fe.Text
+					}
+					s.manageFilesDeleteConfirmFiles = typed
+					recheckDeleteTints()
+				}
+				deleteFileEntries[i] = e
+				deleteFileTints[i] = newConfirmTint(e)
+			}
+		}
+		items := []*widget.FormItem{widget.NewFormItem("Confirm folder", deleteConfirmTint.over)}
+		for i, t := range deleteFileTints {
+			items = append(items, widget.NewFormItem(fmt.Sprintf("File %d", i+1), t.over))
+		}
+		deleteConfirmEntry.SetPlaceHolder("type the folder's exact relative path")
+		deleteForm.Items = items
+		deleteForm.Refresh()
+		recheckDeleteTints()
 	}
 	// walkCheck switches Retime from one review across everything under
 	// "From" to one review per deployment directory, stepped through with
@@ -588,21 +639,14 @@ func showManageFiles(s *state) {
 			return
 		}
 		from := strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
-		var files []string
-		if browserFrom.checkFiles && len(browserFrom.SelectedFiles()) > 1 {
-			files = browserFrom.SelectedFiles()
-		}
+		files := checkedFiles()
 		if from == "" && files == nil {
 			dialog.ShowInformation("Missing path", "Pick or type a \"From\" path first.", s.win)
 			return
 		}
 		op := opGroup.Selected
-		if op == "Delete" && !deleteConfirmed(from, files) {
-			if files != nil {
-				dialog.ShowInformation("Confirm the files", "Type the folder's exact relative path (\""+from+"\") into \"Confirm folder\", then each checked file's name into its own field, to preview the delete.", s.win)
-			} else {
-				dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
-			}
+		if _, _, confirmed := deleteConfirmState(from, files); op == "Delete" && !confirmed {
+			flagDeleteTints()
 			return
 		}
 		to := strings.Trim(strings.TrimSpace(toEntry.Text), "/")
@@ -631,7 +675,7 @@ func showManageFiles(s *state) {
 	})
 	previewBtn.Importance = widget.HighImportance
 
-	optionsCol := container.NewVBox(
+	optionsCol := container.NewVScroll(container.NewVBox(
 		widget.NewLabel("Locations to apply this operation to:"),
 		locGroup.CanvasObject(),
 		mirrorWarning,
@@ -643,7 +687,7 @@ func showManageFiles(s *state) {
 		toForm,
 		deleteForm,
 		walkCheck,
-	)
+	))
 
 	// browserSlot stacks both browsers; only the active target's is shown
 	// (see setPickerTarget).

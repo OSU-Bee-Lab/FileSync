@@ -4,7 +4,9 @@ import (
 	"image/color"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
 )
 
 // Button importance ladder
@@ -80,4 +82,88 @@ func lighten(c color.Color, amount float32) color.Color {
 		return uint8(f)
 	}
 	return color.NRGBA{R: blend(r), G: blend(g), B: blend(b), A: uint8(a >> 8)}
+}
+
+// confirmTint wraps a confirm-field Entry so its text can show whether
+// what's typed is right (see Manage Files' delete confirmation): the
+// primary blue once it's correct, the normal color while it isn't, and red
+// only once a submit (Preview) has flagged it - never while still typing.
+// Blue rather than green for correct, so the two don't hinge on red/green
+// perception, and to match the app's blue affirmative buttons.
+type confirmTint struct {
+	over    *container.ThemeOverride
+	state   confirmTintState
+	flagged bool
+}
+
+type confirmTintState int
+
+const (
+	confirmTintNormal confirmTintState = iota
+	confirmTintCorrect
+	confirmTintWrong
+)
+
+func newConfirmTint(e *widget.Entry) *confirmTint {
+	return &confirmTint{over: container.NewThemeOverride(e, appTheme())}
+}
+
+// update recolors the field for its current correctness: blue when
+// correct (which also clears any flag), red when wrong and flagged by a
+// submit, otherwise normal.
+func (c *confirmTint) update(correct bool) {
+	if correct {
+		c.flagged = false
+	}
+	switch {
+	case correct:
+		c.apply(confirmTintCorrect)
+	case c.flagged:
+		c.apply(confirmTintWrong)
+	default:
+		c.apply(confirmTintNormal)
+	}
+}
+
+// apply switches the text color, refreshing only on an actual change.
+func (c *confirmTint) apply(state confirmTintState) {
+	if state == c.state {
+		return
+	}
+	c.state = state
+	switch state {
+	case confirmTintCorrect:
+		c.over.Theme = textColorTheme{Theme: appTheme(), color: theme.ColorNamePrimary}
+	case confirmTintWrong:
+		// Placeholder too, so a flagged field left empty still shows red.
+		c.over.Theme = textColorTheme{Theme: appTheme(), color: theme.ColorNameError, placeholder: true}
+	default:
+		c.over.Theme = appTheme()
+	}
+	c.over.Refresh()
+}
+
+// appTheme is the running app's theme (lightenedTheme), or Fyne's default
+// where there's no app (tests).
+func appTheme() fyne.Theme {
+	if a := fyne.CurrentApp(); a != nil && a.Settings().Theme() != nil {
+		return a.Settings().Theme()
+	}
+	return theme.DefaultTheme()
+}
+
+// textColorTheme draws foreground text (and, with placeholder, an entry's
+// placeholder text) in another of the theme's own colors (e.g. primary or
+// error), leaving everything else as is.
+type textColorTheme struct {
+	fyne.Theme
+	color       fyne.ThemeColorName
+	placeholder bool
+}
+
+func (t textColorTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	if name == theme.ColorNameForeground || (t.placeholder && name == theme.ColorNamePlaceHolder) {
+		name = t.color
+	}
+	return t.Theme.Color(name, variant)
 }
