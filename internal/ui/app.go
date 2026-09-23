@@ -92,6 +92,9 @@ type state struct {
 	// manageFilesFromFiles caches the files checked in the "From" browser
 	// under Rename/Move/Merge (full relative paths), the same way.
 	manageFilesFromFiles []string
+	// manageFilesDeleteConfirmFiles caches the per-file delete confirm
+	// fields shown when several files are checked for Delete.
+	manageFilesDeleteConfirmFiles []string
 	// manageFilesRetimeWalk caches Retime's "Walk deployments one at a
 	// time" checkbox the same way.
 	manageFilesRetimeWalk bool

@@ -549,3 +549,42 @@ func ApplyDelete(ctx context.Context, loc Location, relPath string) error {
 	}
 	return nil
 }
+
+// PlanDeleteFiles is PlanDelete for several individual files at once -
+// Manage Files' checked-files delete. A file missing at this Location is
+// skipped rather than failing the plan, the same per-Location tolerance a
+// move has; each path must name a file (never a directory), matching
+// ApplyDeleteFiles.
+func PlanDeleteFiles(ctx context.Context, loc Location, files []string) (DeletePlan, error) {
+	var plan DeletePlan
+	for _, f := range files {
+		relPath, _ := resolveResultsLeaf(ctx, loc, f)
+		if size, ok := singleFileSize(ctx, loc, relPath); ok {
+			plan.Entries = append(plan.Entries, ManageEntry{RelPath: relPath, Size: size})
+		}
+	}
+	return plan, nil
+}
+
+// ApplyDeleteFiles permanently deletes each of files at loc - the checked-
+// files counterpart of ApplyDelete, under the same CLAUDE.md exception and
+// gating (here: typing the shared folder's path plus every file's name).
+// Unlike ApplyDelete it only ever deletes single files: a path that isn't
+// a file at loc is skipped, never treated as a directory to purge.
+func ApplyDeleteFiles(ctx context.Context, loc Location, files []string) error {
+	f, err := cache.Get(ctx, loc.rcloneSpec())
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		relPath, _ := resolveResultsLeaf(ctx, loc, file)
+		obj, err := f.NewObject(ctx, relPath)
+		if err != nil {
+			continue
+		}
+		if err := operations.DeleteFile(ctx, obj); err != nil {
+			return fmt.Errorf("deleting %s at %s: %w", relPath, loc.Name, err)
+		}
+	}
+	return nil
+}

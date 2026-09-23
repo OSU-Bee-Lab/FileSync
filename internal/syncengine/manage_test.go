@@ -441,3 +441,34 @@ func TestPlanMoveSelected_MovesOnlyCheckedFilesKeepingNames(t *testing.T) {
 		t.Errorf("exp/8/a.mp3 should have moved, stat err=%v", err)
 	}
 }
+
+// A checked-files delete removes exactly the named files, skips one that
+// isn't there, and never purges a directory named in the list.
+func TestApplyDeleteFiles_DeletesOnlyNamedFiles(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/8/a.mp3"), "a")
+	writeFile(t, filepath.Join(root, "exp/8/b.mp3"), "b")
+	writeFile(t, filepath.Join(root, "exp/8/sub/c.mp3"), "c")
+
+	ctx := context.Background()
+	files := []string{"exp/8/a.mp3", "exp/8/missing.mp3", "exp/8/sub"}
+	plan, err := PlanDeleteFiles(ctx, loc, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Entries) != 1 || plan.Entries[0].RelPath != "exp/8/a.mp3" {
+		t.Fatalf("plan = %+v, want just exp/8/a.mp3", plan.Entries)
+	}
+	if err := ApplyDeleteFiles(ctx, loc, files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "exp/8/a.mp3")); !os.IsNotExist(err) {
+		t.Errorf("a.mp3 should be deleted, stat err=%v", err)
+	}
+	for _, p := range []string{"exp/8/b.mp3", "exp/8/sub/c.mp3"} {
+		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+			t.Errorf("%s should survive: %v", p, err)
+		}
+	}
+}

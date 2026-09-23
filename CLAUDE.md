@@ -100,6 +100,7 @@ option to scan experiments).
   including permanent deletion. It is user-driven, not automatic —
   reachable only from the main menu, only after the user browses to or
   types the exact path, previews the final state, resolves any collisions,
-  and (for delete) types the exact relative path plus confirms an
-  irreversible-action prompt. Like N-way conflict deletion, it must never
+  and (for delete) types the exact relative path — or, with several files
+  checked, the shared folder's exact path and then every checked file's
+  name — plus confirms an irreversible-action prompt. Like N-way conflict deletion, it must never
   trigger automatically or as a side effect of a scan/sync operation.

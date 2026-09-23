@@ -337,12 +337,16 @@ func showManageFiles(s *state) {
 	// Each browser mirrors its chosen path (a browsed folder, or a tapped
 	// file) into its own From/To field; "From" also re-validates on change.
 	//
-	// Under Rename/Move/Merge, "From" file rows carry checkboxes instead
-	// (see setFromChecks), and how many are checked decides what "From" is:
-	// none - the browsed folder, as without checkboxes; one - that file,
-	// still editable, so it can be renamed outright; several - their shared
-	// folder, locked, with the move narrowed to just the checked files
-	// (syncengine.PlanMoveSelected), each keeping its name beneath "To".
+	// Under Rename/Move/Merge and Delete, "From" file rows carry checkboxes
+	// instead (see setFromChecks), and how many are checked decides what
+	// "From" is: none - the browsed folder, as without checkboxes; one -
+	// that file, still editable, so it can be renamed outright; several -
+	// their shared folder, locked, with the operation narrowed to just the
+	// checked files (syncengine.PlanMoveSelected / PlanDeleteFiles). A move
+	// keeps each file's name beneath "To"; a delete must be confirmed by
+	// typing the folder's path and then every file's name (see
+	// refreshDeleteForm).
+	var refreshDeleteForm func()
 	fromSelNote := widget.NewLabel("")
 	fromSelNote.Wrapping = fyne.TextWrapWord
 	fromSelNote.Hide()
@@ -363,13 +367,18 @@ func showManageFiles(s *state) {
 		default:
 			fromEntry.SetText(syncengine.CommonDir(files))
 			fromEntry.Disable()
-			fromSelNote.SetText(fmt.Sprintf("%s checked - each moves into \"To\" under its own name. Uncheck down to one to rename a single file.", plural(len(files), "file", "")))
+			if opGroup.Selected == "Delete" {
+				fromSelNote.SetText(fmt.Sprintf("%s checked - to confirm, type this folder's path, then each file's name.", plural(len(files), "file", "")))
+			} else {
+				fromSelNote.SetText(fmt.Sprintf("%s checked - each moves into \"To\" under its own name. Uncheck down to one to rename a single file.", plural(len(files), "file", "")))
+			}
 			fromSelNote.Show()
 		}
+		refreshDeleteForm()
 		validateFromPath()
 	}
 	// setFromChecks turns the "From" browser's file checkboxes on (Rename/
-	// Move/Merge) or off (Delete, Retime - both act on exactly one path),
+	// Move/Merge, Delete) or off (Retime, which reviews exactly one path),
 	// dropping any checked files either way.
 	setFromChecks := func(on bool) {
 		if browserFrom.checkFiles == on {
@@ -381,6 +390,7 @@ func showManageFiles(s *state) {
 		browserFrom.selectedFile = "" // a single-select pick from the other mode
 		browserFrom.ClearSelectedFiles()
 		s.manageFilesFromFiles = nil
+		s.manageFilesDeleteConfirmFiles = nil
 		fromEntry.Enable()
 		fromSelNote.Hide()
 	}
@@ -444,6 +454,80 @@ func showManageFiles(s *state) {
 	fromForm := widget.NewForm(widget.NewFormItem("From", fromFocusEntry))
 	toForm := widget.NewForm(widget.NewFormItem("To", toFocusEntry))
 	deleteForm := widget.NewForm(widget.NewFormItem("Confirm path", deleteConfirmEntry))
+	// deleteFileEntries are the per-file confirm fields shown beneath
+	// "Confirm folder" once two or more files are checked for Delete - one
+	// per checked file, each to be filled with a checked file's name
+	// (relative to the folder, in any order). Kept, typing and all, while
+	// the checked count doesn't change.
+	var deleteFileEntries []*widget.Entry
+	refreshDeleteForm = func() {
+		n := len(browserFrom.SelectedFiles())
+		if !browserFrom.checkFiles || n < 2 {
+			n = 0
+		}
+		if n == 0 {
+			deleteForm.Items = []*widget.FormItem{widget.NewFormItem("Confirm path", deleteConfirmEntry)}
+			deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
+			deleteForm.Refresh()
+			return
+		}
+		if len(deleteFileEntries) != n {
+			saved := s.manageFilesDeleteConfirmFiles
+			if len(saved) != n {
+				saved = nil
+			}
+			deleteFileEntries = make([]*widget.Entry, n)
+			for i := range deleteFileEntries {
+				e := widget.NewEntry()
+				e.SetPlaceHolder("type a checked file's name")
+				if saved != nil {
+					e.SetText(saved[i])
+				}
+				e.OnChanged = func(string) {
+					typed := make([]string, len(deleteFileEntries))
+					for j, fe := range deleteFileEntries {
+						typed[j] = fe.Text
+					}
+					s.manageFilesDeleteConfirmFiles = typed
+				}
+				deleteFileEntries[i] = e
+			}
+		}
+		items := []*widget.FormItem{widget.NewFormItem("Confirm folder", deleteConfirmEntry)}
+		for i, e := range deleteFileEntries {
+			items = append(items, widget.NewFormItem(fmt.Sprintf("File %d", i+1), e))
+		}
+		deleteConfirmEntry.SetPlaceHolder("type the folder's exact relative path")
+		deleteForm.Items = items
+		deleteForm.Refresh()
+	}
+	// deleteConfirmed reports whether the confirm fields match what Delete
+	// is about to remove: the exact From path, or - with files checked - the
+	// folder's path plus every checked file's name, each typed once.
+	deleteConfirmed := func(from string, files []string) bool {
+		if len(files) == 0 {
+			return deleteConfirmEntry.Text == from
+		}
+		if strings.Trim(strings.TrimSpace(deleteConfirmEntry.Text), "/") != from || len(deleteFileEntries) != len(files) {
+			return false
+		}
+		want := make(map[string]int, len(files))
+		for _, f := range files {
+			rel := f
+			if from != "" {
+				rel = strings.TrimPrefix(f, from+"/")
+			}
+			want[rel]++
+		}
+		for _, e := range deleteFileEntries {
+			name := strings.TrimSpace(e.Text)
+			if want[name] == 0 {
+				return false
+			}
+			want[name]--
+		}
+		return true
+	}
 	// walkCheck switches Retime from one review across everything under
 	// "From" to one review per deployment directory, stepped through with
 	// Previous/Next (see runManageFilesRetimeWalk).
@@ -455,7 +539,14 @@ func showManageFiles(s *state) {
 
 	opGroup.OnChanged = func(v string) {
 		s.manageFilesOp = v
-		setFromChecks(v == "Rename / Move / Merge")
+		setFromChecks(v == "Rename / Move / Merge" || v == "Delete")
+		if len(browserFrom.SelectedFiles()) > 0 {
+			// Still checked from the other checkbox op - re-derive the note
+			// and confirm fields for this one.
+			browserFrom.OnPathChanged(browserFrom.RelPath())
+		} else {
+			refreshDeleteForm()
+		}
 		toForm.Hide()
 		deleteForm.Hide()
 		walkCheck.Hide()
@@ -506,8 +597,12 @@ func showManageFiles(s *state) {
 			return
 		}
 		op := opGroup.Selected
-		if op == "Delete" && deleteConfirmEntry.Text != from {
-			dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
+		if op == "Delete" && !deleteConfirmed(from, files) {
+			if files != nil {
+				dialog.ShowInformation("Confirm the files", "Type the folder's exact relative path (\""+from+"\") into \"Confirm folder\", then each checked file's name into its own field, to preview the delete.", s.win)
+			} else {
+				dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
+			}
 			return
 		}
 		to := strings.Trim(strings.TrimSpace(toEntry.Text), "/")
@@ -528,7 +623,7 @@ func showManageFiles(s *state) {
 					runManageFilesRetime(s, locs, from)
 				}
 			case "Delete":
-				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from})
+				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from, files: files})
 			default:
 				showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to, files: files})
 			}
@@ -1074,8 +1169,8 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 	applyingTitle := "Applying: " + req.fromLabel() + " → " + req.to
 	verb := "moved"
 	if req.op == manageOpDelete {
-		previewTitle = "Preview: DELETE " + req.from
-		applyingTitle = "Applying: DELETE " + req.from
+		previewTitle = "Preview: DELETE " + req.fromLabel()
+		applyingTitle = "Applying: DELETE " + req.fromLabel()
 		verb = "permanently deleted"
 	}
 	titleLabel := widget.NewLabelWithStyle(previewTitle, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -1222,7 +1317,13 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 						}
 						c.move = &plan
 					case manageOpDelete:
-						plan, err := syncengine.PlanDelete(ctx, loc, from)
+						var plan syncengine.DeletePlan
+						var err error
+						if len(files) > 0 {
+							plan, err = syncengine.PlanDeleteFiles(ctx, loc, files)
+						} else {
+							plan, err = syncengine.PlanDelete(ctx, loc, from)
+						}
 						if err != nil {
 							c.err = err
 							break
@@ -1385,7 +1486,11 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 						case manageOpMove:
 							err = syncengine.ApplyMove(ctx, t.loc, *t.move, t.resolutions)
 						case manageOpDelete:
-							err = syncengine.ApplyDelete(ctx, t.loc, req.from)
+							if len(req.files) > 0 {
+								err = syncengine.ApplyDeleteFiles(ctx, t.loc, req.files)
+							} else {
+								err = syncengine.ApplyDelete(ctx, t.loc, req.from)
+							}
 						}
 						if err != nil {
 							errs[i] = t.loc.Name + ": " + err.Error()
