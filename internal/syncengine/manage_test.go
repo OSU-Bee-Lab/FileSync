@@ -344,3 +344,32 @@ func TestApplyRenames_ResultsRole_CascadesRetimeStyleRename(t *testing.T) {
 		t.Errorf("renamed csv missing or wrong content: %q, err=%v", data, err)
 	}
 }
+
+func TestApplyMove_DirectoryIntoOwnSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/metadata.csv"), "meta")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/r1/260720_0751.mp3"), "audio")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/griffith/already.mp3"), "there")
+
+	plan, err := PlanMove(context.Background(), loc, "exp/2026-07-20", "exp/2026-07-20/griffith")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 2 {
+		t.Fatalf("got %d planned moves, want 2 (destination's own files excluded): %+v", len(plan.Moves), plan.Moves)
+	}
+	if err := ApplyMove(context.Background(), loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"metadata.csv", "r1/260720_0751.mp3", "already.mp3"} {
+		if _, err := os.Stat(filepath.Join(root, "exp/2026-07-20/griffith", p)); err != nil {
+			t.Errorf("expected griffith/%s: %v", p, err)
+		}
+	}
+	for _, p := range []string{"metadata.csv", "r1"} {
+		if _, err := os.Stat(filepath.Join(root, "exp/2026-07-20", p)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be gone from the source, stat err = %v", p, err)
+		}
+	}
+}

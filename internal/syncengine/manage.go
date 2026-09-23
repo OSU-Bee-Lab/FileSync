@@ -221,6 +221,13 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 	}
 
 	plan := MovePlan{SrcRoot: srcRelPath, DstRoot: effectiveDst}
+	// Moving a directory into one of its own subdirectories ("2026-07-20"
+	// -> "2026-07-20/griffith") can't be a single directory rename - no
+	// backend can move a folder inside itself (SharePoint/OneDrive answers
+	// invalidRequest) - so it's applied per file instead, and anything
+	// already under the destination stays out of the plan rather than
+	// being nested one level deeper into itself.
+	intoSelf := !srcIsFile && isUnder(effectiveDst, srcRelPath)
 	if srcIsFile {
 		plan.DstRoot = ""
 		// Cleanup only ever Rmdirs a directory - SrcRoot must be the file's
@@ -231,6 +238,9 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 		}
 	}
 	for _, e := range entries {
+		if intoSelf && isUnder(e.RelPath, effectiveDst) {
+			continue
+		}
 		suffix := strings.TrimPrefix(strings.TrimPrefix(e.RelPath, srcRelPath), "/")
 		dst := path.Join(effectiveDst, suffix)
 		plan.Moves = append(plan.Moves, PlannedMove{SrcRelPath: e.RelPath, DstRelPath: dst, Size: e.Size})
@@ -278,7 +288,7 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	if err != nil {
 		return err
 	}
-	if plan.SrcRoot != "" && plan.DstRoot != "" && len(plan.Collisions) == 0 {
+	if plan.SrcRoot != "" && plan.DstRoot != "" && len(plan.Collisions) == 0 && !isUnder(plan.DstRoot, plan.SrcRoot) {
 		return moveWholeDir(ctx, f, loc, plan.SrcRoot, plan.DstRoot)
 	}
 	collides := make(map[string]bool, len(plan.Collisions))
@@ -332,6 +342,15 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 		}
 	}
 	return nil
+}
+
+// isUnder reports whether p is a strict descendant of dir (both relative
+// paths within one Location).
+func isUnder(p, dir string) bool {
+	if dir == "" {
+		return p != ""
+	}
+	return strings.HasPrefix(p, dir+"/")
 }
 
 // moveWholeDir renames srcRoot to dstRoot at f in one operation.
