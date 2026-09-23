@@ -373,3 +373,31 @@ func TestApplyMove_DirectoryIntoOwnSubdirectory(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyMove_DirectoryIntoNewOwnSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/metadata.csv"), "meta")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/r1/260720_0751.mp3"), "audio")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/r2/sub/260720_0800.mp3"), "audio2")
+
+	plan, err := PlanMove(context.Background(), loc, "exp/2026-07-20", "exp/2026-07-20/griffith")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyMove(context.Background(), loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"metadata.csv", "r1/260720_0751.mp3", "r2/sub/260720_0800.mp3"} {
+		if _, err := os.Stat(filepath.Join(root, "exp/2026-07-20/griffith", p)); err != nil {
+			t.Errorf("expected griffith/%s: %v", p, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "exp/2026-07-20"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "griffith" {
+		t.Errorf("expected only griffith left in the source, got %v", entries)
+	}
+}

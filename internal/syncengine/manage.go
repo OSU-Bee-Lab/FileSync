@@ -156,6 +156,10 @@ type MovePlan struct {
 	// to rclone as one directory rename instead of a move per file - see the
 	// fast path there.
 	DstRoot string
+	// dstHadEntries records that DstRoot already held files when planned,
+	// which rules out renaming SrcRoot's children into it wholesale (a
+	// directory rename can't merge into an existing directory).
+	dstHadEntries bool
 }
 
 // PlanMove lists everything under srcRelPath and computes each file's new
@@ -220,7 +224,7 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 		effectiveDst = path.Join(dstRelPath, path.Base(srcRelPath))
 	}
 
-	plan := MovePlan{SrcRoot: srcRelPath, DstRoot: effectiveDst}
+	plan := MovePlan{SrcRoot: srcRelPath, DstRoot: effectiveDst, dstHadEntries: len(dstEntries) > 0}
 	// Moving a directory into one of its own subdirectories ("2026-07-20"
 	// -> "2026-07-20/griffith") can't be a single directory rename - no
 	// backend can move a folder inside itself (SharePoint/OneDrive answers
@@ -291,6 +295,9 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	if plan.SrcRoot != "" && plan.DstRoot != "" && len(plan.Collisions) == 0 && !isUnder(plan.DstRoot, plan.SrcRoot) {
 		return moveWholeDir(ctx, f, loc, plan.SrcRoot, plan.DstRoot)
 	}
+	if plan.SrcRoot != "" && path.Dir(plan.DstRoot) == plan.SrcRoot && len(plan.Collisions) == 0 && !plan.dstHadEntries {
+		return moveChildrenIntoSubdir(ctx, f, loc, plan.SrcRoot, plan.DstRoot)
+	}
 	collides := make(map[string]bool, len(plan.Collisions))
 	for _, c := range plan.Collisions {
 		collides[c] = true
@@ -339,6 +346,40 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	if plan.SrcRoot != "" {
 		if err := operations.Rmdirs(ctx, f, plan.SrcRoot, false); err != nil {
 			return fmt.Errorf("cleaning up empty directories under %s at %s: %w", plan.SrcRoot, loc.Name, err)
+		}
+	}
+	return nil
+}
+
+// moveChildrenIntoSubdir moves everything directly inside srcRoot into
+// dstRoot, a new (or empty) immediate subdirectory of srcRoot - the
+// "2026-07-20" -> "2026-07-20/griffith" case, which can't be a single
+// directory rename. Renaming each immediate child (a recorder directory via
+// moveWholeDir, a loose file via MoveFile) keeps it to one server-side call
+// per child rather than one per file, which on SharePoint/OneDrive is the
+// difference between a handful of API calls and hundreds.
+func moveChildrenIntoSubdir(ctx context.Context, f fs.Fs, loc Location, srcRoot, dstRoot string) error {
+	children, err := f.List(ctx, srcRoot)
+	if err != nil {
+		return fmt.Errorf("listing %s at %s: %w", srcRoot, loc.Name, err)
+	}
+	if err := operations.Mkdir(ctx, f, dstRoot); err != nil {
+		return fmt.Errorf("creating %s at %s: %w", dstRoot, loc.Name, err)
+	}
+	for _, c := range children {
+		if c.Remote() == dstRoot {
+			continue
+		}
+		dst := path.Join(dstRoot, path.Base(c.Remote()))
+		switch c := c.(type) {
+		case fs.Directory:
+			if err := moveWholeDir(ctx, f, loc, c.Remote(), dst); err != nil {
+				return err
+			}
+		case fs.Object:
+			if _, err := operations.Move(ctx, f, nil, dst, c); err != nil {
+				return fmt.Errorf("moving %s to %s at %s: %w", c.Remote(), dst, loc.Name, err)
+			}
 		}
 	}
 	return nil
