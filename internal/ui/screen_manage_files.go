@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/cache"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -206,12 +207,26 @@ func showManageFiles(s *state) {
 						}
 						return
 					}
-					if notFound || isFile {
+					if isFile {
+						// relPath names a bare file (which has no children) -
+						// show its containing folder instead of a blank
+						// listing at the file's own path, with the file
+						// auto-selected once that folder's listing lands.
+						if gen != b.scanGen {
+							return
+						}
+						dir := path.Dir(relPath)
+						if dir == "." {
+							dir = ""
+						}
+						b.SelectPathAsFile(dir, path.Base(relPath))
+						return
+					}
+					if notFound {
 						// A folder that doesn't exist on any selected Location
-						// yet (naming a new "To" destination) or that names a
-						// bare file (which has no children) is expected, not
-						// an error - show it empty.
-						if b.listingDone(gen, nil, nil, nil) && b.allowCreate && notFound {
+						// yet is expected, not an error (e.g. naming a new
+						// "To" destination) - show it empty.
+						if b.listingDone(gen, nil, nil, nil) && b.allowCreate {
 							b.setBreadcrumbNote(" (new folder)")
 						}
 						return
@@ -282,6 +297,12 @@ func showManageFiles(s *state) {
 	// current text so typing and browsing stay in sync.
 	var setPickerTarget func(target string)
 	setPickerTarget = func(target string) {
+		// Re-listing (NavigateTo -> reload) stops any audio preview
+		// playing in the browser, so only do it when the target is
+		// actually switching From<->To - not just re-focusing the field
+		// that's already active, which would otherwise cut off playback
+		// every time the user clicks back into the "From" box.
+		switching := target != pickerTarget
 		pickerTarget = target
 		s.manageFilesPickerTarget = target
 		pickerHeaderLabel.SetText(target)
@@ -292,7 +313,9 @@ func showManageFiles(s *state) {
 			browserTo.CanvasObject().Hide()
 			browserFrom.CanvasObject().Show()
 		}
-		activeBrowser().NavigateTo(strings.Trim(strings.TrimSpace(targetEntry().Text), "/"))
+		if switching {
+			activeBrowser().NavigateTo(strings.Trim(strings.TrimSpace(targetEntry().Text), "/"))
+		}
 	}
 
 	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") }, func() { validateFromPath() })
@@ -385,6 +408,14 @@ func showManageFiles(s *state) {
 			toForm.Show()
 		case "Delete":
 			deleteForm.Show()
+		}
+		// Delete and Retime only ever populate "From" - if the picker was
+		// last left on "To" (e.g. coming from Rename/Move), the visible
+		// browser pane would otherwise keep driving the now-hidden "To"
+		// field while browsing looks like it's doing nothing to the one
+		// field on screen.
+		if v != "Rename / Move / Merge" && pickerTarget == "To" {
+			setPickerTarget("From")
 		}
 	}
 	initialOp := s.manageFilesOp
@@ -596,6 +627,10 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 						firstErr = err
 					}
 				}
+				// See the cache.Clear() note beside Manage Files' own
+				// ApplyMove/ApplyDelete call - these renames can equally
+				// leave a stale cached Fs behind.
+				cache.Clear()
 				return firstErr
 			},
 		})
@@ -1182,6 +1217,16 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					}()
 				}
 				wg.Wait()
+				// rclone's fs cache pins an fs.Fs per spec string across
+				// this browser's whole session (see internal/syncengine's
+				// cache.Get call sites); a rename/move/delete just applied
+				// here can turn a cached directory Fs stale (rooted at a
+				// path that's now a file, or gone), which otherwise
+				// surfaces as a raw readdir error ("not a directory")
+				// instead of Manage Files' own not-found/is-a-file
+				// handling next time that path is browsed. Clearing after
+				// every apply keeps that from lingering.
+				cache.Clear()
 				var failed []string
 				for _, e := range errs {
 					if e != "" {

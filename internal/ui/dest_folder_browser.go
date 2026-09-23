@@ -84,6 +84,11 @@ type destFolderBrowser struct {
 	// when multiSelect is off.
 	selectedFile string
 
+	// pendingSelectFile names a file to auto-select once the in-flight
+	// listing (started by SelectPathAsFile, re-anchored at that file's
+	// containing folder) lands - see SelectPathAsFile.
+	pendingSelectFile string
+
 	// multiSelect switches selectFile from replacing selectedFile to
 	// toggling membership in selectedFiles, letting a caller (Pull Files)
 	// gather files from more than one folder into one destination
@@ -279,6 +284,23 @@ func (b *destFolderBrowser) NavigateTo(relPath string) {
 	b.closeAddFolder()
 	b.reload()
 	b.notifyPathChanged()
+}
+
+// SelectPathAsFile re-anchors the browser at dirPath (the containing
+// folder) and, once that folder's listing lands, auto-selects name within
+// it - used when a typed/navigated path names a file rather than a folder
+// (e.g. Manage Files' "From" naming an individual file to move/delete), so
+// the preview shows that file highlighted in its folder instead of a blank
+// listing at the file's own (childless) path.
+func (b *destFolderBrowser) SelectPathAsFile(dirPath, name string) {
+	b.relPath = strings.Trim(strings.TrimSpace(dirPath), "/")
+	b.closeAddFolder()
+	b.pendingSelectFile = name
+	b.reload()
+	// notifyPathChanged fires once the pending selection lands (from
+	// listingDone) rather than here - RelPath() needs selectedFile set
+	// first, or the caller's From/To field would be overwritten with just
+	// dirPath, dropping the file name the user typed.
 }
 
 // selectFile is a file row's tap handler when selectFiles is on. In
@@ -569,6 +591,20 @@ func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pre
 	b.entries = entries
 	b.presence = pres
 	b.loaded = loaded
+	if b.pendingSelectFile != "" {
+		want := b.pendingSelectFile
+		b.pendingSelectFile = ""
+		for _, e := range entries {
+			if !e.IsDir && e.Name == want {
+				b.selectedFile = want
+				break
+			}
+		}
+		b.list.Refresh()
+		b.loading.Hide()
+		b.notifyPathChanged()
+		return true
+	}
 	b.list.Refresh()
 	b.loading.Hide()
 	return true
