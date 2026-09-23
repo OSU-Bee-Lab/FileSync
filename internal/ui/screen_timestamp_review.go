@@ -511,9 +511,12 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	// exitBtn leaves without applying any of the corrections being reviewed
 	// here, same as bypassing the check entirely - it deliberately calls
 	// host.onExit directly, not applyAndContinue or host.onContinue, neither
-	// of which it wants to run. Warns first, since it's easy to tap without
-	// registering that anything typed into the review is about to be
-	// discarded.
+	// of which it wants to run. It only warns (and only carries the
+	// "Without Applying" wording) when there's actually something at stake -
+	// a recorder still flagged as off, or a fix the user readied (checked
+	// "New start time" on) but hasn't applied yet. A clean review with
+	// nothing touched has nothing to discard, so it's plain "Back" with no
+	// confirm - see refreshExitBtn.
 	//
 	// Amber, not red: both buttons on this screen land in the same place
 	// (Sync Recorders ends the session either way, Manage Files returns to
@@ -523,16 +526,21 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	// deletes anything - so the labels carry the distinction (the host
 	// supplies both, and must phrase them as the same destination with and
 	// without the corrections) and the color just marks discarded work.
-	exitBtn := widget.NewButton(host.exitLabel, func() {
+	exitBtn := widget.NewButton(host.exitLabel, nil)
+	exitBtn.Importance = widget.WarningImportance
+	tr.exitBtn = exitBtn
+	exitBtn.OnTapped = func() {
+		if !tr.hasPendingChanges() {
+			host.onExit()
+			return
+		}
 		showCautionConfirm("Corrections not applied", host.exitWarning,
 			host.exitLabel, "Return to Review", func(ok bool) {
 				if ok {
 					host.onExit()
 				}
 			}, host.win)
-	})
-	exitBtn.Importance = widget.WarningImportance
-	tr.exitBtn = exitBtn
+	}
 
 	tr.applyLoading = newLoadingBar()
 
@@ -663,6 +671,7 @@ func (tr *timestampReviewScreen) refreshCard(i int) {
 	tr.cards[i].FillColor = timestampCardColorFor(check, e.adjust)
 	tr.cards[i].Refresh()
 	tr.cardLabels[i].SetText(timestampIssueDetail(check, tr.tolerance))
+	tr.refreshExitBtn()
 }
 
 // refreshSummary restates how many recorders currently look off. An all-clear
@@ -670,6 +679,7 @@ func (tr *timestampReviewScreen) refreshCard(i int) {
 // "nothing to do" rather than an unexplained list); otherwise it names the
 // count that need a look.
 func (tr *timestampReviewScreen) refreshSummary() {
+	tr.refreshExitBtn()
 	if tr.summaryLbl == nil {
 		return
 	}
@@ -689,6 +699,35 @@ func (tr *timestampReviewScreen) refreshSummary() {
 		verb = "looks"
 	}
 	tr.summaryLbl.SetText(fmt.Sprintf("%d of %d %s %s off (highlighted) — review each and set a new start time where needed.", flagged, total, pluralWord(total, "recorder", ""), verb))
+}
+
+// hasPendingChanges reports whether exiting now would discard anything: a
+// recorder still flagged as off at the live tolerance, or one whose "New
+// start time" is checked (a fix readied) whether or not it currently
+// resolves the flag - both are work the user would lose by leaving without
+// applying.
+func (tr *timestampReviewScreen) hasPendingChanges() bool {
+	for _, e := range tr.entries {
+		if e.adjust || tr.effectiveCheck(e).Suspicious {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshExitBtn keeps the exit button's wording matched to
+// hasPendingChanges: "Back" when there's nothing to lose, host.exitLabel
+// ("Back Without Applying") once there is - called everywhere an edit,
+// checkbox, or the tolerance slider could change that verdict.
+func (tr *timestampReviewScreen) refreshExitBtn() {
+	if tr.exitBtn == nil {
+		return
+	}
+	if tr.hasPendingChanges() {
+		tr.exitBtn.SetText(tr.host.exitLabel)
+	} else {
+		tr.exitBtn.SetText("Back")
+	}
 }
 
 // refreshContinueLabel switches the continue button between
