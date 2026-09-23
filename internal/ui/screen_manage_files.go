@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -396,18 +397,27 @@ func showManageFiles(s *state) {
 	fromForm := widget.NewForm(widget.NewFormItem("From", fromFocusEntry))
 	toForm := widget.NewForm(widget.NewFormItem("To", toFocusEntry))
 	deleteForm := widget.NewForm(widget.NewFormItem("Confirm path", deleteConfirmEntry))
+	// walkCheck switches Retime from one review across everything under
+	// "From" to one review per deployment directory, stepped through with
+	// Previous/Next (see runManageFilesRetimeWalk).
+	walkCheck := widget.NewCheck("Walk deployments one at a time", func(on bool) { s.manageFilesRetimeWalk = on })
+	walkCheck.SetChecked(s.manageFilesRetimeWalk)
 	toForm.Hide()
 	deleteForm.Hide()
+	walkCheck.Hide()
 
 	opGroup.OnChanged = func(v string) {
 		s.manageFilesOp = v
 		toForm.Hide()
 		deleteForm.Hide()
+		walkCheck.Hide()
 		switch v {
 		case "Rename / Move / Merge":
 			toForm.Show()
 		case "Delete":
 			deleteForm.Show()
+		case manageOpRetime:
+			walkCheck.Show()
 		}
 		// Delete and Retime only ever populate "From" - if the picker was
 		// last left on "To" (e.g. coming from Rename/Move), the visible
@@ -453,7 +463,11 @@ func showManageFiles(s *state) {
 		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {
 			switch op {
 			case manageOpRetime:
-				runManageFilesRetime(s, locs, from)
+				if walkCheck.Checked {
+					runManageFilesRetimeWalk(s, locs, from)
+				} else {
+					runManageFilesRetime(s, locs, from)
+				}
 			case "Delete":
 				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from})
 			default:
@@ -473,6 +487,7 @@ func showManageFiles(s *state) {
 		fromPathError,
 		toForm,
 		deleteForm,
+		walkCheck,
 	)
 
 	// browserSlot stacks both browsers; only the active target's is shown
@@ -527,6 +542,82 @@ func showManageFiles(s *state) {
 // recorder's fix already lands at every one of its destDirs in Sync
 // Recorders.
 func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
+	groups, ok := scanRetimeGroups(s, locs, from)
+	if !ok {
+		return
+	}
+	showManageRetimeReview(s, locs, groups, timestampReviewHost{
+		parentPath:        from,
+		continueLabel:     "Apply Corrections",
+		continueBaseLabel: "Continue",
+		onContinue:        func() { showManageFiles(s) },
+		exitLabel:         "Back Without Applying",
+		onExit:            func() { showManageFiles(s) },
+	})
+}
+
+// runManageFilesRetimeWalk is Retime's "walk deployments" mode: rather than
+// one review across every recorder under from, it finds each deployment
+// directory (a recorder directory's parent - see SCHEMA.md) and reviews
+// them one at a time, with Previous/Next stepping between them. Each step
+// re-scans its own deployment (showRetimeWalkStep), so revisiting one after
+// applying a correction shows the renamed files, and each deployment's
+// consensus date is judged only against its own recorders.
+func runManageFilesRetimeWalk(s *state, locs []syncengine.Location, from string) {
+	groups, ok := scanRetimeGroups(s, locs, from)
+	if !ok {
+		return
+	}
+	seen := map[string]bool{}
+	var deployments []string
+	for _, g := range groups {
+		d := path.Dir(g.group.RelDir)
+		if !seen[d] {
+			seen[d] = true
+			deployments = append(deployments, d)
+		}
+	}
+	sort.Strings(deployments)
+	showRetimeWalkStep(s, locs, deployments, 0)
+}
+
+// showRetimeWalkStep shows the review for deployments[i] - see
+// runManageFilesRetimeWalk.
+func showRetimeWalkStep(s *state, locs []syncengine.Location, deployments []string, i int) {
+	groups, ok := scanRetimeGroups(s, locs, deployments[i])
+	if !ok {
+		return
+	}
+	host := timestampReviewHost{
+		parentPath:        fmt.Sprintf("Deployment %d of %d: %s", i+1, len(deployments), deployments[i]),
+		continueLabel:     "Apply & Finish",
+		continueBaseLabel: "Finish",
+		onContinue:        func() { showManageFiles(s) },
+		exitLabel:         "Back Without Applying",
+		onExit:            func() { showManageFiles(s) },
+		prevLabel:         "Previous",
+		onPrev:            func() { showRetimeWalkStep(s, locs, deployments, i-1) },
+		prevDisabled:      i == 0,
+	}
+	if i+1 < len(deployments) {
+		host.continueLabel = "Apply & Next"
+		host.continueBaseLabel = "Next"
+		host.onContinue = func() { showRetimeWalkStep(s, locs, deployments, i+1) }
+	}
+	showManageRetimeReview(s, locs, groups, host)
+}
+
+// retimeGroup is one recorder directory Retime can check: its files plus
+// its earliest parseable recorded start.
+type retimeGroup struct {
+	group recorder.TimestampGroup
+	start time.Time
+}
+
+// scanRetimeGroups lists from recursively and returns every recorder
+// directory under it with a checkable timestamp naming pattern, or reports
+// why there are none (in a dialog) and returns false.
+func scanRetimeGroups(s *state, locs []syncengine.Location, from string) ([]retimeGroup, bool) {
 	ctx := context.Background()
 	// The listing has to come from an Audio Location: every recorder's
 	// timestamp parser reads and rebuilds that recorder's own audio
@@ -538,7 +629,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	if len(audio) == 0 {
 		dialog.ShowInformation("Select an Audio location",
 			"Retime reads recorder timestamps from audio filenames, so at least one Audio location must be selected. Any Results locations selected alongside it have their matching result files renamed too.", s.win)
-		return
+		return nil, false
 	}
 	// from need not exist at every selected Audio location - mirroring
 	// Rename/Move/Merge's per-Location tolerance, this tries each in order
@@ -565,7 +656,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 		} else {
 			dialog.ShowInformation("Path not found", "\""+from+"\" was not found on any selected Audio location.", s.win)
 		}
-		return
+		return nil, false
 	}
 	relPaths := make([]string, len(entries))
 	for i, e := range entries {
@@ -573,11 +664,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	}
 	groups := recorder.GroupTimestampFiles(relPaths)
 
-	type eligibleGroup struct {
-		group recorder.TimestampGroup
-		start time.Time
-	}
-	var eligible []eligibleGroup
+	var eligible []retimeGroup
 	for _, g := range groups {
 		var start time.Time
 		found := false
@@ -588,15 +675,22 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 			}
 		}
 		if found {
-			eligible = append(eligible, eligibleGroup{g, start})
+			eligible = append(eligible, retimeGroup{g, start})
 		}
 	}
 	if len(eligible) == 0 {
 		dialog.ShowInformation("Nothing to check",
 			"No recorder directories with a checkable timestamp naming pattern were found under "+from+".", s.win)
-		return
+		return nil, false
 	}
+	return eligible, true
+}
 
+// showManageRetimeReview shows the shared review screen for groups, with
+// each confirmed correction applied at every one of locs. host supplies the
+// navigation (labels and destinations); s, win and exitWarning are filled
+// in here.
+func showManageRetimeReview(s *state, locs []syncengine.Location, eligible []retimeGroup, host timestampReviewHost) {
 	tolerance := time.Duration(s.cfg.RecorderSettings.TimestampToleranceMinutes) * time.Minute
 
 	inputs := make([]timestampReviewInput, 0, len(eligible))
@@ -644,17 +738,10 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 
 	reviewRows := buildTimestampReviewRows(inputs, tolerance)
 
-	showTimestampReview(timestampReviewHost{
-		s:                 s,
-		win:               s.win,
-		parentPath:        from,
-		continueLabel:     "Apply Corrections",
-		continueBaseLabel: "Continue",
-		onContinue:        func() { showManageFiles(s) },
-		exitLabel:         "Back Without Applying",
-		exitWarning:       "Going back now will not apply any timestamp corrections - every recorder's files keep their original names.",
-		onExit:            func() { showManageFiles(s) },
-	}, reviewRows, tolerance)
+	host.s = s
+	host.win = s.win
+	host.exitWarning = "Leaving now will not apply any timestamp corrections - every recorder's files keep their original names."
+	showTimestampReview(host, reviewRows, tolerance)
 }
 
 type manageFilesOp int

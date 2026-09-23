@@ -388,6 +388,16 @@ type timestampReviewHost struct {
 	exitWarning string
 	onExit      func()
 
+	// prevLabel/onPrev optionally add a button just left of the right-hand
+	// group that steps back to the previous item in a multi-screen walk
+	// (Manage Files' Retime deployment walk). Like exit, it leaves without
+	// applying anything, so it shares exit's exitWarning confirm when there
+	// is pending work. prevDisabled greys it out on the walk's first step.
+	// Leave prevLabel empty to omit the button.
+	prevLabel    string
+	onPrev       func()
+	prevDisabled bool
+
 	afterFix func(row timestampReviewRow, delta time.Duration)
 }
 
@@ -411,6 +421,8 @@ type timestampReviewScreen struct {
 	// can't be triggered twice or interrupted by leaving mid-apply.
 	applyOnlyBtn *widget.Button
 	exitBtn      *widget.Button
+	// prevBtn exists only when host.prevLabel is set (see showTimestampReview).
+	prevBtn *widget.Button
 	// applyLoading shows while applyFixesAsync's background goroutine is
 	// renaming files (recorder.ApplyTimestampFix) or moving them via rclone
 	// (syncengine.ApplyRenames) - both real I/O, too slow to run on the UI
@@ -529,17 +541,33 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	exitBtn := widget.NewButton(host.exitLabel, nil)
 	exitBtn.Importance = widget.WarningImportance
 	tr.exitBtn = exitBtn
-	exitBtn.OnTapped = func() {
+	// leaveWithoutApplying runs leave straight away when there's nothing to
+	// discard, or after a confirm naming confirmLabel when there is - shared
+	// by exitBtn and prevBtn, the two ways off this screen that skip the
+	// corrections.
+	leaveWithoutApplying := func(confirmLabel string, leave func()) {
 		if !tr.hasPendingChanges() {
-			host.onExit()
+			leave()
 			return
 		}
 		showCautionConfirm("Corrections not applied", host.exitWarning,
-			host.exitLabel, "Return to Review", func(ok bool) {
+			confirmLabel, "Return to Review", func(ok bool) {
 				if ok {
-					host.onExit()
+					leave()
 				}
 			}, host.win)
+	}
+	exitBtn.OnTapped = func() { leaveWithoutApplying(host.exitLabel, host.onExit) }
+
+	var prevBtn *widget.Button
+	if host.prevLabel != "" {
+		prevBtn = widget.NewButtonWithIcon(host.prevLabel, theme.NavigateBackIcon(), func() {
+			leaveWithoutApplying(host.prevLabel, host.onPrev)
+		})
+		if host.prevDisabled {
+			prevBtn.Disable()
+		}
+		tr.prevBtn = prevBtn
 	}
 
 	tr.applyLoading = newLoadingBar()
@@ -562,6 +590,9 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	split.SetOffset(0.3)
 
 	rightBtns := []fyne.CanvasObject{}
+	if prevBtn != nil {
+		rightBtns = append(rightBtns, prevBtn)
+	}
 	if applyOnlyBtn != nil {
 		rightBtns = append(rightBtns, applyOnlyBtn)
 	}
@@ -1034,8 +1065,8 @@ func (tr *timestampReviewScreen) parseFixes() ([]timestampParsedFix, bool) {
 // flight can't be re-triggered by a second tap and the user can't leave
 // mid-apply.
 func (tr *timestampReviewScreen) setButtonsEnabled(enabled bool) {
-	for _, b := range []*widget.Button{tr.continueBtn, tr.applyOnlyBtn, tr.exitBtn} {
-		if b == nil {
+	for _, b := range []*widget.Button{tr.continueBtn, tr.applyOnlyBtn, tr.exitBtn, tr.prevBtn} {
+		if b == nil || (b == tr.prevBtn && tr.host.prevDisabled) {
 			continue
 		}
 		if enabled {
