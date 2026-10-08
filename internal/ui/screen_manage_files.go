@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"image/color"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +15,10 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/cache"
 
 	"github.com/OSU-Bee-Lab/filesync/internal/recorder"
 	"github.com/OSU-Bee-Lab/filesync/internal/syncengine"
@@ -206,12 +209,26 @@ func showManageFiles(s *state) {
 						}
 						return
 					}
-					if notFound || isFile {
+					if isFile {
+						// relPath names a bare file (which has no children) -
+						// show its containing folder instead of a blank
+						// listing at the file's own path, with the file
+						// auto-selected once that folder's listing lands.
+						if gen != b.scanGen {
+							return
+						}
+						dir := path.Dir(relPath)
+						if dir == "." {
+							dir = ""
+						}
+						b.SelectPathAsFile(dir, path.Base(relPath))
+						return
+					}
+					if notFound {
 						// A folder that doesn't exist on any selected Location
-						// yet (naming a new "To" destination) or that names a
-						// bare file (which has no children) is expected, not
-						// an error - show it empty.
-						if b.listingDone(gen, nil, nil, nil) && b.allowCreate && notFound {
+						// yet is expected, not an error (e.g. naming a new
+						// "To" destination) - show it empty.
+						if b.listingDone(gen, nil, nil, nil) && b.allowCreate {
 							b.setBreadcrumbNote(" (new folder)")
 						}
 						return
@@ -282,6 +299,12 @@ func showManageFiles(s *state) {
 	// current text so typing and browsing stay in sync.
 	var setPickerTarget func(target string)
 	setPickerTarget = func(target string) {
+		// Re-listing (NavigateTo -> reload) stops any audio preview
+		// playing in the browser, so only do it when the target is
+		// actually switching From<->To - not just re-focusing the field
+		// that's already active, which would otherwise cut off playback
+		// every time the user clicks back into the "From" box.
+		switching := target != pickerTarget
 		pickerTarget = target
 		s.manageFilesPickerTarget = target
 		pickerHeaderLabel.SetText(target)
@@ -292,7 +315,9 @@ func showManageFiles(s *state) {
 			browserTo.CanvasObject().Hide()
 			browserFrom.CanvasObject().Show()
 		}
-		activeBrowser().NavigateTo(strings.Trim(strings.TrimSpace(targetEntry().Text), "/"))
+		if switching {
+			activeBrowser().NavigateTo(strings.Trim(strings.TrimSpace(targetEntry().Text), "/"))
+		}
 	}
 
 	fromFocusEntry := newFocusEntry(func() { setPickerTarget("From") }, func() { validateFromPath() })
@@ -301,7 +326,6 @@ func showManageFiles(s *state) {
 	toFocusEntry.SetPlaceHolder("experiments/<new name or destination folder>")
 	fromEntry = &fromFocusEntry.Entry
 	toEntry = &toFocusEntry.Entry
-	fromEntry.OnChanged = func(t string) { s.manageFilesFrom = t }
 	toEntry.OnChanged = func(t string) { s.manageFilesTo = t }
 	if s.manageFilesFrom != "" {
 		fromEntry.SetText(s.manageFilesFrom)
@@ -312,9 +336,63 @@ func showManageFiles(s *state) {
 
 	// Each browser mirrors its chosen path (a browsed folder, or a tapped
 	// file) into its own From/To field; "From" also re-validates on change.
+	//
+	// Under Rename/Move/Merge and Delete, "From" file rows carry checkboxes
+	// instead (see setFromChecks), and how many are checked decides what
+	// "From" is: none - the browsed folder, as without checkboxes; one -
+	// that file, still editable, so it can be renamed outright; several -
+	// their shared folder, locked, with the operation narrowed to just the
+	// checked files (syncengine.PlanMoveSelected / PlanDeleteFiles). A move
+	// keeps each file's name beneath "To"; a delete must be confirmed by
+	// typing the folder's path and then every file's name (see
+	// refreshDeleteForm).
+	var refreshDeleteForm func()
+	fromSelNote := widget.NewLabel("")
+	fromSelNote.Wrapping = fyne.TextWrapWord
+	fromSelNote.Hide()
 	browserFrom.OnPathChanged = func(rel string) {
-		fromEntry.SetText(rel)
+		files := browserFrom.SelectedFiles()
+		if browserFrom.checkFiles {
+			s.manageFilesFromFiles = files
+		}
+		switch {
+		case !browserFrom.checkFiles || len(files) == 0:
+			fromEntry.Enable()
+			fromSelNote.Hide()
+			fromEntry.SetText(rel)
+		case len(files) == 1:
+			fromEntry.Enable()
+			fromSelNote.Hide()
+			fromEntry.SetText(files[0])
+		default:
+			fromEntry.SetText(syncengine.CommonDir(files))
+			fromEntry.Disable()
+			if opGroup.Selected == "Delete" {
+				fromSelNote.SetText(fmt.Sprintf("%s checked - to confirm, type this folder's path, then each file's name.", plural(len(files), "file", "")))
+			} else {
+				fromSelNote.SetText(fmt.Sprintf("%s checked - each moves into \"To\" under its own name. Uncheck down to one to rename a single file.", plural(len(files), "file", "")))
+			}
+			fromSelNote.Show()
+		}
+		refreshDeleteForm()
 		validateFromPath()
+	}
+	// setFromChecks turns the "From" browser's file checkboxes on (Rename/
+	// Move/Merge, Delete) or off (Retime, which reviews exactly one path),
+	// dropping any checked files either way.
+	setFromChecks := func(on bool) {
+		if browserFrom.checkFiles == on {
+			return
+		}
+		browserFrom.checkFiles = on
+		browserFrom.multiSelect = on
+		browserFrom.selectFiles = true
+		browserFrom.selectedFile = "" // a single-select pick from the other mode
+		browserFrom.ClearSelectedFiles()
+		s.manageFilesFromFiles = nil
+		s.manageFilesDeleteConfirmFiles = nil
+		fromEntry.Enable()
+		fromSelNote.Hide()
 	}
 	browserTo.OnPathChanged = func(rel string) {
 		toEntry.SetText(rel)
@@ -324,6 +402,9 @@ func showManageFiles(s *state) {
 	// is-a-file path is tolerated by the lister above).
 	fromEntry.OnSubmitted = func(text string) {
 		if pickerTarget == "From" {
+			// A typed path replaces whatever was checked (a typed file
+			// path gets re-checked once its folder lists).
+			browserFrom.ClearSelectedFiles()
 			browserFrom.NavigateTo(text)
 		}
 	}
@@ -372,26 +453,187 @@ func showManageFiles(s *state) {
 	// widget lives in exactly one form/container at a time.
 	fromForm := widget.NewForm(widget.NewFormItem("From", fromFocusEntry))
 	toForm := widget.NewForm(widget.NewFormItem("To", toFocusEntry))
-	deleteForm := widget.NewForm(widget.NewFormItem("Confirm path", deleteConfirmEntry))
+	// Each confirm field's prompt is a confirmTint, turning blue once the
+	// field is typed correctly - and red only when Preview is pressed with
+	// it still wrong, until it's next edited (see recheckDeleteTints and
+	// flagDeleteTints). A plain form-layout grid rather than widget.Form,
+	// whose own labels can't be recolored.
+	deleteConfirmTint := newConfirmTint("Confirm path")
+	deleteForm := container.New(layout.NewFormLayout(), deleteConfirmTint.label, deleteConfirmEntry)
+	// deleteFileEntries are the per-file confirm fields shown beneath
+	// "Confirm folder" once two or more files are checked for Delete - one
+	// per checked file, each to be filled with a checked file's name
+	// (relative to the folder, in any order). Kept, typing and all, while
+	// the checked count doesn't change.
+	var deleteFileEntries []*widget.Entry
+	var deleteFileTints []*confirmTint
+
+	// checkedFiles is the checked-files set an operation narrows to: two or
+	// more checked files, or nil (one checked file is just "From").
+	checkedFiles := func() []string {
+		if files := browserFrom.SelectedFiles(); browserFrom.checkFiles && len(files) > 1 {
+			return files
+		}
+		return nil
+	}
+	// deleteConfirmState checks the confirm fields against what Delete is
+	// about to remove: the exact From path, or - with files checked - the
+	// folder's path plus every checked file's name, each matched once in
+	// any order. It reports the path/folder field and each file field
+	// separately, for the live tints, and whether all of it is confirmed.
+	deleteConfirmState := func(from string, files []string) (pathOK bool, fileOK []bool, all bool) {
+		if len(files) == 0 {
+			pathOK = deleteConfirmEntry.Text == from
+			return pathOK, nil, pathOK
+		}
+		pathOK = strings.Trim(strings.TrimSpace(deleteConfirmEntry.Text), "/") == from
+		want := make(map[string]int, len(files))
+		for _, f := range files {
+			rel := f
+			if from != "" {
+				rel = strings.TrimPrefix(f, from+"/")
+			}
+			want[rel]++
+		}
+		all = pathOK && len(deleteFileEntries) == len(files)
+		fileOK = make([]bool, len(deleteFileEntries))
+		for i, e := range deleteFileEntries {
+			name := strings.TrimSpace(e.Text)
+			if want[name] > 0 {
+				want[name]--
+				fileOK[i] = true
+			} else {
+				all = false
+			}
+		}
+		return pathOK, fileOK, all
+	}
+	recheckDeleteTints := func() {
+		pathOK, fileOK, _ := deleteConfirmState(strings.Trim(strings.TrimSpace(fromEntry.Text), "/"), checkedFiles())
+		deleteConfirmTint.update(pathOK)
+		for i, t := range deleteFileTints {
+			t.update(i < len(fileOK) && fileOK[i])
+		}
+	}
+	// flagDeleteTints marks every confirm field that's still wrong red,
+	// in place of an error dialog, when Preview is pressed unconfirmed.
+	flagDeleteTints := func() {
+		deleteConfirmTint.flagged = true
+		for _, t := range deleteFileTints {
+			t.flagged = true
+		}
+		recheckDeleteTints()
+	}
+	deleteConfirmEntry.OnChanged = func(t string) {
+		s.manageFilesDeleteConfirm = t
+		deleteConfirmTint.flagged = false
+		recheckDeleteTints()
+	}
+	fromEntry.OnChanged = func(t string) {
+		s.manageFilesFrom = t
+		recheckDeleteTints()
+	}
+
+	refreshDeleteForm = func() {
+		n := len(checkedFiles())
+		if n == 0 {
+			deleteConfirmTint.label.SetText("Confirm path")
+			deleteForm.Objects = []fyne.CanvasObject{deleteConfirmTint.label, deleteConfirmEntry}
+			deleteConfirmEntry.SetPlaceHolder("type the exact relative path to confirm")
+			deleteForm.Refresh()
+			recheckDeleteTints()
+			return
+		}
+		if len(deleteFileEntries) != n {
+			saved := s.manageFilesDeleteConfirmFiles
+			if len(saved) != n {
+				saved = nil
+			}
+			deleteFileEntries = make([]*widget.Entry, n)
+			deleteFileTints = make([]*confirmTint, n)
+			for i := range deleteFileEntries {
+				e := widget.NewEntry()
+				e.SetPlaceHolder("type a checked file's name")
+				if saved != nil {
+					e.SetText(saved[i])
+				}
+				i := i
+				e.OnChanged = func(string) {
+					if i < len(deleteFileTints) {
+						deleteFileTints[i].flagged = false
+					}
+					typed := make([]string, len(deleteFileEntries))
+					for j, fe := range deleteFileEntries {
+						typed[j] = fe.Text
+					}
+					s.manageFilesDeleteConfirmFiles = typed
+					recheckDeleteTints()
+				}
+				deleteFileEntries[i] = e
+				deleteFileTints[i] = newConfirmTint(fmt.Sprintf("File %d", i+1))
+			}
+		}
+		deleteConfirmTint.label.SetText("Confirm folder")
+		objs := []fyne.CanvasObject{deleteConfirmTint.label, deleteConfirmEntry}
+		for i, t := range deleteFileTints {
+			objs = append(objs, t.label, deleteFileEntries[i])
+		}
+		deleteConfirmEntry.SetPlaceHolder("type the folder's exact relative path")
+		deleteForm.Objects = objs
+		deleteForm.Refresh()
+		recheckDeleteTints()
+	}
+	// walkCheck switches Retime from one review across everything under
+	// "From" to one review per deployment directory, stepped through with
+	// Previous/Next (see runManageFilesRetimeWalk).
+	walkCheck := widget.NewCheck("Walk deployments one at a time", func(on bool) { s.manageFilesRetimeWalk = on })
+	walkCheck.SetChecked(s.manageFilesRetimeWalk)
 	toForm.Hide()
 	deleteForm.Hide()
+	walkCheck.Hide()
 
 	opGroup.OnChanged = func(v string) {
 		s.manageFilesOp = v
+		setFromChecks(v == "Rename / Move / Merge" || v == "Delete")
+		if len(browserFrom.SelectedFiles()) > 0 {
+			// Still checked from the other checkbox op - re-derive the note
+			// and confirm fields for this one.
+			browserFrom.OnPathChanged(browserFrom.RelPath())
+		} else {
+			refreshDeleteForm()
+		}
 		toForm.Hide()
 		deleteForm.Hide()
+		walkCheck.Hide()
 		switch v {
 		case "Rename / Move / Merge":
 			toForm.Show()
 		case "Delete":
 			deleteForm.Show()
+		case manageOpRetime:
+			walkCheck.Show()
+		}
+		// Delete and Retime only ever populate "From" - if the picker was
+		// last left on "To" (e.g. coming from Rename/Move), the visible
+		// browser pane would otherwise keep driving the now-hidden "To"
+		// field while browsing looks like it's doing nothing to the one
+		// field on screen.
+		if v != "Rename / Move / Merge" && pickerTarget == "To" {
+			setPickerTarget("From")
 		}
 	}
 	initialOp := s.manageFilesOp
 	if initialOp == "" {
 		initialOp = "Rename / Move / Merge"
 	}
+	// Selecting the op (re)builds the checkbox mode and drops any checked
+	// files, so restore the ones cached from before Preview afterward.
+	restoredFiles := s.manageFilesFromFiles
 	opGroup.SetSelected(initialOp)
+	if browserFrom.checkFiles && len(restoredFiles) > 0 {
+		browserFrom.SetSelectedPaths(restoredFiles)
+		s.manageFilesFromFiles = restoredFiles
+	}
 
 	backBtn := widget.NewButton("Back", func() { showHome(s) })
 
@@ -401,13 +643,14 @@ func showManageFiles(s *state) {
 			return
 		}
 		from := strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
-		if from == "" {
+		files := checkedFiles()
+		if from == "" && files == nil {
 			dialog.ShowInformation("Missing path", "Pick or type a \"From\" path first.", s.win)
 			return
 		}
 		op := opGroup.Selected
-		if op == "Delete" && deleteConfirmEntry.Text != from {
-			dialog.ShowInformation("Confirm the path", "Type the exact relative path (\""+from+"\") into the confirm field to preview the delete.", s.win)
+		if _, _, confirmed := deleteConfirmState(from, files); op == "Delete" && !confirmed {
+			flagDeleteTints()
 			return
 		}
 		to := strings.Trim(strings.TrimSpace(toEntry.Text), "/")
@@ -422,27 +665,33 @@ func showManageFiles(s *state) {
 		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {
 			switch op {
 			case manageOpRetime:
-				runManageFilesRetime(s, locs, from)
+				if walkCheck.Checked {
+					runManageFilesRetimeWalk(s, locs, from)
+				} else {
+					runManageFilesRetime(s, locs, from)
+				}
 			case "Delete":
-				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from})
+				showManageFilesPreview(s, manageFilesRequest{op: manageOpDelete, locs: locs, from: from, files: files})
 			default:
-				showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to})
+				showManageFilesPreview(s, manageFilesRequest{op: manageOpMove, locs: locs, from: from, to: to, files: files})
 			}
 		})
 	})
 	previewBtn.Importance = widget.HighImportance
 
-	optionsCol := container.NewVBox(
+	optionsCol := container.NewVScroll(container.NewVBox(
 		widget.NewLabel("Locations to apply this operation to:"),
 		locGroup.CanvasObject(),
 		mirrorWarning,
 		widget.NewSeparator(),
 		opGroup,
 		fromForm,
+		fromSelNote,
 		fromPathError,
 		toForm,
 		deleteForm,
-	)
+		walkCheck,
+	))
 
 	// browserSlot stacks both browsers; only the active target's is shown
 	// (see setPickerTarget).
@@ -462,6 +711,16 @@ func showManageFiles(s *state) {
 		columns,
 	)
 	s.setContent(container.NewPadded(content))
+	// Anchor each browser at its restored From/To path (e.g. coming Back
+	// from Preview or the Retime review) before the first listing, rather
+	// than at experiments/ with the entry still showing the old path. A
+	// path naming a file is re-anchored at its folder by the lister.
+	browserFrom.relPath = strings.Trim(strings.TrimSpace(fromEntry.Text), "/")
+	browserTo.relPath = strings.Trim(strings.TrimSpace(toEntry.Text), "/")
+	if len(browserFrom.SelectedFiles()) > 0 {
+		// Re-derive "From" (and its lock/note) from the restored checks.
+		browserFrom.OnPathChanged(browserFrom.relPath)
+	}
 	// Show the previously-active browser (From, or a restored To) first,
 	// then point both browsers at the current selection and list it
 	// (restoring a persisted Location's picker/warning state -
@@ -490,6 +749,82 @@ func showManageFiles(s *state) {
 // recorder's fix already lands at every one of its destDirs in Sync
 // Recorders.
 func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
+	groups, ok := scanRetimeGroups(s, locs, from)
+	if !ok {
+		return
+	}
+	showManageRetimeReview(s, locs, groups, timestampReviewHost{
+		parentPath:        from,
+		continueLabel:     "Apply Corrections",
+		continueBaseLabel: "Continue",
+		onContinue:        func() { showManageFiles(s) },
+		exitLabel:         "Back Without Applying",
+		onExit:            func() { showManageFiles(s) },
+	})
+}
+
+// runManageFilesRetimeWalk is Retime's "walk deployments" mode: rather than
+// one review across every recorder under from, it finds each deployment
+// directory (a recorder directory's parent - see SCHEMA.md) and reviews
+// them one at a time, with Previous/Next stepping between them. Each step
+// re-scans its own deployment (showRetimeWalkStep), so revisiting one after
+// applying a correction shows the renamed files, and each deployment's
+// consensus date is judged only against its own recorders.
+func runManageFilesRetimeWalk(s *state, locs []syncengine.Location, from string) {
+	groups, ok := scanRetimeGroups(s, locs, from)
+	if !ok {
+		return
+	}
+	seen := map[string]bool{}
+	var deployments []string
+	for _, g := range groups {
+		d := path.Dir(g.group.RelDir)
+		if !seen[d] {
+			seen[d] = true
+			deployments = append(deployments, d)
+		}
+	}
+	sort.Strings(deployments)
+	showRetimeWalkStep(s, locs, deployments, 0)
+}
+
+// showRetimeWalkStep shows the review for deployments[i] - see
+// runManageFilesRetimeWalk.
+func showRetimeWalkStep(s *state, locs []syncengine.Location, deployments []string, i int) {
+	groups, ok := scanRetimeGroups(s, locs, deployments[i])
+	if !ok {
+		return
+	}
+	host := timestampReviewHost{
+		parentPath:        fmt.Sprintf("Deployment %d of %d: %s", i+1, len(deployments), deployments[i]),
+		continueLabel:     "Apply & Finish",
+		continueBaseLabel: "Finish",
+		onContinue:        func() { showManageFiles(s) },
+		exitLabel:         "Back Without Applying",
+		onExit:            func() { showManageFiles(s) },
+		prevLabel:         "Previous",
+		onPrev:            func() { showRetimeWalkStep(s, locs, deployments, i-1) },
+		prevDisabled:      i == 0,
+	}
+	if i+1 < len(deployments) {
+		host.continueLabel = "Apply & Next"
+		host.continueBaseLabel = "Next"
+		host.onContinue = func() { showRetimeWalkStep(s, locs, deployments, i+1) }
+	}
+	showManageRetimeReview(s, locs, groups, host)
+}
+
+// retimeGroup is one recorder directory Retime can check: its files plus
+// its earliest parseable recorded start.
+type retimeGroup struct {
+	group recorder.TimestampGroup
+	start time.Time
+}
+
+// scanRetimeGroups lists from recursively and returns every recorder
+// directory under it with a checkable timestamp naming pattern, or reports
+// why there are none (in a dialog) and returns false.
+func scanRetimeGroups(s *state, locs []syncengine.Location, from string) ([]retimeGroup, bool) {
 	ctx := context.Background()
 	// The listing has to come from an Audio Location: every recorder's
 	// timestamp parser reads and rebuilds that recorder's own audio
@@ -501,7 +836,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	if len(audio) == 0 {
 		dialog.ShowInformation("Select an Audio location",
 			"Retime reads recorder timestamps from audio filenames, so at least one Audio location must be selected. Any Results locations selected alongside it have their matching result files renamed too.", s.win)
-		return
+		return nil, false
 	}
 	// from need not exist at every selected Audio location - mirroring
 	// Rename/Move/Merge's per-Location tolerance, this tries each in order
@@ -528,7 +863,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 		} else {
 			dialog.ShowInformation("Path not found", "\""+from+"\" was not found on any selected Audio location.", s.win)
 		}
-		return
+		return nil, false
 	}
 	relPaths := make([]string, len(entries))
 	for i, e := range entries {
@@ -536,11 +871,7 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 	}
 	groups := recorder.GroupTimestampFiles(relPaths)
 
-	type eligibleGroup struct {
-		group recorder.TimestampGroup
-		start time.Time
-	}
-	var eligible []eligibleGroup
+	var eligible []retimeGroup
 	for _, g := range groups {
 		var start time.Time
 		found := false
@@ -551,15 +882,22 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 			}
 		}
 		if found {
-			eligible = append(eligible, eligibleGroup{g, start})
+			eligible = append(eligible, retimeGroup{g, start})
 		}
 	}
 	if len(eligible) == 0 {
 		dialog.ShowInformation("Nothing to check",
 			"No recorder directories with a checkable timestamp naming pattern were found under "+from+".", s.win)
-		return
+		return nil, false
 	}
+	return eligible, true
+}
 
+// showManageRetimeReview shows the shared review screen for groups, with
+// each confirmed correction applied at every one of locs. host supplies the
+// navigation (labels and destinations); s, win and exitWarning are filled
+// in here.
+func showManageRetimeReview(s *state, locs []syncengine.Location, eligible []retimeGroup, host timestampReviewHost) {
 	tolerance := time.Duration(s.cfg.RecorderSettings.TimestampToleranceMinutes) * time.Minute
 
 	inputs := make([]timestampReviewInput, 0, len(eligible))
@@ -596,6 +934,10 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 						firstErr = err
 					}
 				}
+				// See the cache.Clear() note beside Manage Files' own
+				// ApplyMove/ApplyDelete call - these renames can equally
+				// leave a stale cached Fs behind.
+				cache.Clear()
 				return firstErr
 			},
 		})
@@ -603,17 +945,10 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 
 	reviewRows := buildTimestampReviewRows(inputs, tolerance)
 
-	showTimestampReview(timestampReviewHost{
-		s:                 s,
-		win:               s.win,
-		parentPath:        from,
-		continueLabel:     "Apply Corrections",
-		continueBaseLabel: "Continue",
-		onContinue:        func() { showManageFiles(s) },
-		exitLabel:         "Back Without Applying",
-		exitWarning:       "Going back now will not apply any timestamp corrections - every recorder's files keep their original names.",
-		onExit:            func() { showManageFiles(s) },
-	}, reviewRows, tolerance)
+	host.s = s
+	host.win = s.win
+	host.exitWarning = "Leaving now will not apply any timestamp corrections - every recorder's files keep their original names."
+	showTimestampReview(host, reviewRows, tolerance)
 }
 
 type manageFilesOp int
@@ -631,6 +966,19 @@ type manageFilesRequest struct {
 	locs []syncengine.Location
 	from string
 	to   string // only used for manageOpMove
+	// files narrows a move to just these checked files under from (their
+	// shared folder) - see syncengine.PlanMoveSelected. nil moves all of
+	// from.
+	files []string
+}
+
+// fromLabel names what's being moved or deleted, for titles and prompts:
+// the From path, or "N files in <from>" for a checked-files move.
+func (r manageFilesRequest) fromLabel() string {
+	if len(r.files) == 0 {
+		return r.from
+	}
+	return fmt.Sprintf("%s in %s", plural(len(r.files), "file", ""), "experiments/"+r.from)
 }
 
 // manageFilesLocPlan is one Location's computed plan: the raw
@@ -865,12 +1213,12 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 	// previewTitle and applyingTitle both name the exact operation - the
 	// only difference is the verb - so the header reads the same way
 	// before and during Apply, just swapping "Preview" for "Applying".
-	previewTitle := "Preview: " + req.from + " → " + req.to
-	applyingTitle := "Applying: " + req.from + " → " + req.to
+	previewTitle := "Preview: " + req.fromLabel() + " → " + req.to
+	applyingTitle := "Applying: " + req.fromLabel() + " → " + req.to
 	verb := "moved"
 	if req.op == manageOpDelete {
-		previewTitle = "Preview: DELETE " + req.from
-		applyingTitle = "Applying: DELETE " + req.from
+		previewTitle = "Preview: DELETE " + req.fromLabel()
+		applyingTitle = "Applying: DELETE " + req.fromLabel()
 		verb = "permanently deleted"
 	}
 	titleLabel := widget.NewLabelWithStyle(previewTitle, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
@@ -989,7 +1337,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 		foldList.Refresh()
 		fileList.Refresh()
 
-		locs, op, from, to := req.locs, req.op, req.from, req.to
+		locs, op, from, to, files := req.locs, req.op, req.from, req.to, req.files
 		go func() {
 			ctx := context.Background()
 			results := make([]managePlanCompute, len(locs))
@@ -1004,14 +1352,26 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					c := managePlanCompute{loc: loc}
 					switch op {
 					case manageOpMove:
-						plan, err := syncengine.PlanMove(ctx, loc, from, to)
+						var plan syncengine.MovePlan
+						var err error
+						if len(files) > 0 {
+							plan, err = syncengine.PlanMoveSelected(ctx, loc, from, to, files)
+						} else {
+							plan, err = syncengine.PlanMove(ctx, loc, from, to)
+						}
 						if err != nil {
 							c.err = err
 							break
 						}
 						c.move = &plan
 					case manageOpDelete:
-						plan, err := syncengine.PlanDelete(ctx, loc, from)
+						var plan syncengine.DeletePlan
+						var err error
+						if len(files) > 0 {
+							plan, err = syncengine.PlanDeleteFiles(ctx, loc, files)
+						} else {
+							plan, err = syncengine.PlanDelete(ctx, loc, from)
+						}
 						if err != nil {
 							c.err = err
 							break
@@ -1100,7 +1460,7 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 	}
 	buildPlans()
 
-	collisionsBtn.OnTapped = func() { showManageCollisionsDialog(s.win, plans, req.from, req.to) }
+	collisionsBtn.OnTapped = func() { showManageCollisionsDialog(s.win, plans, req.fromLabel(), req.to) }
 
 	foldFilesSplit := container.NewHSplit(
 		createColumn("Folders", foldList),
@@ -1174,7 +1534,11 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 						case manageOpMove:
 							err = syncengine.ApplyMove(ctx, t.loc, *t.move, t.resolutions)
 						case manageOpDelete:
-							err = syncengine.ApplyDelete(ctx, t.loc, req.from)
+							if len(req.files) > 0 {
+								err = syncengine.ApplyDeleteFiles(ctx, t.loc, req.files)
+							} else {
+								err = syncengine.ApplyDelete(ctx, t.loc, req.from)
+							}
 						}
 						if err != nil {
 							errs[i] = t.loc.Name + ": " + err.Error()
@@ -1182,6 +1546,16 @@ func showManageFilesPreview(s *state, req manageFilesRequest) {
 					}()
 				}
 				wg.Wait()
+				// rclone's fs cache pins an fs.Fs per spec string across
+				// this browser's whole session (see internal/syncengine's
+				// cache.Get call sites); a rename/move/delete just applied
+				// here can turn a cached directory Fs stale (rooted at a
+				// path that's now a file, or gone), which otherwise
+				// surfaces as a raw readdir error ("not a directory")
+				// instead of Manage Files' own not-found/is-a-file
+				// handling next time that path is browsed. Clearing after
+				// every apply keeps that from lingering.
+				cache.Clear()
 				var failed []string
 				for _, e := range errs {
 					if e != "" {

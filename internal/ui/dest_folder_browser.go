@@ -84,12 +84,23 @@ type destFolderBrowser struct {
 	// when multiSelect is off.
 	selectedFile string
 
+	// pendingSelectFile names a file to auto-select once the in-flight
+	// listing (started by SelectPathAsFile, re-anchored at that file's
+	// containing folder) lands - see SelectPathAsFile.
+	pendingSelectFile string
+
 	// multiSelect switches selectFile from replacing selectedFile to
 	// toggling membership in selectedFiles, letting a caller (Pull Files)
 	// gather files from more than one folder into one destination
-	// preview. Off for every other selectFiles call site (Manage Files'
-	// move/delete needs exactly one target).
+	// preview. Manage Files turns it on (with checkFiles) for Rename/Move
+	// only; its Delete and Retime need exactly one target.
 	multiSelect bool
+
+	// checkFiles puts a checkbox beside every file row, toggling the same
+	// selectedFiles membership a row tap does - Manage Files' Rename/Move,
+	// where a selection's size decides what "From" means (see
+	// showManageFiles). Only meaningful with multiSelect on.
+	checkFiles bool
 
 	// selectedFiles holds full relative paths (relPath+name, unlike
 	// selectedFile's bare name) of every file picked while multiSelect is
@@ -189,7 +200,10 @@ func newDestFolderBrowser(win fyne.Window, allowCreate bool) *destFolderBrowser 
 		func() fyne.CanvasObject {
 			entry := widget.NewEntry()
 			entry.Hide()
-			return audioRow(container.NewStack(widget.NewButton("", nil), entry), newPresenceIndicator())
+			check := widget.NewCheck("", nil)
+			check.Hide()
+			content := container.NewBorder(nil, nil, check, nil, container.NewStack(widget.NewButton("", nil), entry))
+			return audioRow(content, newPresenceIndicator())
 		},
 		func(id widget.ListItemID, obj fyne.CanvasObject) { b.updateRow(id, obj) },
 	)
@@ -270,6 +284,21 @@ func (b *destFolderBrowser) SetSelectedFiles(names []string) {
 	b.list.Refresh()
 }
 
+// SetSelectedPaths replaces the multiSelect selection with full relative
+// paths (SelectedFiles' own form) - e.g. Manage Files restoring a checked
+// set across a round trip through Preview, where the files may sit in
+// different folders.
+func (b *destFolderBrowser) SetSelectedPaths(paths []string) {
+	b.selectedFiles = nil
+	if len(paths) > 0 {
+		b.selectedFiles = make(map[string]bool, len(paths))
+		for _, p := range paths {
+			b.selectedFiles[p] = true
+		}
+	}
+	b.list.Refresh()
+}
+
 // NavigateTo re-anchors the browser at relPath and re-lists it, as if the
 // user had browsed there - used when an external field (Manage Files' typed
 // From/To entry, or a target switch) is the source of truth for where to
@@ -279,6 +308,23 @@ func (b *destFolderBrowser) NavigateTo(relPath string) {
 	b.closeAddFolder()
 	b.reload()
 	b.notifyPathChanged()
+}
+
+// SelectPathAsFile re-anchors the browser at dirPath (the containing
+// folder) and, once that folder's listing lands, auto-selects name within
+// it - used when a typed/navigated path names a file rather than a folder
+// (e.g. Manage Files' "From" naming an individual file to move/delete), so
+// the preview shows that file highlighted in its folder instead of a blank
+// listing at the file's own (childless) path.
+func (b *destFolderBrowser) SelectPathAsFile(dirPath, name string) {
+	b.relPath = strings.Trim(strings.TrimSpace(dirPath), "/")
+	b.closeAddFolder()
+	b.pendingSelectFile = name
+	b.reload()
+	// notifyPathChanged fires once the pending selection lands (from
+	// listingDone) rather than here - RelPath() needs selectedFile set
+	// first, or the caller's From/To field would be overwritten with just
+	// dirPath, dropping the file name the user typed.
 }
 
 // selectFile is a file row's tap handler when selectFiles is on. In
@@ -409,9 +455,16 @@ func (b *destFolderBrowser) fileLabel(e syncengine.Entry) string {
 
 func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObject) {
 	row := obj.(*fyne.Container)
-	stack := row.Objects[0].(*fyne.Container)
+	// row.Objects[0] is the Border built in newDestFolderBrowser: the
+	// button/entry stack in the center plus the file checkbox on the left
+	// (NewBorder lists its center objects first, then the edges).
+	content := row.Objects[0].(*fyne.Container)
+	stack := content.Objects[0].(*fyne.Container)
+	check := content.Objects[1].(*widget.Check)
 	btn := stack.Objects[0].(*widget.Button)
 	entry := stack.Objects[1].(*widget.Entry)
+	check.OnChanged = nil
+	check.Hide()
 	audioControls := audioControlsFrom(row)
 	presence := presenceFrom(row)
 
@@ -460,7 +513,15 @@ func (b *destFolderBrowser) updateRow(id widget.ListItemID, obj fyne.CanvasObjec
 			if b.multiSelect {
 				selected = b.selectedFiles[joinRel(b.relPath, name)]
 			}
-			if selected {
+			if b.checkFiles && b.multiSelect {
+				check.SetChecked(selected)
+				check.OnChanged = func(bool) { b.selectFile(name) }
+				check.Show()
+			}
+			if selected && b.checkFiles {
+				btn.Importance = widget.HighImportance
+				btn.SetText("\U0001F4C4 " + label)
+			} else if selected {
 				btn.Importance = widget.HighImportance
 				btn.SetText("✅ " + label)
 			} else {
@@ -569,6 +630,27 @@ func (b *destFolderBrowser) listingDone(gen int, entries []syncengine.Entry, pre
 	b.entries = entries
 	b.presence = pres
 	b.loaded = loaded
+	if b.pendingSelectFile != "" {
+		want := b.pendingSelectFile
+		b.pendingSelectFile = ""
+		for _, e := range entries {
+			if !e.IsDir && e.Name == want {
+				if b.multiSelect {
+					if b.selectedFiles == nil {
+						b.selectedFiles = make(map[string]bool)
+					}
+					b.selectedFiles[joinRel(b.relPath, want)] = true
+				} else {
+					b.selectedFile = want
+				}
+				break
+			}
+		}
+		b.list.Refresh()
+		b.loading.Hide()
+		b.notifyPathChanged()
+		return true
+	}
 	b.list.Refresh()
 	b.loading.Hide()
 	return true

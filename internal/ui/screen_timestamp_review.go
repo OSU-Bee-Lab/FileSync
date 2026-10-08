@@ -388,6 +388,16 @@ type timestampReviewHost struct {
 	exitWarning string
 	onExit      func()
 
+	// prevLabel/onPrev optionally add a button just left of the right-hand
+	// group that steps back to the previous item in a multi-screen walk
+	// (Manage Files' Retime deployment walk). Like exit, it leaves without
+	// applying anything, so it shares exit's exitWarning confirm when there
+	// is pending work. prevDisabled greys it out on the walk's first step.
+	// Leave prevLabel empty to omit the button.
+	prevLabel    string
+	onPrev       func()
+	prevDisabled bool
+
 	afterFix func(row timestampReviewRow, delta time.Duration)
 }
 
@@ -411,6 +421,8 @@ type timestampReviewScreen struct {
 	// can't be triggered twice or interrupted by leaving mid-apply.
 	applyOnlyBtn *widget.Button
 	exitBtn      *widget.Button
+	// prevBtn exists only when host.prevLabel is set (see showTimestampReview).
+	prevBtn *widget.Button
 	// applyLoading shows while applyFixesAsync's background goroutine is
 	// renaming files (recorder.ApplyTimestampFix) or moving them via rclone
 	// (syncengine.ApplyRenames) - both real I/O, too slow to run on the UI
@@ -511,9 +523,12 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	// exitBtn leaves without applying any of the corrections being reviewed
 	// here, same as bypassing the check entirely - it deliberately calls
 	// host.onExit directly, not applyAndContinue or host.onContinue, neither
-	// of which it wants to run. Warns first, since it's easy to tap without
-	// registering that anything typed into the review is about to be
-	// discarded.
+	// of which it wants to run. It only warns (and only carries the
+	// "Without Applying" wording) when there's actually something at stake -
+	// a recorder still flagged as off, or a fix the user readied (checked
+	// "New start time" on) but hasn't applied yet. A clean review with
+	// nothing touched has nothing to discard, so it's plain "Back" with no
+	// confirm - see refreshExitBtn.
 	//
 	// Amber, not red: both buttons on this screen land in the same place
 	// (Sync Recorders ends the session either way, Manage Files returns to
@@ -523,16 +538,37 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	// deletes anything - so the labels carry the distinction (the host
 	// supplies both, and must phrase them as the same destination with and
 	// without the corrections) and the color just marks discarded work.
-	exitBtn := widget.NewButton(host.exitLabel, func() {
-		showCautionConfirm("Corrections not applied", host.exitWarning,
-			host.exitLabel, "Return to Review", func(ok bool) {
-				if ok {
-					host.onExit()
-				}
-			}, host.win)
-	})
+	exitBtn := widget.NewButton(host.exitLabel, nil)
 	exitBtn.Importance = widget.WarningImportance
 	tr.exitBtn = exitBtn
+	// leaveWithoutApplying runs leave straight away when there's nothing to
+	// discard, or after a confirm naming confirmLabel when there is - shared
+	// by exitBtn and prevBtn, the two ways off this screen that skip the
+	// corrections.
+	leaveWithoutApplying := func(confirmLabel string, leave func()) {
+		if !tr.hasPendingChanges() {
+			leave()
+			return
+		}
+		showCautionConfirm("Corrections not applied", host.exitWarning,
+			confirmLabel, "Return to Review", func(ok bool) {
+				if ok {
+					leave()
+				}
+			}, host.win)
+	}
+	exitBtn.OnTapped = func() { leaveWithoutApplying(host.exitLabel, host.onExit) }
+
+	var prevBtn *widget.Button
+	if host.prevLabel != "" {
+		prevBtn = widget.NewButtonWithIcon(host.prevLabel, theme.NavigateBackIcon(), func() {
+			leaveWithoutApplying(host.prevLabel, host.onPrev)
+		})
+		if host.prevDisabled {
+			prevBtn.Disable()
+		}
+		tr.prevBtn = prevBtn
+	}
 
 	tr.applyLoading = newLoadingBar()
 
@@ -554,6 +590,9 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	split.SetOffset(0.3)
 
 	rightBtns := []fyne.CanvasObject{}
+	if prevBtn != nil {
+		rightBtns = append(rightBtns, prevBtn)
+	}
 	if applyOnlyBtn != nil {
 		rightBtns = append(rightBtns, applyOnlyBtn)
 	}
@@ -663,6 +702,7 @@ func (tr *timestampReviewScreen) refreshCard(i int) {
 	tr.cards[i].FillColor = timestampCardColorFor(check, e.adjust)
 	tr.cards[i].Refresh()
 	tr.cardLabels[i].SetText(timestampIssueDetail(check, tr.tolerance))
+	tr.refreshExitBtn()
 }
 
 // refreshSummary restates how many recorders currently look off. An all-clear
@@ -670,6 +710,7 @@ func (tr *timestampReviewScreen) refreshCard(i int) {
 // "nothing to do" rather than an unexplained list); otherwise it names the
 // count that need a look.
 func (tr *timestampReviewScreen) refreshSummary() {
+	tr.refreshExitBtn()
 	if tr.summaryLbl == nil {
 		return
 	}
@@ -689,6 +730,35 @@ func (tr *timestampReviewScreen) refreshSummary() {
 		verb = "looks"
 	}
 	tr.summaryLbl.SetText(fmt.Sprintf("%d of %d %s %s off (highlighted) — review each and set a new start time where needed.", flagged, total, pluralWord(total, "recorder", ""), verb))
+}
+
+// hasPendingChanges reports whether exiting now would discard anything: a
+// recorder still flagged as off at the live tolerance, or one whose "New
+// start time" is checked (a fix readied) whether or not it currently
+// resolves the flag - both are work the user would lose by leaving without
+// applying.
+func (tr *timestampReviewScreen) hasPendingChanges() bool {
+	for _, e := range tr.entries {
+		if e.adjust || tr.effectiveCheck(e).Suspicious {
+			return true
+		}
+	}
+	return false
+}
+
+// refreshExitBtn keeps the exit button's wording matched to
+// hasPendingChanges: "Back" when there's nothing to lose, host.exitLabel
+// ("Back Without Applying") once there is - called everywhere an edit,
+// checkbox, or the tolerance slider could change that verdict.
+func (tr *timestampReviewScreen) refreshExitBtn() {
+	if tr.exitBtn == nil {
+		return
+	}
+	if tr.hasPendingChanges() {
+		tr.exitBtn.SetText(tr.host.exitLabel)
+	} else {
+		tr.exitBtn.SetText("Back")
+	}
 }
 
 // refreshContinueLabel switches the continue button between
@@ -995,8 +1065,8 @@ func (tr *timestampReviewScreen) parseFixes() ([]timestampParsedFix, bool) {
 // flight can't be re-triggered by a second tap and the user can't leave
 // mid-apply.
 func (tr *timestampReviewScreen) setButtonsEnabled(enabled bool) {
-	for _, b := range []*widget.Button{tr.continueBtn, tr.applyOnlyBtn, tr.exitBtn} {
-		if b == nil {
+	for _, b := range []*widget.Button{tr.continueBtn, tr.applyOnlyBtn, tr.exitBtn, tr.prevBtn} {
+		if b == nil || (b == tr.prevBtn && tr.host.prevDisabled) {
 			continue
 		}
 		if enabled {

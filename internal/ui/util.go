@@ -705,3 +705,38 @@ func (g *toggleGroup) Selected() []string {
 }
 
 func (g *toggleGroup) CanvasObject() fyne.CanvasObject { return g.root }
+
+// confirmTint is a confirm field's prompt label (see Manage Files' delete
+// confirmation), colored to show whether what's typed beside it is right:
+// blue (primary) once it's correct, normal while it isn't, and red only
+// once a submit (Preview) has flagged it - never while still typing. Blue
+// rather than green for correct, so correct/wrong don't hinge on red/green
+// perception, and to match the app's blue affirmative buttons.
+type confirmTint struct {
+	label   *widget.Label
+	flagged bool
+}
+
+func newConfirmTint(prompt string) *confirmTint {
+	return &confirmTint{label: widget.NewLabelWithStyle(prompt, fyne.TextAlignTrailing, fyne.TextStyle{Bold: true})}
+}
+
+// update recolors the prompt for its field's current correctness: blue
+// when correct (which also clears any flag), red when wrong and flagged by
+// a submit, otherwise normal.
+func (c *confirmTint) update(correct bool) {
+	if correct {
+		c.flagged = false
+	}
+	imp := widget.MediumImportance
+	switch {
+	case correct:
+		imp = widget.HighImportance
+	case c.flagged:
+		imp = widget.DangerImportance
+	}
+	if c.label.Importance != imp {
+		c.label.Importance = imp
+		c.label.Refresh()
+	}
+}

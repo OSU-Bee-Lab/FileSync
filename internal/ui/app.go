@@ -89,6 +89,15 @@ type state struct {
 	manageFilesTo            string
 	manageFilesDeleteConfirm string
 	manageFilesPickerTarget  string
+	// manageFilesFromFiles caches the files checked in the "From" browser
+	// under Rename/Move/Merge (full relative paths), the same way.
+	manageFilesFromFiles []string
+	// manageFilesDeleteConfirmFiles caches the per-file delete confirm
+	// fields shown when several files are checked for Delete.
+	manageFilesDeleteConfirmFiles []string
+	// manageFilesRetimeWalk caches Retime's "Walk deployments one at a
+	// time" checkbox the same way.
+	manageFilesRetimeWalk bool
 
 	// availableUpdate holds the result of the GitHub release check kicked
 	// off in Run, once it completes - nil until then, and nil forever if
