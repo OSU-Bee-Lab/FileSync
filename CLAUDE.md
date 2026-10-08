@@ -76,7 +76,8 @@ option to scan experiments).
   by the project owner.
 - This never-delete rule scopes to rclone/cloud destinations only. It does
   not cover `internal/recorder`'s recorder-side deletion: once a file has
-  been copied off a recorder (Sony ICD-PX370, Olympus VN-541PC, ...) and
+  been copied off a recorder (Sony ICD-PX370, Olympus VN-541PC, AudioMoth,
+  ...) and
   verified byte-for-byte, deleting it from the recorder's own storage is
   intentional and user-toggleable (`RecorderSettings.AutoDeleteAfterVerify`)
   — it's how a recorder gets reset for reuse in the field, not data loss.
@@ -99,6 +100,7 @@ option to scan experiments).
   including permanent deletion. It is user-driven, not automatic —
   reachable only from the main menu, only after the user browses to or
   types the exact path, previews the final state, resolves any collisions,
-  and (for delete) types the exact relative path plus confirms an
-  irreversible-action prompt. Like N-way conflict deletion, it must never
+  and (for delete) types the exact relative path — or, with several files
+  checked, the shared folder's exact path and then every checked file's
+  name — plus confirms an irreversible-action prompt. Like N-way conflict deletion, it must never
   trigger automatically or as a side effect of a scan/sync operation.

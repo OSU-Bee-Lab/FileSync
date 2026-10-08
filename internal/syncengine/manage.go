@@ -156,6 +156,10 @@ type MovePlan struct {
 	// to rclone as one directory rename instead of a move per file - see the
 	// fast path there.
 	DstRoot string
+	// dstHadEntries records that DstRoot already held files when planned,
+	// which rules out renaming SrcRoot's children into it wholesale (a
+	// directory rename can't merge into an existing directory).
+	dstHadEntries bool
 }
 
 // PlanMove lists everything under srcRelPath and computes each file's new
@@ -220,7 +224,14 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 		effectiveDst = path.Join(dstRelPath, path.Base(srcRelPath))
 	}
 
-	plan := MovePlan{SrcRoot: srcRelPath, DstRoot: effectiveDst}
+	plan := MovePlan{SrcRoot: srcRelPath, DstRoot: effectiveDst, dstHadEntries: len(dstEntries) > 0}
+	// Moving a directory into one of its own subdirectories ("2026-07-20"
+	// -> "2026-07-20/griffith") can't be a single directory rename - no
+	// backend can move a folder inside itself (SharePoint/OneDrive answers
+	// invalidRequest) - so it's applied per file instead, and anything
+	// already under the destination stays out of the plan rather than
+	// being nested one level deeper into itself.
+	intoSelf := !srcIsFile && isUnder(effectiveDst, srcRelPath)
 	if srcIsFile {
 		plan.DstRoot = ""
 		// Cleanup only ever Rmdirs a directory - SrcRoot must be the file's
@@ -231,11 +242,54 @@ func PlanMove(ctx context.Context, loc Location, srcRelPath, dstRelPath string) 
 		}
 	}
 	for _, e := range entries {
+		if intoSelf && isUnder(e.RelPath, effectiveDst) {
+			continue
+		}
 		suffix := strings.TrimPrefix(strings.TrimPrefix(e.RelPath, srcRelPath), "/")
 		dst := path.Join(effectiveDst, suffix)
 		plan.Moves = append(plan.Moves, PlannedMove{SrcRelPath: e.RelPath, DstRelPath: dst, Size: e.Size})
 		if existing[dst] {
 			plan.Collisions = append(plan.Collisions, dst)
+		}
+	}
+	return plan, nil
+}
+
+// PlanMoveSelected is PlanMove from srcDir to dstDir, narrowed to just
+// files (paths relative to the Location root, under srcDir) - Manage Files'
+// multi-file move, where the user checks several files and "From" becomes
+// their shared folder. Each kept file lands at the same path beneath dstDir
+// that it had beneath srcDir, exactly as in PlanMove, so moving checked
+// files out of a recorder directory into a new one keeps their names. At a
+// Results Location, each audio path also matches its result file (see
+// resultsLeaf), since that tree is listed under its own names.
+//
+// The plan is always applied file by file, and SrcRoot is left empty so
+// ApplyMove's cleanup never removes a directory under srcDir the user
+// didn't touch - a source directory emptied by the move stays behind.
+func PlanMoveSelected(ctx context.Context, loc Location, srcDir, dstDir string, files []string) (MovePlan, error) {
+	full, err := PlanMove(ctx, loc, srcDir, dstDir)
+	if err != nil {
+		return MovePlan{}, err
+	}
+	keep := make(map[string]bool, len(files)*2)
+	for _, f := range files {
+		keep[f] = true
+		if loc.Role == RoleResults {
+			keep[resultsLeaf(f)] = true
+		}
+	}
+	plan := MovePlan{}
+	kept := map[string]bool{}
+	for _, m := range full.Moves {
+		if keep[m.SrcRelPath] && m.SrcRelPath != m.DstRelPath {
+			plan.Moves = append(plan.Moves, m)
+			kept[m.DstRelPath] = true
+		}
+	}
+	for _, c := range full.Collisions {
+		if kept[c] {
+			plan.Collisions = append(plan.Collisions, c)
 		}
 	}
 	return plan, nil
@@ -278,8 +332,11 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 	if err != nil {
 		return err
 	}
-	if plan.SrcRoot != "" && plan.DstRoot != "" && len(plan.Collisions) == 0 {
+	if plan.SrcRoot != "" && plan.DstRoot != "" && len(plan.Collisions) == 0 && !isUnder(plan.DstRoot, plan.SrcRoot) {
 		return moveWholeDir(ctx, f, loc, plan.SrcRoot, plan.DstRoot)
+	}
+	if plan.SrcRoot != "" && path.Dir(plan.DstRoot) == plan.SrcRoot && len(plan.Collisions) == 0 && !plan.dstHadEntries {
+		return moveChildrenIntoSubdir(ctx, f, loc, plan.SrcRoot, plan.DstRoot)
 	}
 	collides := make(map[string]bool, len(plan.Collisions))
 	for _, c := range plan.Collisions {
@@ -332,6 +389,49 @@ func ApplyMove(ctx context.Context, loc Location, plan MovePlan, resolutions map
 		}
 	}
 	return nil
+}
+
+// moveChildrenIntoSubdir moves everything directly inside srcRoot into
+// dstRoot, a new (or empty) immediate subdirectory of srcRoot - the
+// "2026-07-20" -> "2026-07-20/griffith" case, which can't be a single
+// directory rename. Renaming each immediate child (a recorder directory via
+// moveWholeDir, a loose file via MoveFile) keeps it to one server-side call
+// per child rather than one per file, which on SharePoint/OneDrive is the
+// difference between a handful of API calls and hundreds.
+func moveChildrenIntoSubdir(ctx context.Context, f fs.Fs, loc Location, srcRoot, dstRoot string) error {
+	children, err := f.List(ctx, srcRoot)
+	if err != nil {
+		return fmt.Errorf("listing %s at %s: %w", srcRoot, loc.Name, err)
+	}
+	if err := operations.Mkdir(ctx, f, dstRoot); err != nil {
+		return fmt.Errorf("creating %s at %s: %w", dstRoot, loc.Name, err)
+	}
+	for _, c := range children {
+		if c.Remote() == dstRoot {
+			continue
+		}
+		dst := path.Join(dstRoot, path.Base(c.Remote()))
+		switch c := c.(type) {
+		case fs.Directory:
+			if err := moveWholeDir(ctx, f, loc, c.Remote(), dst); err != nil {
+				return err
+			}
+		case fs.Object:
+			if _, err := operations.Move(ctx, f, nil, dst, c); err != nil {
+				return fmt.Errorf("moving %s to %s at %s: %w", c.Remote(), dst, loc.Name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// isUnder reports whether p is a strict descendant of dir (both relative
+// paths within one Location).
+func isUnder(p, dir string) bool {
+	if dir == "" {
+		return p != ""
+	}
+	return strings.HasPrefix(p, dir+"/")
 }
 
 // moveWholeDir renames srcRoot to dstRoot at f in one operation.
@@ -446,6 +546,45 @@ func ApplyDelete(ctx context.Context, loc Location, relPath string) error {
 	}
 	if err := operations.Purge(ctx, dirFs, ""); err != nil {
 		return fmt.Errorf("deleting %s at %s: %w", relPath, loc.Name, err)
+	}
+	return nil
+}
+
+// PlanDeleteFiles is PlanDelete for several individual files at once -
+// Manage Files' checked-files delete. A file missing at this Location is
+// skipped rather than failing the plan, the same per-Location tolerance a
+// move has; each path must name a file (never a directory), matching
+// ApplyDeleteFiles.
+func PlanDeleteFiles(ctx context.Context, loc Location, files []string) (DeletePlan, error) {
+	var plan DeletePlan
+	for _, f := range files {
+		relPath, _ := resolveResultsLeaf(ctx, loc, f)
+		if size, ok := singleFileSize(ctx, loc, relPath); ok {
+			plan.Entries = append(plan.Entries, ManageEntry{RelPath: relPath, Size: size})
+		}
+	}
+	return plan, nil
+}
+
+// ApplyDeleteFiles permanently deletes each of files at loc - the checked-
+// files counterpart of ApplyDelete, under the same CLAUDE.md exception and
+// gating (here: typing the shared folder's path plus every file's name).
+// Unlike ApplyDelete it only ever deletes single files: a path that isn't
+// a file at loc is skipped, never treated as a directory to purge.
+func ApplyDeleteFiles(ctx context.Context, loc Location, files []string) error {
+	f, err := cache.Get(ctx, loc.rcloneSpec())
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		relPath, _ := resolveResultsLeaf(ctx, loc, file)
+		obj, err := f.NewObject(ctx, relPath)
+		if err != nil {
+			continue
+		}
+		if err := operations.DeleteFile(ctx, obj); err != nil {
+			return fmt.Errorf("deleting %s at %s: %w", relPath, loc.Name, err)
+		}
 	}
 	return nil
 }

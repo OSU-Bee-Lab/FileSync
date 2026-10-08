@@ -344,3 +344,131 @@ func TestApplyRenames_ResultsRole_CascadesRetimeStyleRename(t *testing.T) {
 		t.Errorf("renamed csv missing or wrong content: %q, err=%v", data, err)
 	}
 }
+
+func TestApplyMove_DirectoryIntoOwnSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/metadata.csv"), "meta")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/r1/260720_0751.mp3"), "audio")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/griffith/already.mp3"), "there")
+
+	plan, err := PlanMove(context.Background(), loc, "exp/2026-07-20", "exp/2026-07-20/griffith")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 2 {
+		t.Fatalf("got %d planned moves, want 2 (destination's own files excluded): %+v", len(plan.Moves), plan.Moves)
+	}
+	if err := ApplyMove(context.Background(), loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"metadata.csv", "r1/260720_0751.mp3", "already.mp3"} {
+		if _, err := os.Stat(filepath.Join(root, "exp/2026-07-20/griffith", p)); err != nil {
+			t.Errorf("expected griffith/%s: %v", p, err)
+		}
+	}
+	for _, p := range []string{"metadata.csv", "r1"} {
+		if _, err := os.Stat(filepath.Join(root, "exp/2026-07-20", p)); !os.IsNotExist(err) {
+			t.Errorf("expected %s to be gone from the source, stat err = %v", p, err)
+		}
+	}
+}
+
+func TestApplyMove_DirectoryIntoNewOwnSubdirectory(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/metadata.csv"), "meta")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/r1/260720_0751.mp3"), "audio")
+	writeFile(t, filepath.Join(root, "exp/2026-07-20/r2/sub/260720_0800.mp3"), "audio2")
+
+	plan, err := PlanMove(context.Background(), loc, "exp/2026-07-20", "exp/2026-07-20/griffith")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyMove(context.Background(), loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"metadata.csv", "r1/260720_0751.mp3", "r2/sub/260720_0800.mp3"} {
+		if _, err := os.Stat(filepath.Join(root, "exp/2026-07-20/griffith", p)); err != nil {
+			t.Errorf("expected griffith/%s: %v", p, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(root, "exp/2026-07-20"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "griffith" {
+		t.Errorf("expected only griffith left in the source, got %v", entries)
+	}
+}
+
+// Checking several files in one recorder directory and moving them to a new
+// sibling moves just those files, keeping their names, and leaves the rest
+// (and the source directory) in place.
+func TestPlanMoveSelected_MovesOnlyCheckedFilesKeepingNames(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/8/a.mp3"), "a")
+	writeFile(t, filepath.Join(root, "exp/8/b.mp3"), "b")
+	writeFile(t, filepath.Join(root, "exp/8/c.mp3"), "c")
+	writeFile(t, filepath.Join(root, "exp/8b/c.mp3"), "other c")
+
+	ctx := context.Background()
+	plan, err := PlanMoveSelected(ctx, loc, "exp/8", "exp/8b", []string{"exp/8/a.mp3", "exp/8/c.mp3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Moves) != 2 {
+		t.Fatalf("got %d planned moves, want 2: %+v", len(plan.Moves), plan.Moves)
+	}
+	if len(plan.Collisions) != 1 || plan.Collisions[0] != "exp/8b/c.mp3" {
+		t.Fatalf("collisions = %+v, want [exp/8b/c.mp3]", plan.Collisions)
+	}
+	if err := ApplyMove(ctx, loc, plan, nil); err != nil {
+		t.Fatal(err)
+	}
+	for p, want := range map[string]string{
+		"exp/8b/a.mp3": "a",       // moved
+		"exp/8/b.mp3":  "b",       // not checked
+		"exp/8/c.mp3":  "c",       // collision skipped by default
+		"exp/8b/c.mp3": "other c", // untouched
+	} {
+		if data, err := os.ReadFile(filepath.Join(root, p)); err != nil || string(data) != want {
+			t.Errorf("%s = %q, err=%v; want %q", p, data, err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "exp/8/a.mp3")); !os.IsNotExist(err) {
+		t.Errorf("exp/8/a.mp3 should have moved, stat err=%v", err)
+	}
+}
+
+// A checked-files delete removes exactly the named files, skips one that
+// isn't there, and never purges a directory named in the list.
+func TestApplyDeleteFiles_DeletesOnlyNamedFiles(t *testing.T) {
+	root := t.TempDir()
+	loc := Location{ID: "loc", Name: "MyLocation", Kind: LocationLocal, RootPath: root}
+	writeFile(t, filepath.Join(root, "exp/8/a.mp3"), "a")
+	writeFile(t, filepath.Join(root, "exp/8/b.mp3"), "b")
+	writeFile(t, filepath.Join(root, "exp/8/sub/c.mp3"), "c")
+
+	ctx := context.Background()
+	files := []string{"exp/8/a.mp3", "exp/8/missing.mp3", "exp/8/sub"}
+	plan, err := PlanDeleteFiles(ctx, loc, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Entries) != 1 || plan.Entries[0].RelPath != "exp/8/a.mp3" {
+		t.Fatalf("plan = %+v, want just exp/8/a.mp3", plan.Entries)
+	}
+	if err := ApplyDeleteFiles(ctx, loc, files); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "exp/8/a.mp3")); !os.IsNotExist(err) {
+		t.Errorf("a.mp3 should be deleted, stat err=%v", err)
+	}
+	for _, p := range []string{"exp/8/b.mp3", "exp/8/sub/c.mp3"} {
+		if _, err := os.Stat(filepath.Join(root, p)); err != nil {
+			t.Errorf("%s should survive: %v", p, err)
+		}
+	}
+}

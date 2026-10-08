@@ -1,5 +1,5 @@
 // Package recorder handles offloading files from field recorders (Sony
-// ICD-PX370, Olympus VN-541PC, etc.) onto local disk. smartcopy.go is a
+// ICD-PX370, Olympus VN-541PC, AudioMoth, etc.) onto local disk. smartcopy.go is a
 // faithful port of the filesync project's files.py: a resumable,
 // verified byte-copy so an interrupted transfer picks up where it left
 // off instead of restarting, and destination files are only ever trusted
@@ -246,7 +246,13 @@ type CopyProgress struct {
 // getting silently retried — against a source path that may no longer point
 // at the same physical device.
 func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progress *CopyProgress) error {
-	const chunkSize = 4096 * 256
+	// chunkSize is the read/write unit of the copy loop at the bottom of
+	// this function. 4 MiB measured fastest on an AudioMoth card copying
+	// several files at once (offload.go's worker pool): 1 MiB left the
+	// device short of its sequential read speed and 8 MiB was markedly
+	// worse. Copied one file at a time, chunk size makes no difference at
+	// all — it only matters once several copies are in flight.
+	const chunkSize = 4 << 20
 
 	fileSource, err := os.Open(sourcePath)
 	if err != nil {
@@ -392,7 +398,17 @@ func smartcopy(ctx context.Context, sourcePath string, destPaths []string, progr
 		}
 	}
 
-	buf := make([]byte, chunkSize)
+	// Size the buffer to what's actually left to copy, not blindly to
+	// chunkSize. offload.go runs several copies at once and a sync session
+	// may have ten recorders going, so these buffers are live
+	// simultaneously; a recorder whose recordings are a few hundred KB
+	// (the Sony's are) would otherwise hold a 4 MiB buffer per in-flight
+	// file to copy a fraction of it.
+	bufSize := int64(chunkSize)
+	if remaining := sizeSource - pickupByte; remaining > 0 && remaining < bufSize {
+		bufSize = remaining
+	}
+	buf := make([]byte, bufSize)
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
