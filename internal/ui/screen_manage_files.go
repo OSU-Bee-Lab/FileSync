@@ -423,10 +423,13 @@ func showManageFiles(s *state) {
 		activeBrowser().reload()
 	}
 
-	persistLocSelection := func(sel []string) {
+	saveLocSelection := func(sel []string) {
 		s.cfg.ManageFilesLocationIDs = idsFromLocations(locationsFromNamesAny(s.cfg.Locations, sel))
 		s.saveConfig()
 		updateMirrorWarning()
+	}
+	persistLocSelection := func(sel []string) {
+		saveLocSelection(sel)
 		// Changing which Locations the operation applies to shouldn't disturb
 		// the already-typed/browsed From/To paths - just re-list the (possibly
 		// new) reference Location at the current path.
@@ -434,18 +437,15 @@ func showManageFiles(s *state) {
 	}
 
 	locGroup.OnChanged = func(sel []string) {
-		persistLocSelection(sel)
+		saveLocSelection(sel)
 		// Catch an unplugged local drive right away, at selection time,
 		// rather than letting it surface later as an opaque "directory not
 		// found" error - same entrypoint (checkLocationsReady) Sync
-		// Experiments and Sync Recorders use.
-		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {})
-	}
-	// Catch a Location that's already missing when the screen opens (e.g.
-	// persisted from a previous session but its drive is unplugged now),
-	// not just once the user touches locGroup.
-	if len(locGroup.Selected()) > 0 {
-		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) {})
+		// Experiments and Sync Recorders use. The browsers are only
+		// re-listed once the selection resolves, so a drive reconnected from
+		// the not-found prompt gets listed (presence pips included) rather
+		// than keeping the listing taken while it was unplugged.
+		checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) { setLocs() })
 	}
 
 	// "From" is always shown; only the operation-specific second field
@@ -586,11 +586,27 @@ func showManageFiles(s *state) {
 	// walkCheck switches Retime from one review across everything under
 	// "From" to one review per deployment directory, stepped through with
 	// Previous/Next (see runManageFilesRetimeWalk).
-	walkCheck := widget.NewCheck("Walk deployments one at a time", func(on bool) { s.manageFilesRetimeWalk = on })
+	// skipCleanCheck, only offered while walking, leaves out every
+	// deployment whose recorders all already line up, so the walk only
+	// stops where there's something to correct.
+	skipCleanCheck := widget.NewCheck("Skip deployments that look correct", func(on bool) { s.manageFilesRetimeSkipClean = on })
+	skipCleanCheck.SetChecked(s.manageFilesRetimeSkipClean)
+	walkCheck := widget.NewCheck("Walk deployments one at a time", func(on bool) {
+		s.manageFilesRetimeWalk = on
+		if on {
+			skipCleanCheck.Show()
+		} else {
+			skipCleanCheck.Hide()
+		}
+	})
 	walkCheck.SetChecked(s.manageFilesRetimeWalk)
+	if !walkCheck.Checked {
+		skipCleanCheck.Hide()
+	}
+	retimeOpts := container.NewVBox(walkCheck, skipCleanCheck)
 	toForm.Hide()
 	deleteForm.Hide()
-	walkCheck.Hide()
+	retimeOpts.Hide()
 
 	opGroup.OnChanged = func(v string) {
 		s.manageFilesOp = v
@@ -604,14 +620,14 @@ func showManageFiles(s *state) {
 		}
 		toForm.Hide()
 		deleteForm.Hide()
-		walkCheck.Hide()
+		retimeOpts.Hide()
 		switch v {
 		case "Rename / Move / Merge":
 			toForm.Show()
 		case "Delete":
 			deleteForm.Show()
 		case manageOpRetime:
-			walkCheck.Show()
+			retimeOpts.Show()
 		}
 		// Delete and Retime only ever populate "From" - if the picker was
 		// last left on "To" (e.g. coming from Rename/Move), the visible
@@ -666,7 +682,7 @@ func showManageFiles(s *state) {
 			switch op {
 			case manageOpRetime:
 				if walkCheck.Checked {
-					runManageFilesRetimeWalk(s, locs, from)
+					runManageFilesRetimeWalk(s, locs, from, skipCleanCheck.Checked)
 				} else {
 					runManageFilesRetime(s, locs, from)
 				}
@@ -690,7 +706,7 @@ func showManageFiles(s *state) {
 		fromPathError,
 		toForm,
 		deleteForm,
-		walkCheck,
+		retimeOpts,
 	))
 
 	// browserSlot stacks both browsers; only the active target's is shown
@@ -727,10 +743,16 @@ func showManageFiles(s *state) {
 	// locGroup.OnChanged only fires on a user click, not the initial
 	// selection newToggleGroup was constructed with).
 	setPickerTarget(pickerTarget)
-	if len(locGroup.Selected()) > 0 {
-		updateMirrorWarning()
+	if len(locGroup.Selected()) == 0 {
+		setLocs()
+		return
 	}
-	setLocs()
+	updateMirrorWarning()
+	// Catch a Location that's already missing when the screen opens (e.g.
+	// persisted from a previous session but its drive is unplugged now),
+	// not just once the user touches locGroup - listing only once it
+	// resolves, as locGroup.OnChanged does.
+	checkLocationsReady(s, locGroup, persistLocSelection, func(locs []syncengine.Location) { setLocs() })
 }
 
 // runManageFilesRetime is the Retime operation (see manageOpRetime): it
@@ -769,22 +791,46 @@ func runManageFilesRetime(s *state, locs []syncengine.Location, from string) {
 // them one at a time, with Previous/Next stepping between them. Each step
 // re-scans its own deployment (showRetimeWalkStep), so revisiting one after
 // applying a correction shows the renamed files, and each deployment's
-// consensus date is judged only against its own recorders.
-func runManageFilesRetimeWalk(s *state, locs []syncengine.Location, from string) {
+// consensus date is judged only against its own recorders. With skipClean,
+// deployments whose recorders all already line up are left out of the walk
+// - judged from this one up-front scan, exactly as their own step would
+// judge them, without re-listing each.
+func runManageFilesRetimeWalk(s *state, locs []syncengine.Location, from string, skipClean bool) {
 	groups, ok := scanRetimeGroups(s, locs, from)
 	if !ok {
 		return
 	}
-	seen := map[string]bool{}
+	byDeployment := map[string][]retimeGroup{}
 	var deployments []string
 	for _, g := range groups {
 		d := path.Dir(g.group.RelDir)
-		if !seen[d] {
-			seen[d] = true
+		if _, seen := byDeployment[d]; !seen {
 			deployments = append(deployments, d)
 		}
+		byDeployment[d] = append(byDeployment[d], g)
 	}
 	sort.Strings(deployments)
+	if skipClean {
+		tolerance := retimeTolerance(s)
+		flagged := deployments[:0:0]
+		for _, d := range deployments {
+			for _, row := range buildTimestampReviewRows(retimeReviewInputs(locs, byDeployment[d]), tolerance) {
+				if row.check.Suspicious {
+					flagged = append(flagged, d)
+					break
+				}
+			}
+		}
+		if len(flagged) == 0 {
+			msg := fmt.Sprintf("All %d deployments under %s look correct - nothing to review.", len(deployments), from)
+			if len(deployments) == 1 {
+				msg = "The one deployment under " + from + " looks correct - nothing to review."
+			}
+			dialog.ShowInformation("Nothing to correct", msg, s.win)
+			return
+		}
+		deployments = flagged
+	}
 	showRetimeWalkStep(s, locs, deployments, 0)
 }
 
@@ -898,8 +944,25 @@ func scanRetimeGroups(s *state, locs []syncengine.Location, from string) ([]reti
 // navigation (labels and destinations); s, win and exitWarning are filled
 // in here.
 func showManageRetimeReview(s *state, locs []syncengine.Location, eligible []retimeGroup, host timestampReviewHost) {
-	tolerance := time.Duration(s.cfg.RecorderSettings.TimestampToleranceMinutes) * time.Minute
+	tolerance := retimeTolerance(s)
+	reviewRows := buildTimestampReviewRows(retimeReviewInputs(locs, eligible), tolerance)
 
+	host.s = s
+	host.win = s.win
+	host.exitWarning = "Leaving now will not apply any timestamp corrections - every recorder's files keep their original names."
+	showTimestampReview(host, reviewRows, tolerance)
+}
+
+// retimeTolerance is the configured recorder start-time tolerance Retime
+// judges against.
+func retimeTolerance(s *state) time.Duration {
+	return time.Duration(s.cfg.RecorderSettings.TimestampToleranceMinutes) * time.Minute
+}
+
+// retimeReviewInputs turns Retime's recorder groups into the shared retime
+// pathway's inputs, with each confirmed correction applied at every one of
+// locs.
+func retimeReviewInputs(locs []syncengine.Location, eligible []retimeGroup) []timestampReviewInput {
 	inputs := make([]timestampReviewInput, 0, len(eligible))
 	for _, e := range eligible {
 		group := e.group
@@ -942,13 +1005,7 @@ func showManageRetimeReview(s *state, locs []syncengine.Location, eligible []ret
 			},
 		})
 	}
-
-	reviewRows := buildTimestampReviewRows(inputs, tolerance)
-
-	host.s = s
-	host.win = s.win
-	host.exitWarning = "Leaving now will not apply any timestamp corrections - every recorder's files keep their original names."
-	showTimestampReview(host, reviewRows, tolerance)
+	return inputs
 }
 
 type manageFilesOp int

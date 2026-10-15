@@ -341,10 +341,13 @@ func showSyncExperimentsOneWay(s *state) {
 
 	locGroup.OnChanged = func(sel []string) {
 		setToNames(sel)
-		browser.SetLocations(selectedLocs())
 		updateSyncEnabled()
 		updateDestLabel()
-		checkDstMissing(func() {})
+		// List only once every selected destination resolves, so a drive
+		// reconnected from the not-found prompt is listed (presence pips
+		// included) rather than left showing the listing taken while it was
+		// unplugged.
+		checkDstMissing(func() { browser.SetLocations(selectedLocs()) })
 	}
 	if len(locGroup.Selected()) > 0 {
 		browser.relPath = s.syncOneWayToRelPath

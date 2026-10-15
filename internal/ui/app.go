@@ -98,6 +98,9 @@ type state struct {
 	// manageFilesRetimeWalk caches Retime's "Walk deployments one at a
 	// time" checkbox the same way.
 	manageFilesRetimeWalk bool
+	// manageFilesRetimeSkipClean caches the walk's "Skip deployments that
+	// look correct" checkbox the same way.
+	manageFilesRetimeSkipClean bool
 
 	// availableUpdate holds the result of the GitHub release check kicked
 	// off in Run, once it completes - nil until then, and nil forever if
