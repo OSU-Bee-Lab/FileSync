@@ -846,11 +846,16 @@ func showRetimeWalkStep(s *state, locs []syncengine.Location, deployments []stri
 		continueLabel:     "Apply & Finish",
 		continueBaseLabel: "Finish",
 		onContinue:        func() { showManageFiles(s) },
-		exitLabel:         "Back Without Applying",
-		onExit:            func() { showManageFiles(s) },
-		prevLabel:         "Previous",
-		onPrev:            func() { showRetimeWalkStep(s, locs, deployments, i-1) },
-		prevDisabled:      i == 0,
+		// Earlier steps may already have applied their corrections, so
+		// leaving only discards this deployment's - say so, rather than
+		// "Back Without Applying", which reads as undoing the whole walk.
+		exitLabel:     "Discard & End Walk",
+		exitBaseLabel: "End Walk",
+		exitWarning:   "Ending the walk now will not apply this deployment's corrections - its recorders' files keep their original names. Corrections already applied to other deployments stay applied.",
+		onExit:        func() { showManageFiles(s) },
+		prevLabel:     "Previous",
+		onPrev:        func() { showRetimeWalkStep(s, locs, deployments, i-1) },
+		prevDisabled:  i == 0,
 	}
 	if i+1 < len(deployments) {
 		host.continueLabel = "Apply & Next"
@@ -949,7 +954,9 @@ func showManageRetimeReview(s *state, locs []syncengine.Location, eligible []ret
 
 	host.s = s
 	host.win = s.win
-	host.exitWarning = "Leaving now will not apply any timestamp corrections - every recorder's files keep their original names."
+	if host.exitWarning == "" {
+		host.exitWarning = "Leaving now will not apply any timestamp corrections - every recorder's files keep their original names."
+	}
 	showTimestampReview(host, reviewRows, tolerance)
 }
 

@@ -387,12 +387,18 @@ type timestampReviewHost struct {
 	exitLabel   string
 	exitWarning string
 	onExit      func()
+	// exitBaseLabel names the exit button when there's nothing to discard
+	// (see refreshExitBtn); empty means "Back". A walk sets its own, since
+	// earlier steps may already have applied corrections and plain "Back"
+	// would undersell leaving the whole walk.
+	exitBaseLabel string
 
 	// prevLabel/onPrev optionally add a button just left of the right-hand
 	// group that steps back to the previous item in a multi-screen walk
-	// (Manage Files' Retime deployment walk). Like exit, it leaves without
-	// applying anything, so it shares exit's exitWarning confirm when there
-	// is pending work. prevDisabled greys it out on the walk's first step.
+	// (Manage Files' Retime deployment walk). It leaves without applying
+	// anything but, unlike exit, never confirms: the step it lands on is
+	// still part of the walk, and coming back to this one re-flags anything
+	// left unapplied. prevDisabled greys it out on the walk's first step.
 	// Leave prevLabel empty to omit the button.
 	prevLabel    string
 	onPrev       func()
@@ -541,29 +547,24 @@ func showTimestampReview(host timestampReviewHost, rows []timestampReviewRow, to
 	exitBtn := widget.NewButton(host.exitLabel, nil)
 	exitBtn.Importance = widget.WarningImportance
 	tr.exitBtn = exitBtn
-	// leaveWithoutApplying runs leave straight away when there's nothing to
-	// discard, or after a confirm naming confirmLabel when there is - shared
-	// by exitBtn and prevBtn, the two ways off this screen that skip the
-	// corrections.
-	leaveWithoutApplying := func(confirmLabel string, leave func()) {
+	// exitBtn leaves straight away when there's nothing to discard, or
+	// after a confirm when there is.
+	exitBtn.OnTapped = func() {
 		if !tr.hasPendingChanges() {
-			leave()
+			host.onExit()
 			return
 		}
 		showCautionConfirm("Corrections not applied", host.exitWarning,
-			confirmLabel, "Return to Review", func(ok bool) {
+			host.exitLabel, "Return to Review", func(ok bool) {
 				if ok {
-					leave()
+					host.onExit()
 				}
 			}, host.win)
 	}
-	exitBtn.OnTapped = func() { leaveWithoutApplying(host.exitLabel, host.onExit) }
 
 	var prevBtn *widget.Button
 	if host.prevLabel != "" {
-		prevBtn = widget.NewButtonWithIcon(host.prevLabel, theme.NavigateBackIcon(), func() {
-			leaveWithoutApplying(host.prevLabel, host.onPrev)
-		})
+		prevBtn = widget.NewButtonWithIcon(host.prevLabel, theme.NavigateBackIcon(), host.onPrev)
 		if host.prevDisabled {
 			prevBtn.Disable()
 		}
@@ -747,15 +748,18 @@ func (tr *timestampReviewScreen) hasPendingChanges() bool {
 }
 
 // refreshExitBtn keeps the exit button's wording matched to
-// hasPendingChanges: "Back" when there's nothing to lose, host.exitLabel
-// ("Back Without Applying") once there is - called everywhere an edit,
-// checkbox, or the tolerance slider could change that verdict.
+// hasPendingChanges: host.exitBaseLabel ("Back" by default) when there's
+// nothing to lose, host.exitLabel ("Back Without Applying") once there is -
+// called everywhere an edit, checkbox, or the tolerance slider could change
+// that verdict.
 func (tr *timestampReviewScreen) refreshExitBtn() {
 	if tr.exitBtn == nil {
 		return
 	}
 	if tr.hasPendingChanges() {
 		tr.exitBtn.SetText(tr.host.exitLabel)
+	} else if tr.host.exitBaseLabel != "" {
+		tr.exitBtn.SetText(tr.host.exitBaseLabel)
 	} else {
 		tr.exitBtn.SetText("Back")
 	}
